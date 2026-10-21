@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 WarcraftXL
+//
+// The Component domain: seams on CCharacterComponent, the client's character appearance -- what
+// a player, a dressed NPC or an interface copy of one wears.
+//
+// None raises an event: each hands the change to the watchers of wxl.m2, which only a runtime
+// that can drive the models publishes.
+
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including component.def"
+#endif
+#ifndef WXL_SEAM_BEFORE
+#error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including component.def"
+#endif
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including component.def"
+#endif
+
+// Puts an item display on one item slot of the appearance: the head, shoulder and quiver models
+// it attaches itself, the cloak, and for every other slot the textures painted on the body.
+// AddItemBySlot and AddItemByType reach it through the overload taking a display id, which
+// looks the row up first. After is where the client's own models for the slot hang on the
+// character model, and the appearance records the display on the slot. thiscall.
+WXL_SEAM_AFTER(Component, AddItem, "CCharacterComponent::AddItem@0x004F2640", void, thiscall, (void* self, int32_t item_slot, const void* display_rec, int32_t item_visual))
+
+// Takes the item display off one item slot. Before is where the appearance still records the
+// display on the slot and its models still hang on the character model. thiscall.
+WXL_SEAM_BEFORE(Component, RemoveItem, "CCharacterComponent::RemoveItem", void, thiscall, (void* self, int32_t item_slot))
+
+// Gives an appearance back to the component heap, with its character model reference. Before is
+// the last moment it is whole. A class static: cdecl.
+WXL_SEAM_BEFORE(Component, FreeComponent, "CCharacterComponent::FreeComponent", void, cdecl, (void* component))
+
+// Strips a character model of its spell and effect attachments (points 12, 15-25, 29, 34, 35, 38),
+// on the copies the character panel, portraits and character select draw. Those points are also
+// where wxl.m2 hangs collection pieces (19), chest pieces (34) and cloaks (12): Before records the
+// models wxl.m2 made, and copies of them, on `model`; After hangs them back. A class static: cdecl.
+WXL_SEAM(Component, RemoveVisuals, "CCharacterComponent::RemoveVisuals", void, cdecl, (void* model))

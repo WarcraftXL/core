@@ -27,6 +27,7 @@ namespace wxl::core::objects
         wxl_object_type Type(void* object) const override;
         bool            Name(void* object, const char*& out, uint32_t& size) const override;
         bool            UnitTarget(void* object, wxl_guid& out) const override;
+        bool            UnitReaction(void* unit, void* other, uint32_t& out) const override;
         void*           LocalPlayer() const override;
 
 #define WXL_OBJECT_FIELD(kinds, member, Method, type)     \

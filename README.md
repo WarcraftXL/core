@@ -146,6 +146,8 @@ What a mod can reach **today**, by build:
 | `wxl.script` (the client's Lua) | yes: the client's own `lua_*` and `FrameScript_*` called at resolved addresses | yes: through the script rows of the binding |
 | `wxl.storage` | yes: exists, size, read, open/read_at/close, mount_archive | the same |
 | `wxl.data` | yes: a client database served from a mod's own file | the same |
+| `wxl.gx` (the D3D9 device, model batches) | no | yes: the device and the batches `M2.DrawBatch` hands over |
+| `wxl.m2file` (model files as the loader reads them) | no | yes: the file at the four `M2` loader seams, memory an M2 array can reach, the shadow pass's bone animation |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -248,6 +250,11 @@ source. Everything else observes.
 | `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world |
 | `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
+| `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | nothing: after, the batch the device just drew is handed to the watchers of `wxl.gx`, with everything it was drawn with still bound |
+| `M2.LoadSucceededCallback` | `CM2Shared::LoadSucceededCallback(void* param)`, a model file read whole | nothing: before, the unparsed bytes are handed to the watchers of `wxl.m2file`, which may rewrite and shorten them or refuse the file |
+| `M2.Initialize` | `CM2Shared::Initialize()`, a parsed model made ready | nothing: before, the parsed model is handed to the watchers of `wxl.m2file`, ahead of its skin profile's choice and its textures |
+| `M2.InitializeSkinProfile` | `CM2Shared::InitializeSkinProfile()`, a parsed skin profile sized for drawing | nothing: before, the model and its skin profile are handed to the watchers of `wxl.m2file` |
+| `M2.FinishLoadingLowPrioritySequence` | `CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequence_index, uint8_t* buffer, uint32_t size)`, an external sequence file parsed against its model | nothing: before, the sequence's unparsed bytes are handed to the watchers of `wxl.m2file` |
 | `Spell.Packet_Group_30` | `Packet_Group_30(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_SPELL_START` and `SMSG_SPELL_GO` | `SpellCastStart` or `SpellCastGo` before, by the opcode, read off the message before the client parses it: the caster, the object target, the cast time or the hit and miss counts |
 | `Spell.Packet_SMSG_SPELL_FAILURE` | `Packet_SMSG_SPELL_FAILURE(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)` | `SpellCastInterrupted` before, for any caster in view, with the reason the server sent |
 | `Spell.SpellFailed` | `Spell_C_SpellFailed(PendingSpellCast* cast, const SpellRec* spell, int32_t reason, int32_t misc1, int32_t misc2, bool reset_cooldown)` | `SpellCastFailed` before: the local player's cast refused by the server or by the client's own checks |

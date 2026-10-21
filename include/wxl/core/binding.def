@@ -82,6 +82,7 @@
 #include "wxl/core/binding/storage.def"
 #include "wxl/core/binding/gx.def"
 #include "wxl/core/binding/spell.def"
+#include "wxl/core/binding/m2.def"
 
 #ifdef WXL_BINDING_FIELD_DEFAULTED
     #undef WXL_BINDING_FIELD

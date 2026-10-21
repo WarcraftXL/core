@@ -11,11 +11,17 @@
 #include "runtime/Core.hpp"
 #include "seams/Table.hpp"
 #include "services/DataService.hpp"
+#include "services/GxService.hpp"
+#include "services/M2FileService.hpp"
+#include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/StorageService.hpp"
 
 #include "wxl/services/object.h"
 #include "wxl/services/data.h"
+#include "wxl/services/gx.h"
+#include "wxl/services/m2.h"
+#include "wxl/services/m2file.h"
 #include "wxl/services/script.h"
 #include "wxl/services/storage.h"
 
@@ -53,6 +59,9 @@ namespace wxl::core::attachment
             { WXL_SCRIPT_SERVICE, WXL_SCRIPT_SERVICE_VERSION, &services::ScriptApi() },
             { WXL_STORAGE_SERVICE, WXL_STORAGE_SERVICE_VERSION, &services::StorageApi() },
             { WXL_DATA_SERVICE, WXL_DATA_SERVICE_VERSION, &services::DataApi() },
+            { WXL_GX_SERVICE, WXL_GX_SERVICE_VERSION, &services::GxApi() },
+            { WXL_M2_SERVICE, WXL_M2_SERVICE_VERSION, &services::M2Api() },
+            { WXL_M2FILE_SERVICE, WXL_M2FILE_SERVICE_VERSION, &services::M2FileApi() },
         };
     }
 

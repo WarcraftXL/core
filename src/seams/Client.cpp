@@ -10,6 +10,8 @@
 #include "runtime/Core.hpp"
 #include "runtime/Stages.hpp"
 #include "services/DataService.hpp"
+#include "services/M2FileService.hpp"
+#include "services/M2Service.hpp"
 #include "services/StorageService.hpp"
 
 #include "wxl/host/mod_host.hpp"
@@ -32,6 +34,8 @@ namespace wxl::seam::Client::Destroy
         wxl::core::attachment::ReleaseAll();
         wxl::core::services::storage::CloseEverything();
         wxl::core::services::data::Clear();
+        wxl::core::services::m2::Clear();
+        wxl::core::services::m2file::Clear();
 
         host->UnloadAll();
         WLOG_INFO(wxl::core::kTag, "mods unloaded; the client is on its own from here");

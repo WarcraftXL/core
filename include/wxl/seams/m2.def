@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 WarcraftXL
+//
+// The M2 domain: seams on the model renderer and the model loader.
+
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including m2.def"
+#endif
+#ifndef WXL_SEAM_BEFORE
+#error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including m2.def"
+#endif
+
+// Draws one batch of a model: sets its material, textures and bones, then issues the device's
+// draw. CM2SceneRender::Draw calls it for every element of type 0, the plain batches every
+// creature, player and doodad model is made of. After is where the batch is drawn and everything
+// it was drawn with is still bound; it raises no event, it hands the batch to the watchers of
+// wxl.gx, which only a runtime with the device to hand them publishes.
+WXL_SEAM_AFTER(M2, DrawBatch, "CM2SceneRender::DrawBatch", void, thiscall, (void* self))
+
+// Animates one model for the frame: its bones' sequences, then every bone's matrix in view space,
+// then colours, lights, ribbons, particles and its attachments, which it animates in turn. Runs on
+// the scene's animate threads, two at once. After is called once the bones are posed -- before
+// what reads them, the ribbons, particles and attachments -- and at the return taken for a model
+// that has not loaded or was animated this frame already; it hands nothing on, it poses the bones
+// of a model wxl.m2 attached to follow its parent's. thiscall.
+WXL_SEAM_AFTER(M2, AnimateMT, "CM2Model::AnimateMT", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+
+// The same for a model with one bone, one sequence and nothing else to animate, which the client
+// flags at load and animates here instead: its one bone matrix is the model's transform. After is
+// called once that bone is set, and at the early return. thiscall.
+WXL_SEAM_AFTER(M2, AnimateMTSimple, "CM2Model::AnimateMTSimple", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+
+// The model loader. A model file is read whole, then CM2Shared::FinishLoading (inlined into this
+// callback) parses it in place, initializes it -- skin profile chosen and requested, textures
+// made -- and the skin profile, read in turn, is parsed and sized for drawing. These four seams
+// raise no event: each hands the file, at that point, to the watchers of wxl.m2file, which only a
+// runtime that sees the loader publishes. They are how a mod teaches the client a model format.
+
+// The model file has been read and nothing has parsed it: param is the CM2Shared. Before, the
+// watchers may rewrite its bytes in place and shorten it, or refuse it. A class static: cdecl.
+WXL_SEAM_BEFORE(M2, LoadSucceededCallback, "CM2Shared::LoadSucceededCallback", void, cdecl, (void* param))
+
+// The model has been parsed -- its arrays resolved to self-relative offsets -- and nothing has
+// been made from it. Before, the watchers may point its arrays at memory of their own (texture
+// names, lookups) ahead of the skin profile's choice and the textures' creation. thiscall.
+WXL_SEAM_BEFORE(M2, Initialize, "CM2Shared::Initialize", int32_t, thiscall, (void* self))
+
+// The skin profile has been parsed; the client is about to copy its submeshes and size the
+// batches' effects from it. Before, the watchers may replace its batches, submeshes and the
+// model's lookups. thiscall.
+WXL_SEAM_BEFORE(M2, InitializeSkinProfile, "CM2Shared::InitializeSkinProfile", int32_t, thiscall, (void* self))
+
+// An external sequence file has been read and is about to be parsed against the model, once for
+// the sequence and once for each that shares its keys. Before, the watchers may rewrite its bytes
+// in place. thiscall.
+WXL_SEAM_BEFORE(M2, FinishLoadingLowPrioritySequence, "CM2Shared::FinishLoadingLowPrioritySequence@0x0083C6E0", int32_t, thiscall, (void* self, uint32_t sequence_index, uint8_t* buffer, uint32_t size))

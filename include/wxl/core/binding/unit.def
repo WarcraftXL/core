@@ -15,6 +15,10 @@ WXL_BINDING_FIELD_VIA(unit_max_health, uint32_t, CGUnit_C, m_unit, CGUnitData, m
 WXL_BINDING_FIELD_VIA(unit_level, uint32_t, CGUnit_C, m_unit, CGUnitData, m_unitFieldLevel, 0)
 WXL_BINDING_FIELD_VIA(unit_target, uint64_t, CGUnit_C, m_unit, CGUnitData, m_unitFieldTarget, 0)
 
+// How one unit regards another: CGUnit_C::UnitReaction, 0-1 hostile, 2-3 neutral, 4-7 friendly.
+// -1 where the client cannot be asked.
+WXL_BINDING(unit_reaction, int32_t, (const void* unit, const void* other), (unit, other), -1)
+
 WXL_BINDING_FIELD_VIA_INDEX(unit_power, uint32_t, CGUnit_C, m_unit, CGUnitData, m_unitFieldPower)
 WXL_BINDING_FIELD_VIA_INDEX(unit_max_power, uint32_t, CGUnit_C, m_unit, CGUnitData, m_unitFieldMaxpower)
 

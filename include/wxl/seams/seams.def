@@ -83,6 +83,8 @@
 #include "wxl/seams/spell.def"
 #include "wxl/seams/item.def"
 #include "wxl/seams/combat.def"
+#include "wxl/seams/m2.def"
+#include "wxl/seams/component.def"
 
 #ifdef WXL_SEAM_RAISES_DEFAULTED
     #undef WXL_SEAM_RAISES

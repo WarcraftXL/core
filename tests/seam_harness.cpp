@@ -10,6 +10,9 @@
 #include "runtime/Stages.hpp"
 #include "seams/Table.hpp"
 #include "services/DataService.hpp"
+#include "services/GxService.hpp"
+#include "services/M2FileService.hpp"
+#include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/StorageService.hpp"
 
@@ -457,6 +460,251 @@ namespace
         return WXL_TRUE;
     }
 
+    /// The batch the fake model renderer last drew: what gx_model_draw answers, once per draw.
+    wxl_gx_model_draw g_gxDraw{};
+    bool              g_gxDrew = false;
+
+    wxl_bool WXL_CALL FakeGxModelDraw(const void* render, wxl_gx_model_draw* out)
+    {
+        if (!render || !out || !g_gxDrew) return WXL_FALSE;
+        g_gxDrew = false;
+        *out     = g_gxDraw;
+        return WXL_TRUE;
+    }
+
+    // --- wxl.m2: one fake appearance, and a fake model heap counting references ---------------
+
+    struct FakeComponent
+    {
+        void*    model;
+        uint32_t race;
+        uint32_t sex;
+        uint32_t display[12];
+        bool     npc;
+    };
+
+    struct FakeModel
+    {
+        int         refs;
+        void*       parent;
+        void*       source;
+        uint32_t    geoFirst, geoLast;
+        wxl_bool    geoVisible;
+        uint32_t    texType;
+        std::string texture;
+        int         posed;
+        uint32_t    attachment = 0;
+        wxl_bool    toRoot     = WXL_FALSE;
+        void*       file       = nullptr; // a copy's: the model file it shares; a made model is its own
+    };
+
+    std::vector<FakeModel*> g_fakeLive; // every fake model alive, for m2_children
+    int                     g_fakeCopies = 0;
+
+    FakeComponent g_component{};
+    int           g_charModel       = 0; // the appearance's character model; never released by the fake
+    int           g_wearerAsked     = 0;
+    int           g_fakeModelsFreed = 0;
+
+    FakeModel* AsFake(void* model) { return model == &g_charModel ? nullptr : static_cast<FakeModel*>(model); }
+
+    wxl_bool WXL_CALL FakeComponentWearer(const void* component, uint32_t item_slot, wxl_m2_equipment* out)
+    {
+        ++g_wearerAsked;
+        if (component != &g_component || !out) return WXL_FALSE;
+        out->wearer     = const_cast<void*>(component);
+        out->model      = g_component.model;
+        out->race_id    = g_component.race;
+        out->sex_id     = g_component.sex;
+        out->item_slot  = item_slot;
+        out->display_id = item_slot < 12 ? g_component.display[item_slot] : 0;
+        out->npc        = g_component.npc ? WXL_TRUE : WXL_FALSE;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeItemDisplay(uint32_t id, wxl_m2_item_display* out)
+    {
+        if (id != 416036 || !out) return WXL_FALSE;
+        out->id               = id;
+        out->model[0]         = "belt.mdx";
+        out->model[1]         = "";
+        out->model_texture[0] = "belt_skin";
+        out->model_texture[1] = "";
+        out->icon[1]          = "53::96";
+        return WXL_TRUE;
+    }
+
+    const char* WXL_CALL FakeRacePrefix(uint32_t race) { return race == 1 ? "Hu" : nullptr; }
+
+    void* WXL_CALL FakeCreateModel(void* scene_model, const char* path)
+    {
+        if (!scene_model || !path || !*path) return nullptr;
+        FakeModel* model = new FakeModel{1, nullptr, nullptr, 0, 0, WXL_FALSE, 0, {}, 0};
+        g_fakeLive.push_back(model);
+        return model;
+    }
+
+    void WXL_CALL FakeReleaseModel(void* model)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake || --fake->refs > 0) return;
+        std::erase(g_fakeLive, fake);
+        delete fake;
+        ++g_fakeModelsFreed;
+    }
+
+    wxl_bool WXL_CALL FakeAttachModel(void* model, void* parent, uint32_t attachment, wxl_bool to_root)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake || !parent || (attachment == 99 && !to_root)) return WXL_FALSE; // 99: a point the parent lacks
+        if (!fake->parent) ++fake->refs;                                           // the parent's reference
+        fake->parent     = parent;
+        fake->attachment = attachment;
+        fake->toRoot     = to_root;
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeDetachModel(void* model)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake || !fake->parent) return;
+        fake->parent = nullptr;
+        FakeReleaseModel(model);
+    }
+
+    void* WXL_CALL FakeModelParent(const void* model)
+    {
+        FakeModel* fake = AsFake(const_cast<void*>(model));
+        return fake ? fake->parent : nullptr;
+    }
+
+    void* WXL_CALL FakeModelSource(const void* model)
+    {
+        FakeModel* fake = AsFake(const_cast<void*>(model));
+        return fake ? fake->source : nullptr;
+    }
+
+    void WXL_CALL FakeSetGeosets(void* model, uint32_t first, uint32_t last, wxl_bool visible)
+    {
+        if (FakeModel* fake = AsFake(model))
+        {
+            fake->geoFirst   = first;
+            fake->geoLast    = last;
+            fake->geoVisible = visible;
+        }
+    }
+
+    wxl_bool WXL_CALL FakeReplaceTexture(void* model, uint32_t type, const char* path)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake || !path || std::strcmp(path, "missing.blp") == 0) return WXL_FALSE;
+        fake->texType = type;
+        fake->texture = path;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakePoseFromParent(void* model)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake) return WXL_FALSE;
+        ++fake->posed;
+        return WXL_TRUE;
+    }
+
+    void* WXL_CALL FakeModelFile(const void* model)
+    {
+        FakeModel* fake = AsFake(const_cast<void*>(model));
+        return fake ? (fake->file ? fake->file : fake) : nullptr;
+    }
+
+    wxl_bool WXL_CALL FakeAttachmentPoint(const void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (model != &g_charModel || attachment != 32 || !out) return WXL_FALSE;
+        *out = wxl_vec3{0.1f, 0.2f, 1.1f};
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeHasKeyBone(const void* model, uint32_t key_bone) { return model && key_bone != 99 ? WXL_TRUE : WXL_FALSE; }
+
+    uint32_t g_posedOnBone = 0; // the key bone the last on-bone pose asked for
+    wxl_vec3 g_posedOffset{};
+
+    wxl_bool WXL_CALL FakePoseOnBone(void* model, uint32_t key_bone, const wxl_vec3* offset)
+    {
+        FakeModel* fake = AsFake(model);
+        if (!fake || !offset) return WXL_FALSE;
+        fake->posed += 100;
+        g_posedOnBone = key_bone;
+        g_posedOffset = *offset;
+        return WXL_TRUE;
+    }
+
+    // --- wxl.m2file: one fake model file, its bytes and skin, and what was done to it -----------
+
+    struct FakeM2File
+    {
+        uint8_t  bytes[64];
+        uint32_t size;
+        uint8_t  skin[48];
+        bool     hasSkin;
+        int      asked;    // m2_file_info calls
+        uint32_t setSize;  // the last size the seam set, 0xFFFFFFFF for none
+        int      animated; // m2_file_animate_bones calls
+    };
+
+    FakeM2File g_m2File{};
+
+    wxl_bool WXL_CALL FakeM2FileInfo(const void* file, wxl_m2file* out)
+    {
+        ++g_m2File.asked;
+        if (file != &g_m2File || !out) return WXL_FALSE;
+        out->name = "creature\\fake\\fake.m2";
+        out->data = g_m2File.bytes;
+        out->size = g_m2File.size;
+        out->skin = g_m2File.hasSkin ? g_m2File.skin : nullptr;
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeM2FileSetSize(void* file, uint32_t size)
+    {
+        if (file == &g_m2File) g_m2File.setSize = size;
+    }
+
+    void WXL_CALL FakeM2FileAnimateBones(void* file)
+    {
+        if (file == &g_m2File) ++g_m2File.animated;
+    }
+
+    uint32_t WXL_CALL FakeChildren(const void* model, void** out, uint32_t capacity)
+    {
+        uint32_t count = 0;
+        for (FakeModel* fake : g_fakeLive)
+        {
+            if (fake->parent != model) continue;
+            if (out && count < capacity) out[count] = fake;
+            ++count;
+        }
+        return count;
+    }
+
+    wxl_bool WXL_CALL FakeAttachInfo(const void* model, uint32_t* attachment, wxl_bool* to_root)
+    {
+        FakeModel* fake = AsFake(const_cast<void*>(model));
+        if (!fake || !fake->parent) return WXL_FALSE;
+        *attachment = fake->attachment;
+        *to_root    = fake->toRoot;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeAttachCopy(void* source, void* parent, uint32_t attachment, wxl_bool to_root)
+    {
+        if (!source || !parent) return WXL_FALSE;
+        FakeModel* copy = new FakeModel{1, parent, source, 0, 0, WXL_FALSE, 0, {}, 0, attachment, to_root};
+        g_fakeLive.push_back(copy);
+        ++g_fakeCopies;
+        return WXL_TRUE;
+    }
+
     /// Every other row stays null, which is what a client that hands nothing over looks like.
     wxl_core_init FakeInit()
     {
@@ -511,6 +759,29 @@ namespace
         init.gx_has_context         = &FakeGxHasContext;
         init.gx_window_visible      = &FakeGxWindowVisible;
         init.gx_window_size         = &FakeGxWindowSize;
+        init.gx_model_draw          = &FakeGxModelDraw;
+        init.component_wearer       = &FakeComponentWearer;
+        init.m2_item_display        = &FakeItemDisplay;
+        init.m2_race_prefix         = &FakeRacePrefix;
+        init.m2_create_model        = &FakeCreateModel;
+        init.m2_release_model       = &FakeReleaseModel;
+        init.m2_attach_model        = &FakeAttachModel;
+        init.m2_detach_model        = &FakeDetachModel;
+        init.m2_model_parent        = &FakeModelParent;
+        init.m2_model_source        = &FakeModelSource;
+        init.m2_set_geosets         = &FakeSetGeosets;
+        init.m2_replace_texture     = &FakeReplaceTexture;
+        init.m2_pose_from_parent    = &FakePoseFromParent;
+        init.m2_children            = &FakeChildren;
+        init.m2_attach_info         = &FakeAttachInfo;
+        init.m2_attach_copy         = &FakeAttachCopy;
+        init.m2_model_file          = &FakeModelFile;
+        init.m2_attachment_point    = &FakeAttachmentPoint;
+        init.m2_has_key_bone        = &FakeHasKeyBone;
+        init.m2_pose_on_bone        = &FakePoseOnBone;
+        init.m2_file_info           = &FakeM2FileInfo;
+        init.m2_file_set_size       = &FakeM2FileSetSize;
+        init.m2_file_animate_bones  = &FakeM2FileAnimateBones;
         init.pending_cast_caster    = &FakePendingCaster;
         init.pending_cast_spell_id  = &FakePendingSpellId;
         init.pending_cast_count     = &FakePendingCount;
@@ -2955,6 +3226,380 @@ void Bench()
     wxl::core::services::data::Clear();
 }
 
+namespace
+{
+    // --- M2: the model batches wxl.gx hands its watchers ---------------------------------------
+
+    struct SeenDraws
+    {
+        int               count = 0;
+        wxl_gx_model_draw last{};
+    };
+
+    void WXL_CALL SeeDraw(const wxl_gx_model_draw* draw, void* user)
+    {
+        SeenDraws* seen = static_cast<SeenDraws*>(user);
+        ++seen->count;
+        seen->last = *draw;
+    }
+
+    void CheckM2()
+    {
+        int render = 0; // CM2SceneRender's `this`; the fake binding only tests it for null
+        int model  = 0;
+        int root   = 0;
+
+        const wxl_gx_api& gx = wxl::core::services::GxApi();
+        Check(!wxl::core::services::gx::Watching(), "nothing watches model batches at the start");
+
+        g_gxDraw                 = wxl_gx_model_draw{};
+        g_gxDraw.struct_size     = sizeof g_gxDraw;
+        g_gxDraw.model           = &model;
+        g_gxDraw.root_model      = &root;
+        g_gxDraw.primitive_type  = 4;
+        g_gxDraw.base_vertex     = 12;
+        g_gxDraw.min_index       = 3;
+        g_gxDraw.vertex_count    = 90;
+        g_gxDraw.start_index     = 300;
+        g_gxDraw.primitive_count = 40;
+
+        g_gxDrew = true;
+        wxl::seam::M2::DrawBatch::After(&render);
+        Check(g_gxDrew, "with no watcher the seam does not even ask the client for the batch");
+
+        SeenDraws seen;
+        uint32_t  token = 0;
+        Check(gx.watch_model_draws(&SeeDraw, &seen, &token) == WXL_OK && token != 0,
+              "a watcher is accepted and given a token");
+        Check(gx.watch_model_draws(nullptr, nullptr, nullptr) == WXL_E_INVALID,
+              "a watcher without a function is refused");
+
+        wxl::seam::M2::DrawBatch::After(&render);
+        Check(seen.count == 1 && seen.last.model == &model && seen.last.root_model == &root &&
+                  seen.last.base_vertex == 12 && seen.last.start_index == 300 &&
+                  seen.last.primitive_count == 40,
+              "a drawn batch reaches the watcher with the numbers of the device's draw");
+
+        wxl::seam::M2::DrawBatch::After(&render);
+        Check(seen.count == 1, "a batch the device did not draw is not handed on");
+
+        wxl::seam::M2::DrawBatch::After(nullptr);
+        Check(seen.count == 1, "nor is one from no renderer");
+
+        gx.unwatch_model_draws(token);
+        Check(!wxl::core::services::gx::Watching(), "an unwatched watcher is gone");
+        g_gxDrew = true;
+        wxl::seam::M2::DrawBatch::After(&render);
+        Check(seen.count == 1, "and hears nothing more");
+        g_gxDrew = false;
+    }
+
+    // --- Component and M2.AnimateMT: what wxl.m2 hands its watchers, and the models it drives -----
+
+    struct SeenEquipment
+    {
+        int              count = 0;
+        wxl_m2_equipment last{};
+    };
+
+    void WXL_CALL SeeEquipment(const wxl_m2_equipment* change, void* user)
+    {
+        SeenEquipment* seen = static_cast<SeenEquipment*>(user);
+        ++seen->count;
+        seen->last = *change;
+    }
+
+    wxl_str M2Str(const char* text) { return wxl_str{text, static_cast<uint32_t>(std::strlen(text))}; }
+
+    void CheckM2Service()
+    {
+        const wxl_m2_api& m2   = wxl::core::services::M2Api();
+        g_component            = FakeComponent{};
+        g_component.model      = &g_charModel;
+        g_component.race       = 1;
+        g_component.sex        = 1;
+        g_component.display[4] = 416036;
+        g_wearerAsked          = 0;
+
+        Check(!wxl::core::services::m2::Watching(), "nothing watches equipment at the start");
+        wxl::seam::Component::AddItem::After(&g_component, 4, nullptr, 0);
+        Check(g_wearerAsked == 0, "with no watcher the Component seams do not even ask the client");
+
+        SeenEquipment seen;
+        uint32_t      token = 0;
+        Check(m2.watch_equipment(&SeeEquipment, &seen, &token) == WXL_OK && token != 0,
+              "an equipment watcher is accepted and given a token");
+        Check(m2.watch_equipment(nullptr, nullptr, nullptr) == WXL_E_INVALID,
+              "an equipment watcher without a function is refused");
+
+        wxl::seam::Component::AddItem::After(&g_component, 4, nullptr, 0);
+        Check(seen.count == 1 && seen.last.change == WXL_M2_EQUIPPED && seen.last.wearer == &g_component &&
+                  seen.last.model == &g_charModel && seen.last.item_slot == 4 && seen.last.display_id == 416036 &&
+                  seen.last.race_id == 1 && seen.last.sex_id == 1 &&
+                  seen.last.struct_size == sizeof(wxl_m2_equipment),
+              "an item put on reaches the watcher with its slot, its display and the wearer");
+
+        wxl::seam::Component::AddItem::After(&g_component, 5, nullptr, 0);
+        Check(seen.count == 1, "an empty slot hands nothing on");
+        wxl::seam::Component::AddItem::After(&g_component, -1, nullptr, 0);
+        Check(seen.count == 1, "nor does a slot out of range");
+
+        wxl::seam::Component::RemoveItem::Before(&g_component, 4);
+        Check(seen.count == 2 && seen.last.change == WXL_M2_UNEQUIPPED && seen.last.display_id == 416036,
+              "an item about to come off is handed on with the display it was");
+
+        wxl::seam::Component::FreeComponent::Before(&g_component);
+        Check(seen.count == 3 && seen.last.change == WXL_M2_FREED && seen.last.wearer == &g_component &&
+                  seen.last.item_slot == 0 && seen.last.display_id == 0,
+              "a wearer about to be freed is handed on, with no slot");
+
+        wxl::seam::Component::FreeComponent::Before(nullptr);
+        Check(seen.count == 3, "no component hands nothing on");
+
+        wxl_m2_item_display row{};
+        Check(m2.item_display(416036, &row) == WXL_OK && row.id == 416036 &&
+                  std::strcmp(row.model[0], "belt.mdx") == 0 && std::strcmp(row.icon[1], "53::96") == 0,
+              "an ItemDisplayInfo row is read through");
+        Check(m2.item_display(1, &row) == WXL_E_NOT_FOUND, "a row the client lacks is not found");
+        wxl_str prefix{};
+        Check(m2.race_prefix(1, &prefix) == WXL_OK && std::string(prefix.data, prefix.size) == "Hu",
+              "a race's client prefix is read through");
+        Check(m2.race_prefix(99, &prefix) == WXL_E_NOT_FOUND, "a race the client lacks is not found");
+
+        Check(m2.create_model(nullptr, M2Str("a.mdx")) == nullptr, "a model needs a scene to be made in");
+        void* piece = m2.create_model(&g_charModel, M2Str("Item\\ObjectComponents\\Collections\\a_HuF.mdx"));
+        Check(piece != nullptr, "a model is made in the scene of the one given");
+        int stranger = 0;
+        Check(m2.attach_model(&stranger, &g_charModel, 19, WXL_M2_ATTACH_ROOT) == WXL_E_INVALID,
+              "a model the service did not make is refused");
+        Check(m2.attach_model(piece, &g_charModel, 99, 0) == WXL_E_NOT_FOUND,
+              "a point the parent lacks is refused without ATTACH_ROOT");
+        Check(!wxl::core::services::m2::Following(), "and nothing follows yet");
+
+        Check(m2.attach_model(piece, &g_charModel, 99, WXL_M2_ATTACH_ROOT | WXL_M2_ATTACH_FOLLOW_BONES) == WXL_OK &&
+                  m2.model_parent(piece) == &g_charModel,
+              "with ATTACH_ROOT it hangs on the parent anyway");
+        Check(wxl::core::services::m2::Following() && wxl::core::services::m2::Follows(piece),
+              "ATTACH_FOLLOW_BONES makes it follow its parent's bones");
+
+        wxl::seam::M2::AnimateMT::After(piece, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(AsFake(piece)->posed == 1, "a following model is posed from its parent once animated");
+
+        FakeModel copy{1, &g_charModel, piece, 0, 0, WXL_FALSE, 0, {}, 0};
+        wxl::seam::M2::AnimateMT::After(&copy, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(copy.posed == 1, "an interface copy of a following model follows too");
+
+        FakeModel loaded{1, &g_charModel, nullptr, 0, 0, WXL_FALSE, 0, {}, 0, 0, WXL_FALSE, piece};
+        wxl::seam::M2::AnimateMT::After(&loaded, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(loaded.posed == 1, "a loaded copy, which no longer names its source, follows by the file it shares");
+
+        FakeModel other{1, &g_charModel, nullptr, 0, 0, WXL_FALSE, 0, {}, 0};
+        wxl::seam::M2::AnimateMT::After(&other, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(other.posed == 0, "any other model is left as the client posed it");
+
+        m2.set_geosets(piece, 1, 0xFFFF, WXL_FALSE);
+        Check(AsFake(piece)->geoFirst == 1 && AsFake(piece)->geoLast == 0xFFFF && !AsFake(piece)->geoVisible,
+              "geosets are shown and hidden through");
+        Check(m2.replace_texture(piece, 2, M2Str("Item\\ObjectComponents\\Waist\\belt.blp")) == WXL_OK &&
+                  AsFake(piece)->texType == 2,
+              "a texture is replaced through");
+        Check(m2.replace_texture(piece, 2, M2Str("missing.blp")) == WXL_E_NOT_FOUND,
+              "a texture with no file is not found");
+        Check(m2.replace_texture(&stranger, 2, M2Str("a.blp")) == WXL_E_INVALID,
+              "nor on a model the service did not make");
+
+        m2.detach_model(piece);
+        Check(m2.model_parent(piece) == nullptr && !wxl::core::services::m2::Following(),
+              "a detached model hangs on nothing and follows nothing");
+        wxl::seam::M2::AnimateMT::After(piece, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(AsFake(piece)->posed == 1, "and is posed no more");
+
+        const int freed = g_fakeModelsFreed;
+        m2.release_model(piece);
+        Check(g_fakeModelsFreed == freed + 1, "a released model with no parent is freed");
+        m2.release_model(piece);
+        Check(g_fakeModelsFreed == freed + 1, "releasing it again does nothing");
+
+        // RemoveVisuals strips what hangs on its points: the service's own models are hung back,
+        // and copies of them, which the strip freed, are copied again.
+        void* robe = m2.create_model(&g_charModel, M2Str("robe.mdx"));
+        void* belt = m2.create_model(&g_charModel, M2Str("belt.mdx"));
+        m2.attach_model(robe, &g_charModel, 19, WXL_M2_ATTACH_ROOT | WXL_M2_ATTACH_FOLLOW_BONES);
+        m2.attach_model(belt, &g_charModel, 53, 0);
+        wxl::seam::Component::RemoveVisuals::Before(&g_charModel);
+        FakeDetachModel(robe); // what DetachAllChildrenById(19) does
+        wxl::seam::Component::RemoveVisuals::After(&g_charModel);
+        Check(m2.model_parent(robe) == &g_charModel && AsFake(robe)->attachment == 19 && AsFake(robe)->toRoot &&
+                  wxl::core::services::m2::Follows(robe),
+              "a stripped model of the service is hung back where it was, still following");
+        Check(m2.model_parent(belt) == &g_charModel && g_fakeCopies == 0, "one on a point not stripped is left alone");
+
+        int        panel = 0;
+        FakeModel* shown = new FakeModel{1, &panel, nullptr, 0, 0, WXL_FALSE, 0, {}, 0, 19, WXL_TRUE, robe};
+        FakeModel* beltCopy = new FakeModel{1, &panel, belt, 0, 0, WXL_FALSE, 0, {}, 0, 53, WXL_FALSE};
+        g_fakeLive.push_back(shown);
+        g_fakeLive.push_back(beltCopy);
+        wxl::seam::Component::RemoveVisuals::Before(&panel);
+        std::erase(g_fakeLive, shown); // the strip frees the copy: the panel held its only reference
+        delete shown;
+        wxl::seam::Component::RemoveVisuals::After(&panel);
+        Check(g_fakeCopies == 1 && FakeChildren(&panel, nullptr, 0) == 2,
+              "a stripped interface copy is copied again from the model it was made from");
+        std::erase(g_fakeLive, beltCopy);
+        delete beltCopy;
+        for (FakeModel* fake : std::vector<FakeModel*>(g_fakeLive))
+            if (fake->parent == &panel)
+            {
+                std::erase(g_fakeLive, fake);
+                delete fake;
+            }
+        m2.release_model(robe);
+        m2.release_model(belt);
+        g_fakeModelsFreed -= 2;
+
+        // A point the body lacks, made by hand: posed on one of its key bones, moved by an offset.
+        wxl_vec3 hip{};
+        Check(m2.attachment_point(&g_charModel, 32, &hip) == WXL_OK && hip.z == 1.1f, "an attachment point is read through");
+        Check(m2.attachment_point(&g_charModel, 53, &hip) == WXL_E_NOT_FOUND, "a point the body lacks is not found");
+        void*          buckle = m2.create_model(&g_charModel, M2Str("buckle.mdx"));
+        const wxl_vec3 at{0.2f, 0.0f, 1.1f};
+        Check(m2.attach_to_bone(buckle, &g_charModel, 53, 99, &at) == WXL_E_NOT_FOUND, "a key bone the body lacks is refused");
+        Check(m2.attach_to_bone(buckle, &g_charModel, 53, 5, &at) == WXL_OK && m2.model_parent(buckle) == &g_charModel &&
+                  AsFake(buckle)->attachment == 53 && AsFake(buckle)->toRoot,
+              "a model is hung on a key bone, as the point it stands for");
+        wxl::seam::M2::AnimateMT::After(buckle, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(AsFake(buckle)->posed == 100 && g_posedOnBone == 5 && g_posedOffset.x == 0.2f,
+              "and is posed on that bone at the offset every frame");
+        wxl::seam::M2::AnimateMTSimple::After(buckle, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(AsFake(buckle)->posed == 200, "and so is one the client animates the simple way (one bone, one sequence)");
+        AsFake(buckle)->posed = 100;
+        FakeModel buckleCopy{1, &g_charModel, nullptr, 0, 0, WXL_FALSE, 0, {}, 0, 53, WXL_TRUE, buckle};
+        wxl::seam::M2::AnimateMT::After(&buckleCopy, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(buckleCopy.posed == 100, "an interface copy of it is posed the same way");
+        m2.release_model(buckle);
+        g_fakeModelsFreed -= 1;
+        Check(!wxl::core::services::m2::Following(), "and nothing is posed once it is released");
+
+        void* kept = m2.create_model(&g_charModel, M2Str("b.mdx"));
+        m2.attach_model(kept, &g_charModel, 53, WXL_M2_ATTACH_FOLLOW_BONES);
+        Check(AsFake(kept)->refs == 2, "an attached model is held by the mod and the parent");
+        wxl::core::services::m2::ForgetMod(wxl::core::Host() ? wxl::core::Host()->CurrentMod() : 0);
+        Check(g_fakeModelsFreed == freed + 2 && !wxl::core::services::m2::Following(),
+              "a disabled mod's models are detached and freed");
+
+        m2.unwatch_equipment(token);
+        Check(!wxl::core::services::m2::Watching(), "an unwatched equipment watcher is gone");
+        wxl::seam::Component::AddItem::After(&g_component, 4, nullptr, 0);
+        Check(seen.count == 3, "and hears nothing more");
+    }
+
+}
+
+namespace
+{
+    // --- M2 loader seams: the model files wxl.m2file hands its watchers --------------------------
+
+    struct SeenFiles
+    {
+        int        count = 0;
+        wxl_m2file last{};
+        bool       refuse = false;
+        uint32_t   shrinkTo = 0;
+    };
+
+    wxl_bool WXL_CALL SeeFile(wxl_m2file* file, void* user)
+    {
+        SeenFiles* seen = static_cast<SeenFiles*>(user);
+        ++seen->count;
+        seen->last = *file;
+        if (file->stage == WXL_M2FILE_READ)
+        {
+            static_cast<uint8_t*>(file->data)[0] = 0x4D; // a rewrite in place
+            if (seen->shrinkTo) file->size = seen->shrinkTo;
+        }
+        return seen->refuse ? WXL_FALSE : WXL_TRUE;
+    }
+
+    void CheckM2File()
+    {
+        const wxl_m2file_api& api = wxl::core::services::M2FileApi();
+        g_m2File          = FakeM2File{};
+        g_m2File.size     = 64;
+        g_m2File.setSize  = 0xFFFFFFFFu;
+
+        Check(!wxl::core::services::m2file::Watching(), "nothing watches model files at the start");
+        wxl::seam::M2::LoadSucceededCallback::Before(&g_m2File);
+        Check(g_m2File.asked == 0, "with no watcher the loader seams do not even ask the client for the file");
+
+        SeenFiles seen;
+        uint32_t  token = 0;
+        Check(api.watch_files(&SeeFile, &seen, &token) == WXL_OK && token != 0, "a file watcher is accepted and given a token");
+        Check(api.watch_files(nullptr, nullptr, nullptr) == WXL_E_INVALID, "a file watcher without a function is refused");
+
+        wxl::seam::M2::LoadSucceededCallback::Before(&g_m2File);
+        Check(seen.count == 1 && seen.last.stage == WXL_M2FILE_READ && seen.last.file == &g_m2File &&
+                  seen.last.data == g_m2File.bytes && seen.last.size == 64 && seen.last.skin == nullptr &&
+                  seen.last.name && std::strcmp(seen.last.name, "creature\\fake\\fake.m2") == 0,
+              "a read file reaches the watcher with its name, bytes and size");
+        Check(g_m2File.bytes[0] == 0x4D && g_m2File.setSize == 0xFFFFFFFFu,
+              "a watcher rewrites the bytes in place, and an unchanged size is left alone");
+
+        seen.shrinkTo = 40;
+        wxl::seam::M2::LoadSucceededCallback::Before(&g_m2File);
+        Check(g_m2File.setSize == 40, "a size the watcher lowered is handed back to the client");
+        seen.shrinkTo = 0;
+
+        seen.refuse = true;
+        wxl::seam::M2::LoadSucceededCallback::Before(&g_m2File);
+        Check(g_m2File.setSize == 0, "a refused file is left nothing to parse");
+        seen.refuse = false;
+
+        wxl::seam::M2::LoadSucceededCallback::Before(nullptr);
+        Check(seen.count == 3, "no file, nothing handed on");
+
+        wxl::seam::M2::Initialize::Before(&g_m2File);
+        Check(seen.count == 4 && seen.last.stage == WXL_M2FILE_PARSED && seen.last.data == g_m2File.bytes,
+              "a parsed file reaches the watcher before it is initialized");
+
+        wxl::seam::M2::InitializeSkinProfile::Before(&g_m2File);
+        Check(seen.count == 4, "no skin profile, no skin stage");
+        g_m2File.hasSkin = true;
+        wxl::seam::M2::InitializeSkinProfile::Before(&g_m2File);
+        Check(seen.count == 5 && seen.last.stage == WXL_M2FILE_SKIN && seen.last.skin == g_m2File.skin,
+              "a parsed skin profile reaches the watcher with its header");
+
+        uint8_t anim[32]{};
+        wxl::seam::M2::FinishLoadingLowPrioritySequence::Before(&g_m2File, 7, anim, sizeof anim);
+        Check(seen.count == 6 && seen.last.stage == WXL_M2FILE_SEQUENCE && seen.last.sequence == anim &&
+                  seen.last.sequence_size == sizeof anim && seen.last.sequence_index == 7,
+              "an external sequence reaches the watcher with its bytes and index");
+
+        api.animate_bones(&g_m2File);
+        Check(g_m2File.animated == 1, "animate_bones reaches the client's file");
+
+        uint8_t* first  = static_cast<uint8_t*>(api.alloc_near(&g_m2File, 100));
+        uint8_t* second = static_cast<uint8_t*>(api.alloc_near(&g_m2File, 20));
+        bool     zero   = first != nullptr;
+        for (int i = 0; first && i < 100; ++i) zero = zero && first[i] == 0;
+        const auto reach = [](const void* a, const void* b) {
+            const int64_t d = static_cast<int64_t>(reinterpret_cast<uintptr_t>(a)) - static_cast<int64_t>(reinterpret_cast<uintptr_t>(b));
+            return d > -0x40000000LL && d < 0x40000000LL;
+        };
+        Check(first && second && zero && (reinterpret_cast<uintptr_t>(first) & 15) == 0 &&
+                  (reinterpret_cast<uintptr_t>(second) & 15) == 0 && second >= first + 100 &&
+                  reach(first, &g_m2File) && reach(second, &g_m2File),
+              "alloc_near hands out zeroed, aligned, distinct memory within reach of the anchor");
+        Check(api.alloc_near(nullptr, 8) == nullptr && api.alloc_near(&g_m2File, 0) == nullptr,
+              "alloc_near refuses no anchor and no size");
+
+        api.unwatch_files(token);
+        Check(!wxl::core::services::m2file::Watching(), "an unwatched file watcher is gone");
+        wxl::seam::M2::Initialize::Before(&g_m2File);
+        Check(seen.count == 6, "and hears nothing more");
+        wxl::core::services::m2file::Clear();
+    }
+}
+
 int main(int argc, char** argv)
 {
     wxl::core::binding::Bind(FakeInit());
@@ -3000,6 +3645,9 @@ int main(int argc, char** argv)
     CheckCombat();
     CheckUiEvent();
     CheckScriptError();
+    CheckM2();
+    CheckM2Service();
+    CheckM2File();
 #if defined(_M_IX86)
     CheckThiscallShim();
     CheckOneSidedShim();

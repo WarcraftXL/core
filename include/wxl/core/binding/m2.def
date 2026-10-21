@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 WarcraftXL
+//
+// The M2 domain of the client binding: character appearances and the models hung on them, as
+// wxl.m2 needs to read and drive them.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including m2.def"
+#endif
+
+// What a character appearance (CCharacterComponent*) is, as the Component seams hand it over:
+// its model, race, sex and whether it is an NPC's, and the display it wears on `item_slot` (0
+// for a slot out of range, or empty). Fills every field of a wxl_m2_equipment except
+// struct_size and change. False, with nothing written, for no component.
+WXL_BINDING(component_wearer, wxl_bool, (const void* component, uint32_t item_slot, wxl_m2_equipment* out), (component, item_slot, out), WXL_FALSE)
+
+// The ItemDisplayInfo row `id`, strings pointing into the client's database. False for none.
+WXL_BINDING(m2_item_display, wxl_bool, (uint32_t id, wxl_m2_item_display* out), (id, out), WXL_FALSE)
+
+// ChrRaces' client prefix of `race` ("Hu"). Null for a race the client does not have.
+WXL_BINDING(m2_race_prefix, const char*, (uint32_t race), (race), 0)
+
+// A new model of `path` in the scene `scene_model` is in, one reference held by the caller.
+// Null for no scene model or when the scene makes none.
+WXL_BINDING(m2_create_model, void*, (void* scene_model, const char* path), (scene_model, path), 0)
+
+// Gives back one reference to `model`; the last one frees it.
+WXL_BINDING(m2_release_model, void, (void* model), (model), (void)0)
+
+// CM2Model::AttachToParent, after checking the point exists when the parent has loaded:
+// false, with nothing changed, when it has not and `to_root` is false.
+WXL_BINDING(m2_attach_model, wxl_bool, (void* model, void* parent, uint32_t attachment, wxl_bool to_root), (model, parent, attachment, to_root), WXL_FALSE)
+
+// CM2Model::DetachFromParent, for a model attached to something.
+WXL_BINDING(m2_detach_model, void, (void* model), (model), (void)0)
+
+// What `model` is attached to, null for nothing.
+WXL_BINDING(m2_model_parent, void*, (const void* model), (model), 0)
+
+// The model `model` was duplicated from (an interface copy of a character's tree), null for
+// one made from a file.
+WXL_BINDING(m2_model_source, void*, (const void* model), (model), 0)
+
+// CM2Model::SetGeometryVisible: deferred by the client until the model has loaded.
+WXL_BINDING(m2_set_geosets, void, (void* model, uint32_t first, uint32_t last, wxl_bool visible), (model, first, last, visible), (void)0)
+
+// Replaces the texture of type `type` with the file `path`. False when the file makes none.
+WXL_BINDING(m2_replace_texture, wxl_bool, (void* model, uint32_t type, const char* path), (model, type, path), WXL_FALSE)
+
+// Poses `model`'s bones as its parent's bones of the same key bone id or name, a bone with no
+// counterpart as its nearest matched ancestor: called on the animate threads, right after the
+// client posed the model itself. False when it has no parent, either has not loaded, or no bone
+// matched.
+WXL_BINDING(m2_pose_from_parent, wxl_bool, (void* model), (model), WXL_FALSE)
+
+// Up to `capacity` models attached to `model`, written to `out`; the answer is how many there are.
+WXL_BINDING(m2_children, uint32_t, (const void* model, void** out, uint32_t capacity), (model, out, capacity), 0)
+
+// The attachment point `model` hangs on and whether it was attached to the root. False when it
+// hangs on nothing.
+WXL_BINDING(m2_attach_info, wxl_bool, (const void* model, uint32_t* attachment, wxl_bool* to_root), (model, attachment, to_root), WXL_FALSE)
+
+// Duplicates `source` into `parent`'s scene and attaches the copy, which the parent then owns: what
+// CM2Model::Initialize does for the children of a model it copies.
+WXL_BINDING(m2_attach_copy, wxl_bool, (void* source, void* parent, uint32_t attachment, wxl_bool to_root), (source, parent, attachment, to_root), WXL_FALSE)
+
+// The file `model` was made from (its CM2Shared), as an opaque key: a copy shares it with the model
+// it was copied from for its whole life, while the copy's link to that model is dropped once it
+// has loaded.
+WXL_BINDING(m2_model_file, void*, (const void* model), (model), 0)
+
+// Attachment point `attachment` of a loaded `model`, in its bind pose. False for none or not loaded.
+WXL_BINDING(m2_attachment_point, wxl_bool, (const void* model, uint32_t attachment, wxl_vec3* out), (model, attachment, out), WXL_FALSE)
+
+// Whether a loaded `model` has key bone `key_bone`; true while it has not loaded, which cannot be told.
+WXL_BINDING(m2_has_key_bone, wxl_bool, (const void* model, uint32_t key_bone), (model, key_bone), WXL_FALSE)
+
+// Poses every bone of `model` as its parent's key bone `key_bone`, translated by `offset` in the
+// parent's bind space, as the client poses an attachment. Called on the animate threads.
+WXL_BINDING(m2_pose_on_bone, wxl_bool, (void* model, uint32_t key_bone, const wxl_vec3* offset), (model, key_bone, offset), WXL_FALSE)
+
+// --- The model loader, as wxl.m2file hands it over ----------------------------------------------
+
+// What a model file (CM2Shared*) is while it loads: its path, its bytes and their size, and its
+// skin profile when one has been read. Fills name, data, size and skin of a wxl_m2file. False,
+// with nothing written, for no file or one with no bytes.
+WXL_BINDING(m2_file_info, wxl_bool, (const void* file, wxl_m2file* out), (file, out), WXL_FALSE)
+
+// Sets how many of the model file's bytes the parser reads. Never raised past what was read.
+WXL_BINDING(m2_file_set_size, void, (void* file, uint32_t size), (file, size), (void)0)
+
+// Counts one more animated bone on the model file, so its models' shadow pass animates them.
+WXL_BINDING(m2_file_animate_bones, void, (void* file), (file), (void)0)

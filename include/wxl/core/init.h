@@ -16,6 +16,9 @@
 #include <stdint.h>
 
 #include "wxl/abi.h"
+#include "wxl/services/gx.h"
+#include "wxl/services/m2.h"
+#include "wxl/services/m2file.h"
 
 #if defined(WXL_CORE_BUILD)
     #define WXL_CORE_API __declspec(dllexport)

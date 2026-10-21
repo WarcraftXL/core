@@ -10,6 +10,9 @@
 #include "common/Log.hpp"
 #include "runtime/Attachment.hpp"
 #include "services/DataService.hpp"
+#include "services/GxService.hpp"
+#include "services/M2FileService.hpp"
+#include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/StorageService.hpp"
 
@@ -93,6 +96,9 @@ namespace
         wxl::core::attachment::Release(token);
         wxl::core::services::storage::CloseFilesOf(token);
         wxl::core::services::data::ForgetMod(token);
+        wxl::core::services::gx::ForgetMod(token);
+        wxl::core::services::m2::ForgetMod(token);
+        wxl::core::services::m2file::ForgetMod(token);
     }
 
     // Heap-allocated and never freed: the wxl_host table points into it, and a mod disabled

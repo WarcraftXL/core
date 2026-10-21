@@ -73,6 +73,14 @@ namespace wxl::core::objects
         return true;
     }
 
+    bool ClientObjects::UnitReaction(void* unit, void* other, uint32_t& out) const
+    {
+        const int32_t reaction = binding::unit_reaction(unit, other);
+        if (reaction < 0) return false;
+        out = static_cast<uint32_t>(reaction);
+        return true;
+    }
+
     bool ClientObjects::UnitPower(void* object, uint32_t index, uint32_t& out) const
     {
         return binding::unit_power(object, index, &out) == WXL_TRUE;
