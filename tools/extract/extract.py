@@ -212,11 +212,14 @@ class Function:
         self.param_names = [p.get("name", "a%d" % i) for i, p in enumerate(
             n for n in node.get("inner", []) if n.get("kind") == "ParmVarDecl")]
         self.local_ids = {n["id"] for n in walk(node) if n.get("kind") in ("VarDecl", "ParmVarDecl")}
+        self.overload_ident = None      # the top function named by its types: a parent overload
         self.calls = []                 # (node, Target), in source order
         self.callees = []               # local Function objects this one calls
 
     @property
     def ident(self):
+        if self.overload_ident:
+            return self.overload_ident
         return re.sub(r"\W", "_", self.name.replace("::", "_"))
 
 
@@ -782,7 +785,7 @@ class Writer:
         if not self.ex.points:
             return None
         for p in self.ex.points:
-            if p.deinlined_in is None or p.base_name != function.name:
+            if not p.parents or p.base_name != function.name:
                 continue
             if p.overload is not None and p.overload != [normal(t) for t in function.params]:
                 continue
@@ -953,8 +956,7 @@ def main(argv=None):
         if problems:
             print("extract: points.txt: %s" % "; ".join(problems), file=sys.stderr)
             return 1
-        parents = sorted({p.deinlined_in.name: p.deinlined_in for p in points if p.deinlined_in}.values(),
-                         key=lambda p: p.index)
+        parents = list({q.name: q for p in points for q in p.parents}.values())
         status = 0
         for parent in parents:
             out = CORE / "src" / "deinlined" / ("%s.gen.cpp" % parent.ident)
@@ -981,6 +983,8 @@ def main(argv=None):
         name, overload, rel, line, address = locate(args.function, rows, client)
         ex = Extractor(client, args.sdk.resolve(), rows, args.clang_cl, args.xwin, points)
         top = ex.definition(name, Path(rel), line, address)
+        if overload is not None:
+            top.overload_ident = table.ident_of(args.function)
         ex.scan(top)
         resolved, problems = resolve_templates(ex, top, args.binary)
         ex.left += problems

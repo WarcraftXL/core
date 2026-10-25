@@ -9816,6 +9816,26 @@ namespace
         return TestChild(model->bytes, model->size, *model) ? 1000 + static_cast<int32_t>(model->size) : 0;
     }
 
+    /// The second parent as Wow.exe has it (a low-priority sequence read): the child copied in too.
+    __declspec(noinline) int32_t __fastcall StandInSequence(void* self, void*, uint32_t index, uint8_t*, uint32_t)
+    {
+        g_sink = g_sink + 7;
+        return static_cast<int32_t>(reinterpret_cast<uintptr_t>(self) & 0xFF) + static_cast<int32_t>(index);
+    }
+
+    /// The second parent recompiled: the child called, and the sequence's own work after it.
+    __declspec(noinline) int32_t __fastcall TestSequenceBody(void* self, void*, uint32_t index, uint8_t*, uint32_t)
+    {
+        StandInModel* model = static_cast<StandInModel*>(self);
+        g_sink           = g_sink + 70;
+        if (!TestChild(model->bytes, model->size, *model)) return 0;
+        model->flags |= 0x200;
+        return 2000 + static_cast<int32_t>(index);
+    }
+
+    /// A function too short to detour: where the second parent is put to make its body refused.
+    const uint8_t kTinyParent[16] = {0x33, 0xC0, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+
     int g_childSeen = 0;
     uint32_t g_childSize = 0;
     void WXL_CALL ChildBefore(wxl_point_call* call, void*)
@@ -9837,24 +9857,48 @@ namespace
 
     void CheckDeinlined()
     {
+        namespace dei               = wxl::core::deinlined;
         const wxl_point_api& api    = PointApi();
         const uint32_t       child  = pts::kM2Init_uint8_t_uint32_t_M2Data;
         const uint32_t       parent = pts::kCM2Shared_FinishLoading;
+        const uint32_t       body   = dei::kParent_CM2Shared_FinishLoading;
+        const uint32_t       second = dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t;
         using FinishFn              = int32_t(__thiscall*)(void*);
-        const FinishFn finish       = Opaque(reinterpret_cast<FinishFn>(&StandInFinish));
+        using SequenceFn            = int32_t(__thiscall*)(void*, uint32_t, uint8_t*, uint32_t);
+        const FinishFn   finish     = Opaque(reinterpret_cast<FinishFn>(&StandInFinish));
+        const SequenceFn sequence   = Opaque(reinterpret_cast<SequenceFn>(&StandInSequence));
         StandInModel      model{0, 9, {}};
+        uint8_t           buffer[8] = {};
+        const int32_t     self      = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF);
 
         g_childBodies = g_childSeen = g_parentSeen = 0;
-        Check(finish(&model) == static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF) + 5 &&
-                  !pts::x86::BodyInPlace(parent) && g_childBodies == 0,
-              "x86: with no handler on the de-inlined point, the parent runs Wow.exe's own body");
+        Check(finish(&model) == self + 5 && sequence(&model, 3, buffer, sizeof buffer) == self + 3 &&
+                  !pts::x86::BodyInPlace(body) && !pts::x86::BodyInPlace(second) && g_childBodies == 0,
+              "x86: with no handler on the de-inlined point, both parents run Wow.exe's own bodies");
+
+        // Both parents or none: one that cannot be detoured gives the other back.
+        pts::x86::PlaceParent(second, reinterpret_cast<uintptr_t>(kTinyParent), 3);
+        const uint32_t refused = Attach(child, WXL_POINT_BEFORE, &ChildBefore, nullptr);
+        Check(!refused && !pts::x86::BodyInPlace(body) && !wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)),
+              "x86: when one parent's body cannot be put in place, the point is not attached and the other "
+              "parent is given back");
+        pts::x86::PlaceParent(second, Address(&StandInSequence), 0);
 
         const uint32_t before = Attach(child, WXL_POINT_BEFORE, &ChildBefore, nullptr);
-        Check(before && pts::x86::BodyInPlace(parent), "x86: the de-inlined point's first handler puts the recompiled body in place");
+        Check(before && pts::x86::BodyInPlace(body) && pts::x86::BodyInPlace(second),
+              "x86: the de-inlined point's first handler puts the recompiled body of each of its parents in place");
         Check(finish(&model) == 1009 && g_childBodies == 1 && g_childSeen == 1 && g_childSize == 9 &&
                   model.flags == 0x101,
               "x86: the parent now runs its recompiled body, in which the child is a call: its Before sees the "
               "arguments, writes through the reference, and the child's body runs");
+        model.flags = 0x100;
+        Check(sequence(&model, 3, buffer, sizeof buffer) == 2003 && g_childBodies == 2 && g_childSeen == 2 &&
+                  model.flags == 0x301,
+              "x86: the second parent, a function that is no point, runs its recompiled body too: the child fires "
+              "from it as well, with the stack as its caller left it");
+        g_childBodies = 1;
+        g_childSeen   = 1;
+        model.flags   = 0x101;
 
         const uint32_t onParent = Attach(parent, WXL_POINT_BEFORE, &ParentBefore, nullptr);
         Check(onParent && finish(&model) == 1009 && g_parentSeen == 1 && g_childSeen == 2,
@@ -9866,13 +9910,16 @@ namespace
         api.detach(replace);
 
         api.detach(before);
-        Check(!pts::x86::BodyInPlace(parent), "x86: its last handler gone, the recompiled body leaves");
+        Check(!pts::x86::BodyInPlace(body) && !pts::x86::BodyInPlace(second),
+              "x86: its last handler gone, both recompiled bodies leave");
         g_childBodies = 0;
-        Check(finish(&model) == static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF) + 5 &&
+        Check(finish(&model) == self + 5 && sequence(&model, 3, buffer, sizeof buffer) == self + 3 &&
                   g_childBodies == 0 && g_parentSeen == 3,
-              "x86: the parent runs Wow.exe's body again, its own point still attached");
+              "x86: both parents run Wow.exe's bodies again, the first one's own point still attached");
         api.detach(onParent);
-        Check(!wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)), "x86: and with nothing left the function is not detoured");
+        Check(!wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)) &&
+                  !wxl::hook::Armed(reinterpret_cast<void*>(&StandInSequence)),
+              "x86: and with nothing left neither function is detoured");
     }
 
     void CheckPointDetours()
@@ -9953,7 +10000,12 @@ namespace
         pts::x86::Place(pts::kNetClient_ProcessMessage, Address(&StandInProcess), 0);
         pts::x86::AddSite(pts::kCGCamera_UpdateCallback, Address(&InlinedCamera), "[esp+4],[esp+8]");
         pts::x86::Place(pts::kCM2Shared_FinishLoading, Address(&StandInFinish), 0);
-        pts::x86::PlaceBody(pts::kCM2Shared_FinishLoading, reinterpret_cast<void*>(&TestFinishBody));
+        namespace dei = wxl::core::deinlined;
+        pts::x86::PlaceBody(dei::kParent_CM2Shared_FinishLoading, reinterpret_cast<void*>(&TestFinishBody));
+        pts::x86::PlaceParent(dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t,
+                              Address(&StandInSequence), 0);
+        pts::x86::PlaceBody(dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t,
+                            reinterpret_cast<void*>(&TestSequenceBody));
     }
 }
 #endif

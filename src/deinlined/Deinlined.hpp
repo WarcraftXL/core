@@ -11,13 +11,15 @@
 #include <cstdint>
 
 // The 2008 compiler copied some functions into their callers, so Wow.exe has no address to detour
-// for them. Such a point is listed with a parent (points.txt `deinlined` lines, include/wxl/
-// points/x86.def WXL_POINT_X86_DEINLINED rows): a point whose function holds the copy. Its body
-// is recompiled from the fork by core/tools/extract/extract.py --runtime into this folder, where
-// the inlined function is a function of its own again, and the runtime puts that body in place of
-// the parent's (the last link of the parent's chain, so the parent's own point and seams still
-// run in front) while the de-inlined point has handlers. The de-inlined function's head tests one
-// byte, as a point line of the recompiled client does, and enters the point when it is set.
+// for them. Such a point is listed with its parents (points.txt `deinlined` lines, include/wxl/
+// points/x86.def WXL_POINT_X86_DEINLINED_IN and WXL_POINT_X86_PARENT rows): the functions that
+// hold a copy, each a point of its own or a function of Wow.exe that is no point. Each parent's
+// body is recompiled from the fork by core/tools/extract/extract.py --runtime into this folder,
+// where the inlined function is a function of its own again, and the runtime puts those bodies in
+// place of the parents' (the last link of each parent's chain, so a parent's own point and seams
+// still run in front) while the de-inlined point has handlers. The de-inlined function's head
+// tests one byte, as a point line of the recompiled client does, and enters the point when it is
+// set.
 
 namespace wxl::core::deinlined
 {
@@ -26,23 +28,38 @@ namespace wxl::core::deinlined
 
     inline bool Armed(uint32_t index) { return g_armed[index] != 0; }
 
+    /// The functions whose bodies the runtime recompiled, one per WXL_POINT_X86_PARENT row.
+    enum Parent : uint32_t
+    {
+#define WXL_POINT_X86(...)
+#define WXL_POINT_SITE(...)
+#define WXL_POINT_X86_ABSENT(...)
+#define WXL_POINT_X86_PARENT(Parent, name, address, length, conv, ret, params) kParent_##Parent,
+#include "wxl/points/x86.def"
+#undef WXL_POINT_X86_PARENT
+#undef WXL_POINT_X86_ABSENT
+#undef WXL_POINT_SITE
+#undef WXL_POINT_X86
+        kParentCount
+    };
+
     /// What a de-inlined point's row says of it: its detour type (the point's contract signature,
-    /// cdecl, a reference as its address) and the point whose body holds it.
+    /// cdecl, a reference as its address).
     template <uint32_t Index>
     struct Row;
 
 #define WXL_POINT_X86(...)
 #define WXL_POINT_SITE(...)
 #define WXL_POINT_X86_ABSENT(...)
-#define WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params)                                          \
+#define WXL_POINT_X86_DEINLINED(Ident, name, ret, params)                                                 \
     template <>                                                                                           \
     struct Row<points::k##Ident>                                                                          \
     {                                                                                                     \
-        using Detour                     = points::DetourOf<points::k##Ident, ::wxl::seam::detail::conv_cdecl, ret params>; \
-        static constexpr uint32_t kParent = points::k##Parent;                                            \
-    };                                                                                                    \
-    void* Body_##Parent();
+        using Detour = points::DetourOf<points::k##Ident, ::wxl::seam::detail::conv_cdecl, ret params>;   \
+    };
+#define WXL_POINT_X86_PARENT(Parent, name, address, length, conv, ret, params) void* Body_##Parent();
 #include "wxl/points/x86.def"
+#undef WXL_POINT_X86_PARENT
 #undef WXL_POINT_X86_DEINLINED
 #undef WXL_POINT_X86_ABSENT
 #undef WXL_POINT_SITE
@@ -65,7 +82,7 @@ namespace wxl::core::deinlined
     }
 }
 
-/// Ends a recompiled body's file: the function the runtime puts in place of point Parent's.
+/// Ends a recompiled body's file: the function the runtime puts in place of Parent's.
 #define WXL_DEINLINED_BODY(Parent)                                                                        \
     namespace wxl::core::deinlined                                                                        \
     {                                                                                                     \

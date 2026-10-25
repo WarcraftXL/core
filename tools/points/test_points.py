@@ -45,6 +45,8 @@ public:
     static void Helper(uint32_t flags);
     int32_t Inlined();
     int32_t Load();
+    int32_t Read(uint32_t index, uint8_t* buffer);
+    int32_t Read(uint32_t index);
 };
 """
 
@@ -76,14 +78,27 @@ int32_t Init(uint8_t* base, uint32_t size, Data& data) {
 int32_t Thing::Load() {
     return Init(nullptr, 0, *this->data);
 }
+
+// OFFSET: 0x00401400
+int32_t Thing::Read(uint32_t index, uint8_t* buffer) {
+    return Init(buffer, index, *this->data);
+}
+
+// OFFSET: 0x00401480
+int32_t Thing::Read(uint32_t index) {
+    return this->Read(index, nullptr);
+}
 """
 
 OVERLOAD_ROWS = """WXL_OFFSET_FUNCTION("Thing::Load", 0x00401300, 0x80, 0x40, "manual", "", "Src/Init.cpp", 14)
+WXL_OFFSET_FUNCTION("Thing::Read", 0x00401400, 0x80, 0x40, "manual", "", "Src/Init.cpp", 19)
+WXL_OFFSET_FUNCTION("Thing::Read", 0x00401480, 0x80, 0x40, "manual", "", "Src/Init.cpp", 24)
 """
 
 DEINLINED_LIST = """0x00401300  Thing::Load    replace  main  provisional
 -           Init(uint8_t*,uint32_t,Data&)  replace  main  provisional
 deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Load
+deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Read(uint32_t,uint8_t*)
 """
 
 
@@ -177,14 +192,39 @@ def main():
                init.base_name == "Init" and init.lowered == "i32(ptr,u32,ptr)" and init.params[2].reference,
                init.lowered)
         report("its identifier carries its types", init.ident == "Init_uint8_t_uint32_t_Data", init.ident)
-        report("a deinlined point is on x86 through its parent", init.x86 and init.deinlined_in is load, init.x86_why)
+        report("a deinlined point is on x86 through its parents", init.x86 and len(init.parents) == 2 and
+               init.parents[0] is load, init.x86_why)
+        read = init.parents[1]
+        report("a parent that is no point is the fork's function of its address, the overload its types name",
+               not read.listed and read.address == 0x00401400 and read.convention == "thiscall" and
+               read.ident == "Thing_Read_uint32_t_uint8_t" and len(points) == 5, "%s %s" % (read.ident, read.address))
         report("generate writes the de-inlined tables", generate_points.main(argv) == 0)
         x86 = (root / "x86.def").read_text()
-        report("x86.def has its row, with its parent", 'WXL_POINT_X86_DEINLINED(Init_uint8_t_uint32_t_Data, '
-               '"Init(uint8_t*,uint32_t,Data&)", Thing_Load, int32_t, (void* base, uint32_t size, void* data))' in x86, x86[-400:])
+        report("x86.def has its row and one per parent",
+               'WXL_POINT_X86_DEINLINED(Init_uint8_t_uint32_t_Data, "Init(uint8_t*,uint32_t,Data&)", int32_t, '
+               '(void* base, uint32_t size, void* data))\n'
+               'WXL_POINT_X86_DEINLINED_IN(Init_uint8_t_uint32_t_Data, Thing_Load)\n'
+               'WXL_POINT_X86_DEINLINED_IN(Init_uint8_t_uint32_t_Data, Thing_Read_uint32_t_uint8_t)\n' in x86, x86[-1200:])
+        report("and a row for each parent function, with its address, length, convention and signature",
+               'WXL_POINT_X86_PARENT(Thing_Load, "Thing::Load", 0x00401300, 64, thiscall, int32_t, (void* self))' in x86 and
+               'WXL_POINT_X86_PARENT(Thing_Read_uint32_t_uint8_t, "Thing::Read(uint32_t,uint8_t*)", 0x00401400, 64, '
+               'thiscall, int32_t, (void* self, uint32_t index, void* buffer))' in x86, x86[-1200:])
         shared = (root / "sdk" / "include" / "wxl" / "deinlined.def").read_text()
-        report("and the shared list names it", 'WXL_DEINLINED(Init_uint8_t_uint32_t_Data, "Init(uint8_t*,uint32_t,Data&)", '
-               '"Thing::Load", 0x00401300)' in shared, shared[-300:])
+        report("and the shared list names it once per parent",
+               'WXL_DEINLINED(Init_uint8_t_uint32_t_Data, "Init(uint8_t*,uint32_t,Data&)", "Thing::Load", 0x00401300)\n'
+               'WXL_DEINLINED(Init_uint8_t_uint32_t_Data, "Init(uint8_t*,uint32_t,Data&)", '
+               '"Thing::Read(uint32_t,uint8_t*)", 0x00401400)\n' in shared, shared[-500:])
+        for line, says, what in (
+                ("deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Read\n", "name the overload",
+                 "a parent the fork overloads, named without its types, is a problem that says how to name it"),
+                ("deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Gone\n", "neither a point above",
+                 "a parent that is neither a point nor a function of the fork is a problem"),
+                ("deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Load\n", "twice",
+                 "the same parent twice is a problem")):
+            (root / "points.txt").write_text(LIST + DEINLINED_LIST + line)
+            _, problems = points_table.load(root / "points.txt", fork, offsets)
+            report(what, any(says in p for p in problems), "; ".join(problems))
+        (root / "points.txt").write_text(LIST + DEINLINED_LIST)
         header = (fork / "WarcraftXL" / "Points.gen.h").read_text()
         report("the x64 macro passes the reference by its address and calls the overload with what it points at",
                "Data* wxl_a2" in header and "**static_cast<Data**>(wxl_a_[2])" in header and "}(p0, p1, &p2);" in header,

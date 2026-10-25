@@ -14,6 +14,14 @@
 // the file read -- is stubbed at Wow.exe's own addresses. Both runs must answer the same, leave
 // the model's fields and its relocated bytes the same and ask Storm for the same block.
 //
+// M2Init's second parent, CM2Shared::FinishLoadingLowPrioritySequence, is held to Wow.exe the
+// same way: a model loaded by the stock FinishLoading has sequences left for later, whose tracks
+// a buffer read from their own file (made up here) is then given to, directly and through Wow.exe's
+// own caller (the overload taking the read, which follows a sequence's aliases). Both runs must
+// answer the same, leave the same bytes (the tracks' arrays pointed into the buffer, the sequence's
+// flags), the reader's globals (s_sequenceIndex, s_sequenceData, s_sequenceSize) the same, and ask
+// Storm for nothing.
+//
 // Without a Wow.exe the test says so and passes: nothing of Wow.exe is in this repository.
 
 #include <windows.h>
@@ -57,6 +65,11 @@ namespace
     constexpr uintptr_t kSMemAlloc        = 0x0076E540;
     constexpr uintptr_t kAsyncDestroy     = 0x004B9DE0;
     constexpr uintptr_t kSequenceIndex    = 0x00AF59D8; ///< M2Shared.cpp's s_sequenceIndex
+    constexpr uintptr_t kSequenceData     = 0x00D41258; ///< s_sequenceData
+    constexpr uintptr_t kSequenceSize     = 0x00D4125C; ///< s_sequenceSize
+    constexpr uintptr_t kSequenceDirect   = 0x0083C6E0; ///< FinishLoadingLowPrioritySequence(index, buffer, size)
+    constexpr uintptr_t kSequenceLength   = 941;
+    constexpr uintptr_t kSequenceRead     = 0x0083CA90; ///< FinishLoadingLowPrioritySequence(index, CAsyncObject*)
 
     /// Copies Wow.exe's headers and sections to their addresses; nothing of it runs.
     bool MapStockClient(const char* path, std::string& why)
@@ -140,10 +153,13 @@ namespace
     void __cdecl StubDestroy(void* object) { g_destroyed = object; }
 
     /// A model file: the header and the arrays a 3.3.5a model carries, each where the header says.
+    /// Its sequences 0 and 1 are in the file, 2 and 3 left for later (2 and 3 alias each other),
+    /// and its two bones have tracks with keys for each sequence: in the file for the first two, at
+    /// offsets of the sequence's own file for the others (the second bone's scale knows only two).
     std::vector<uint8_t> MakeModel(int variant)
     {
         using namespace wxl::engine;
-        std::vector<uint8_t> bytes(0x1000, 0);
+        std::vector<uint8_t> bytes(0x2000, 0);
         auto&                data = *reinterpret_cast<M2Data*>(bytes.data());
         uint32_t             at   = sizeof(M2Data);
         auto place = [&](auto& array, uint32_t count, uint32_t size) {
@@ -159,13 +175,42 @@ namespace
         auto*          sequences = reinterpret_cast<M2Sequence*>(place(data.m_sequences, 4, sizeof(M2Sequence)));
         const uint16_t ids[4]    = {0, 4, 7, 12};
         const uint32_t flags[4]  = {0x20, 0x21, 0x0, 0x1};
+        const uint16_t aliases[4] = {0, 1, 3, 2};
         for (int i = 0; i < 4; ++i)
         {
             sequences[i].m_id        = ids[i];
             sequences[i].m_flags     = flags[i];
-            sequences[i].m_aliasNext = static_cast<uint16_t>(i);
+            sequences[i].m_aliasNext = aliases[i];
         }
         place(data.m_sequenceIdxHashById, 4, 2);
+        auto* bones = reinterpret_cast<M2CompBone*>(place(data.m_bones, 2, sizeof(M2CompBone)));
+        auto  track = [&](M2TrackBase& base, M2Array<M2Array<uint8_t>>& keys, uint32_t keySize, uint32_t known) {
+            base.m_loopIndex = 0xFFFF;
+            auto* times      = reinterpret_cast<M2Array<uint32_t>*>(place(base.m_sequenceTimes, known, 8));
+            auto* values     = reinterpret_cast<M2Array<uint8_t>*>(place(keys, known, 8));
+            for (uint32_t i = 0; i < known; ++i)
+            {
+                if (flags[i] & 0x20)
+                {
+                    place(times[i], 2, 4);
+                    place(values[i], 2, keySize);
+                }
+                else
+                {
+                    // In the sequence's own file: offsets the reader relocates into its buffer.
+                    times[i]  = {2, 0x10 * i};
+                    values[i] = {2, 0x40 + 0x20 * i};
+                }
+            }
+        };
+        for (uint32_t b = 0; b < 2; ++b)
+        {
+            M2CompBone& bone = bones[b];
+            bone.m_boneId    = b;
+            track(bone.m_translationTrack, reinterpret_cast<M2Array<M2Array<uint8_t>>&>(bone.m_translationTrack.m_sequenceKeys), 12, 4);
+            track(bone.m_rotationTrack, reinterpret_cast<M2Array<M2Array<uint8_t>>&>(bone.m_rotationTrack.m_sequenceKeys), 8, 4);
+            track(bone.m_scaleTrack, reinterpret_cast<M2Array<M2Array<uint8_t>>&>(bone.m_scaleTrack.m_sequenceKeys), 12, b ? 2 : 4);
+        }
         place(data.m_vertices, 6, sizeof(M2Vertex));
         auto* texture = reinterpret_cast<M2Texture*>(place(data.m_textures, 1, sizeof(M2Texture)));
         std::memcpy(place(texture->m_filename, 11, 1), "Skin00.blp", 11);
@@ -205,7 +250,7 @@ namespace
         }
     };
 
-    alignas(16) uint8_t g_file[0x2000];
+    alignas(16) uint8_t g_file[0x4000];
 
     /// One model through Wow.exe's LoadSucceededCallback (which tail-jumps into FinishLoading),
     /// then FinishLoading's own answer on a fresh copy: the callback drops it.
@@ -245,14 +290,101 @@ namespace
         return out;
     }
 
-    int      g_childCalls  = 0;
-    uint32_t g_childSize   = 0;
-    int      g_parentCalls = 0;
+    int      g_childCalls    = 0;
+    uint32_t g_childSize     = 0;
+    void*    g_childData     = nullptr;
+    uint32_t g_childSequence = 0; ///< s_sequenceIndex as the handler found it
+    int      g_parentCalls   = 0;
 
     void WXL_CALL ChildBefore(wxl_point_call* call, void*)
     {
         ++g_childCalls;
-        g_childSize = *static_cast<uint32_t*>(call->args[1]);
+        g_childSize     = *static_cast<uint32_t*>(call->args[1]);
+        g_childData     = *static_cast<void**>(call->args[2]);
+        g_childSequence = *reinterpret_cast<const uint32_t*>(kSequenceIndex);
+    }
+
+    // --- The second parent: a sequence's own file read later ---------------------------------
+
+    /// What Wow.exe's reader takes: the read's buffer and size, where CAsyncObject has them.
+    struct FakeRead
+    {
+        uint32_t unused;
+        void*    buffer;
+        uint32_t size;
+    };
+
+    struct SequenceOutcome
+    {
+        int32_t              answer = 0;
+        uint32_t             index = 0, data = 0, size = 0; ///< the reader's globals afterwards
+        int                  inits = 0, allocs = 0;
+        std::vector<uint8_t> bytes;
+
+        bool operator==(const SequenceOutcome& o) const
+        {
+            return answer == o.answer && index == o.index && data == o.data && size == o.size && inits == o.inits &&
+                   allocs == o.allocs && bytes == o.bytes;
+        }
+    };
+
+    alignas(16) uint8_t g_anim[0x200];
+
+    /// A model as Wow.exe's FinishLoading leaves it: relocated in g_file, its CM2Shared beside.
+    struct Loaded
+    {
+        std::vector<uint8_t>   file;
+        wxl::engine::CM2Shared shared{};
+    };
+
+    Loaded LoadForSequences()
+    {
+        Loaded loaded;
+        loaded.file = MakeModel(0);
+        std::memcpy(g_file, loaded.file.data(), loaded.file.size());
+        loaded.shared.m_data     = reinterpret_cast<wxl::engine::M2Data*>(g_file);
+        loaded.shared.m_fileSize = static_cast<uint32_t>(loaded.file.size());
+        std::strcpy(loaded.shared.m_fileName, "Creature\\Test\\Test.m2");
+        g_initAnswer = 1;
+        reinterpret_cast<int32_t(__thiscall*)(void*)>(kFinishLoading)(&loaded.shared);
+        std::free(loaded.shared.m_lowPrioritySequenceBuffers);
+        loaded.shared.m_lowPrioritySequenceBuffers = nullptr;
+        loaded.file.assign(g_file, g_file + loaded.file.size());
+        return loaded;
+    }
+
+    /// One sequence given its buffer, on the loaded model as it was: through the overload taking
+    /// the buffer (@p read false) or Wow.exe's caller taking the read. @p spoil 1 makes the
+    /// header's magic wrong first, 2 its version.
+    SequenceOutcome ReadSequence(const Loaded& loaded, uint32_t index, bool read, int spoil)
+    {
+        using namespace wxl::engine;
+        std::memcpy(g_file, loaded.file.data(), loaded.file.size());
+        if (spoil == 1) reinterpret_cast<M2Data*>(g_file)->m_magic = 0x3132444D;
+        if (spoil == 2) reinterpret_cast<M2Data*>(g_file)->m_version = 0x109;
+        CM2Shared shared = loaded.shared;
+        for (size_t i = 0; i < sizeof g_anim; ++i) g_anim[i] = static_cast<uint8_t>(i * 7);
+        *reinterpret_cast<uint32_t*>(kSequenceSize) = 0x5A5A; // the reader clears it
+        g_initCalls = g_allocCalls = 0;
+        SequenceOutcome out;
+        if (read)
+        {
+            FakeRead object{0, g_anim, sizeof g_anim};
+            out.answer = reinterpret_cast<int32_t(__thiscall*)(void*, uint32_t, void*)>(kSequenceRead)(&shared, index, &object);
+        }
+        else
+        {
+            out.answer = reinterpret_cast<int32_t(__thiscall*)(void*, uint32_t, uint8_t*, uint32_t)>(kSequenceDirect)(
+                &shared, index, g_anim, sizeof g_anim);
+        }
+        out.index  = *reinterpret_cast<const uint32_t*>(kSequenceIndex);
+        out.data   = *reinterpret_cast<const uint32_t*>(kSequenceData);
+        out.size   = *reinterpret_cast<const uint32_t*>(kSequenceSize);
+        out.inits  = g_initCalls;
+        out.allocs = g_allocCalls;
+        out.bytes.assign(g_file, g_file + loaded.file.size());
+        out.bytes.insert(out.bytes.end(), g_anim, g_anim + sizeof g_anim);
+        return out;
     }
 
     void WXL_CALL ParentBefore(wxl_point_call*, void*) { ++g_parentCalls; }
@@ -308,8 +440,11 @@ int main(int argc, char** argv)
     };
     Check(stubs[0] && stubs[1] && stubs[2], "Wow.exe's model initialisation, Storm's allocator and the file read's "
                                             "release are stubbed at their addresses");
-    // Wow.exe is no client process here: the parent point is placed at its own address.
+    // Wow.exe is no client process here: the parents are placed at their own addresses.
+    namespace dei         = wxl::core::deinlined;
+    const uint32_t second = dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t;
     pts::x86::Place(pts::kCM2Shared_FinishLoading, kFinishLoading, kFinishLength);
+    pts::x86::PlaceParent(second, kSequenceDirect, kSequenceLength);
     const char* what[] = {"a model", "a file that is not MD20", "a version the client refuses", "an array past the end",
                           "no combiner combos"};
     for (int variant = 0; variant < 5; ++variant)
@@ -325,7 +460,7 @@ int main(int argc, char** argv)
             g_childCalls = g_parentCalls = 0;
             g_childSize                  = 0;
             const Outcome recompiled     = LoadOnce(file, loaded);
-            const bool    inPlace        = pts::x86::BodyInPlace(pts::kCM2Shared_FinishLoading);
+            const bool    inPlace        = pts::x86::BodyInPlace(dei::kParent_CM2Shared_FinishLoading) && pts::x86::BodyInPlace(second);
             pts::Api().detach(child);
             pts::Api().detach(parent);
 
@@ -348,8 +483,81 @@ int main(int argc, char** argv)
             if (variant >= 1 && variant <= 3 && round == 0)
                 Check(stock.answer == 0 && stock.inits == 0, "  refused before the model is initialised");
         }
-    Check(!pts::x86::BodyInPlace(pts::kCM2Shared_FinishLoading) && !wxl::hook::Armed(reinterpret_cast<void*>(kFinishLoading)),
+    Check(!pts::x86::BodyInPlace(wxl::core::deinlined::kParent_CM2Shared_FinishLoading) &&
+              !wxl::hook::Armed(reinterpret_cast<void*>(kFinishLoading)),
           "with the handlers gone, Wow.exe's FinishLoading is its own again, not detoured");
+
+    // M2Init's second parent: a sequence left for later, given the buffer of its own file.
+    const Loaded loaded = LoadForSequences();
+    {
+        using namespace wxl::engine;
+        const auto& data  = *reinterpret_cast<const M2Data*>(loaded.file.data());
+        const auto& bone  = data.m_bones[0];
+        const auto  later = bone.m_translationTrack.m_sequenceTimes[2];
+        Check(data.m_bones.m_count == 2 && data.m_sequences[2].m_aliasNext == 3 && later.m_count == 2 &&
+                  later.m_offset == 0x20 &&
+                  bone.m_translationTrack.m_sequenceTimes[0].m_offset > reinterpret_cast<uintptr_t>(g_file),
+              "the stock FinishLoading loaded the model: its arrays relocated, a later sequence's keys still offsets "
+              "of the sequence's own file");
+    }
+    struct Case
+    {
+        uint32_t    index;
+        bool        read;
+        int         spoil;
+        int         fires;
+        const char* what;
+    } cases[] = {
+        {2, false, 0, 1, "sequence 2 given its buffer"},
+        {3, false, 0, 1, "sequence 3, which the second bone's scale has no keys for"},
+        {1, false, 0, 1, "sequence 1, one the file holds, given a buffer all the same"},
+        {2, true, 0, 2, "sequence 2 through Wow.exe's reader, which follows its alias to 3"},
+        {2, false, 1, 1, "sequence 2 of a model whose magic went wrong"},
+        {3, true, 2, 1, "sequence 3 through the reader, of a model whose version went wrong"},
+    };
+    for (const Case& c : cases)
+    {
+        const SequenceOutcome stock = ReadSequence(loaded, c.index, c.read, c.spoil);
+
+        const uint32_t child = Attach(pts::kM2Init_uint8_t_uint32_t_M2Data, WXL_POINT_BEFORE, &ChildBefore);
+        g_childCalls    = 0;
+        g_childSize     = 0;
+        g_childData     = nullptr;
+        g_childSequence = 0;
+        const SequenceOutcome recompiled = ReadSequence(loaded, c.index, c.read, c.spoil);
+        const bool inPlace = pts::x86::BodyInPlace(second) && pts::x86::BodyInPlace(dei::kParent_CM2Shared_FinishLoading);
+        pts::Api().detach(child);
+
+        char line[320];
+        std::snprintf(line, sizeof line,
+                      "%s: Wow.exe and the recompiled body answer %d/%d, leave s_sequenceIndex %X/%X and "
+                      "s_sequenceSize %u/%u, the same model and buffer, nothing from Storm",
+                      c.what, stock.answer, recompiled.answer, stock.index, recompiled.index, stock.size,
+                      recompiled.size);
+        Check(child && inPlace && stock == recompiled && stock.allocs == 0 && stock.inits == 0 &&
+                  stock.index == 0xFFFFFFFF && stock.data == 0 && stock.size == 0,
+              line);
+        const uint32_t last = c.read && !c.spoil ? 3 : c.index;
+        std::snprintf(line, sizeof line,
+                      "  the de-inlined M2Init's point fired %d time(s), on the loaded model, sequence %u being read",
+                      c.fires, last);
+        Check(g_childCalls == c.fires && g_childSize == static_cast<uint32_t>(loaded.file.size()) &&
+                  g_childData == g_file && g_childSequence == last,
+              line);
+        if (c.index == 2 && !c.read && !c.spoil)
+        {
+            using namespace wxl::engine;
+            const auto& data = *reinterpret_cast<const M2Data*>(stock.bytes.data());
+            const auto  keys = data.m_bones[1].m_rotationTrack.m_sequenceTimes[2];
+            Check(stock.answer == 1 && keys.m_offset == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(g_anim)) + 0x20 &&
+                      (data.m_sequences[2].m_flags & 0x30) == 0x20,
+                  "  sequence 2 read: its keys point into the buffer, and it is flagged as in memory");
+        }
+        if (c.spoil)
+            Check(stock.answer == 0, "  refused: the header check of the inlined M2Init holds for a sequence too");
+    }
+    Check(!pts::x86::BodyInPlace(second) && !wxl::hook::Armed(reinterpret_cast<void*>(kSequenceDirect)),
+          "with the handler gone, Wow.exe's FinishLoadingLowPrioritySequence is its own again, not detoured");
     for (wxl::hook::Id id : stubs) wxl::hook::Detach(id);
     std::printf("\n%d check(s), %d failure(s)\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

@@ -339,6 +339,11 @@ if(WXL_CORE_X86)
     # The stock client is a shipped binary: the DLL reaches it by an import and an entry
     # trampoline the patcher adds, detours at resolved addresses, and byte patches. Every file
     # here holds an address, reads the image's headers, or serves a service built on those.
+    # The recompiled parent bodies of the de-inlined points, one file per WXL_POINT_X86_PARENT row
+    # of include/wxl/points/x86.def (tools/extract/extract.py --deinlined writes them).
+    set(WXL_CORE_DEINLINED
+        src/deinlined/CM2Shared_FinishLoading.gen.cpp
+        src/deinlined/CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t.gen.cpp)
     target_sources(wxl-core PRIVATE
         src/runtime/Main.cpp
         src/runtime/AttachmentX86.cpp
@@ -349,7 +354,7 @@ if(WXL_CORE_X86)
         src/hook/Engine.cpp
         src/hook/Points.cpp
         src/points/PointsX86.cpp
-        src/deinlined/CM2Shared_FinishLoading.gen.cpp
+        ${WXL_CORE_DEINLINED}
         src/services/HookService.cpp
         src/services/PatchService.cpp)
     target_link_libraries(wxl-core PRIVATE minhook wxl-safetyhook)
@@ -360,7 +365,7 @@ if(WXL_CORE_X86)
         src/runtime/Image.cpp
         src/hook/Engine.cpp
         src/points/PointsX86.cpp
-        src/deinlined/CM2Shared_FinishLoading.gen.cpp)
+        ${WXL_CORE_DEINLINED})
     target_link_libraries(wxl-core-seam-harness PRIVATE minhook wxl-safetyhook)
 
     # --- The recompiled bodies against Wow.exe ------------------------------------------------------
@@ -371,7 +376,7 @@ if(WXL_CORE_X86)
         tests/stock_tests.cpp
         src/points/Points.cpp
         src/points/PointsX86.cpp
-        src/deinlined/CM2Shared_FinishLoading.gen.cpp
+        ${WXL_CORE_DEINLINED}
         src/hook/Engine.cpp
         src/runtime/Image.cpp
         src/common/Log.cpp)

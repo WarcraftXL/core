@@ -182,7 +182,7 @@ What a mod can reach **today**, by build:
 
 | | x86 | x64 |
 |---|---|---|
-| `wxl.point` (engine points) | yes: each point of `include/wxl/points/points.txt` with an x86 body, a SafetyHook detour armed at its first handler and removed at its last, its first bytes checked by Zydis; Before, Replace and After. A point Wow.exe inlined (a `deinlined` line) runs in the recompiled body of the function it was inlined into (`src/deinlined/`), which takes that function's place while the point has handlers | yes: each point, a `WXL_POINT_<n>` line at the head of its function in the fork, one byte tested while unattached; the `// INLINED` ones too |
+| `wxl.point` (engine points) | yes: each point of `include/wxl/points/points.txt` with an x86 body, a SafetyHook detour armed at its first handler and removed at its last, its first bytes checked by Zydis; Before, Replace and After. A point Wow.exe inlined (a `deinlined` line) runs in the recompiled bodies of the functions it was inlined into (`src/deinlined/`), which take those functions' places while the point has handlers | yes: each point, a `WXL_POINT_<n>` line at the head of its function in the fork, one byte tested while unattached; the `// INLINED` ones too |
 | `wxl.hook` (named points) | yes: the seams and the points of `src/hook/Points.def`, detourable | no: a seam is a call the client makes, not a function a detour can replace |
 | `wxl.hook.raw` (raw addresses) | yes | never: no fixed addresses in a program we compile |
 | `wxl.patch` (byte patches) | yes | never: nothing to patch in a program we compile |

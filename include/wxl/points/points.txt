@@ -37,11 +37,14 @@
 #   deinlined  name  parent
 #
 #   name    a point listed above with address `-`.
-#   parent  a point with an x86 detour whose function in Wow.exe holds name's inlined copy. While
-#           name has handlers, the x86 runtime replaces parent's body with its recompilation from
-#           the fork (core/src/deinlined/, written by core/tools/extract/extract.py), in which name
-#           is a function of its own, entered through the point. Listed for every runtime and mod
-#           in sdk/include/wxl/deinlined.def.
+#   parent  a function of Wow.exe that holds name's inlined copy: a point with an x86 detour, or
+#           a function the fork tags with an address that is no point (named with its parameter
+#           types when the fork overloads it). While name has handlers, the x86 runtime replaces
+#           parent's body with its recompilation from the fork (core/src/deinlined/, written by
+#           core/tools/extract/extract.py), in which name is a function of its own, entered
+#           through the point. A function inlined into several has a line for each, so that it
+#           fires from all of them as on x64. Listed for every runtime and mod in
+#           sdk/include/wxl/deinlined.def.
 #
 # A name the fork overloads carries its parameter types as the fork spells them, without spaces
 # after commas: M2Init(uint8_t*,uint32_t,M2Data&). Its C identifier adds the types' bare names
@@ -53,5 +56,6 @@
 0x0081AC90  vFrameScript_SignalEvent   replace  main  stable       # every event the interface's Lua is told of, with its format and va_list; shares the seam FrameScript.vSignalEvent
 0x00631FE0  NetClient::ProcessMessage  replace  main  stable       # every world packet before its handler; shares the gate NetClient.ProcessMessage
 0x0083CF00  CM2Shared::FinishLoading   replace  main  provisional  # a model's bytes read and fixed up, once, from CM2Shared::LoadSucceededCallback; param is the CM2Shared
--           M2Init(uint8_t*,uint32_t,M2Data&)  replace  main  provisional  # a model file's header checked and its arrays relocated, from FinishLoading (and on x64 FinishLoadingLowPrioritySequence); answers 0 for a file it refuses
+-           M2Init(uint8_t*,uint32_t,M2Data&)  replace  main  provisional  # a model file's header checked and its arrays relocated, from FinishLoading (once per model) and FinishLoadingLowPrioritySequence (once per sequence read later, its tracks relocated into the sequence's buffer); answers 0 for a file it refuses
 deinlined   M2Init(uint8_t*,uint32_t,M2Data&)  CM2Shared::FinishLoading
+deinlined   M2Init(uint8_t*,uint32_t,M2Data&)  CM2Shared::FinishLoadingLowPrioritySequence(uint32_t,uint8_t*,uint32_t)

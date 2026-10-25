@@ -460,6 +460,40 @@ CASES = [
 ]
 
 
+# A recompiled parent body (src/deinlined/<Parent>.gen.cpp) and the point table's row of its
+# parent: Thing::CallsCleanly, which calls Thing::Plain. The body names what it calls in its
+# `namespace stock`, as extract.py writes it.
+PARENT_X86_DEF = ('WXL_POINT_X86_PARENT(Thing_CallsCleanly, "Thing::CallsCleanly", 0x00401400, 32, cdecl, '
+                  'void, ())\n')
+BODY = '''namespace wxl::core::deinlined
+{
+    namespace stock
+    {
+        inline const auto Thing_Plain = reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain
+    }
+}
+'''
+GLOBAL_LINE = "        inline uint32_t& s_count = *reinterpret_cast<uint32_t*>(0x00D41258);\n"
+
+# (label, body, exit code, text expected)
+BODY_CASES = [
+    ("a recompiled body calling what Wow.exe's own calls", BODY, 0, "1 recompiled body(ies) calling 1"),
+    ("a recompiled body calling a function Wow.exe's own does not",
+     BODY.replace("reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain",
+                  "reinterpret_cast<void(__stdcall*)(int32_t, int32_t)>(0x00401100); // Thing::Owned"),
+     1, "calls Thing::Owned at 0x00401100 (Thing_Plain), which Wow.exe's own body at 0x00401400 does not call"),
+    ("the same body leaving out the call Wow.exe's own makes",
+     BODY.replace("reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain",
+                  "reinterpret_cast<void(__stdcall*)(int32_t, int32_t)>(0x00401100); // Thing::Owned"),
+     1, "Wow.exe's own body at 0x00401400 calls 0x00401000, which the recompiled one does not call"),
+    ("a recompiled body calling Wow.exe's function with another convention",
+     BODY.replace("void(__cdecl*)", "void(__stdcall*)"), 1, "declared stdcall, but 0x00401000 is cdecl"),
+    ("a recompiled body naming a global Wow.exe's own never reaches",
+     BODY.replace("    }\n}", GLOBAL_LINE + "    }\n}", 1), 1,
+     "names s_count at 0x00D41258, which Wow.exe's own body at 0x00401400 never reaches"),
+]
+
+
 # --- The local backend's parts ----------------------------------------------------------------
 
 # Every line shape llvm-objdump 19 prints for Wow.exe: the headers, a short and a long encoding
@@ -877,6 +911,37 @@ GROUND_TRUTH = {
     # FinishLoading is reached by LoadSucceededCallback's tail jump with ECX set (0x0083D35A), moves
     # ECX at 0x0083CF01 and ends in bare `ret`s (0x0083CF0F, 0x0083D23D, 0x0083D25F, 0x0083D2C1).
     "Point.CM2Shared_FinishLoading":   ("0x0083CF00", "thiscall", ["ecx"], 0),
+    # M2Init's second parent, which the runtime recompiles but is no point: reads ECX at
+    # 0x0083C6EB and [ebp+8], [ebp+0xc] (0x0083C6E4, 0x0083C6E7), `ret 0xc` at 0x0083CA73 and
+    # 0x0083CA8A; its caller 0x0083CA90 pushes three before each call (0x0083CAB2, 0x0083CADD).
+    "Parent.CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t":
+                                       ("0x0083C6E0", "thiscall", ["ecx"], 3),
+    # What the recompiled bodies call (src/deinlined/), each read by hand. CM2Shared::Initialize
+    # reads ECX (0x0083CC88) and ends in bare `ret`s (0x0083CD29, 0x0083CD4F); SMemAlloc reads
+    # four stack slots and ends `ret 0x10` (0x0076E586, 0x0076E597), STORMAPI. The M2Init<T>
+    # array readers read their frame up to [ebp+0x14] (the array; 0x00835AED, 0x00835C7A) and
+    # end in bare `ret`s (0x00835AFE, 0x00835C90), and their callers in
+    # FinishLoading and FinishLoadingLowPrioritySequence push four and clean 0x10 (`add esp,
+    # 0x10`, e.g. 0x0083C75A after the call at 0x0083C755).
+    "Deinlined.CM2Shared_Initialize":  ("0x0083CC80", "thiscall", ["ecx"], 0),
+    "Deinlined.SMemAlloc":             ("0x0076E540", "stdcall", [], 4),
+    "Deinlined.M2Init_00835AE0":       ("0x00835AE0", "cdecl", [], 4),
+    "Deinlined.M2Init_00835B80":       ("0x00835B80", "cdecl", [], 4),
+    "Deinlined.M2Init_00835BD0":       ("0x00835BD0", "cdecl", [], 4),
+    "Deinlined.M2Init_00835C20":       ("0x00835C20", "cdecl", [], 4),
+    "Deinlined.M2Init_00835C70":       ("0x00835C70", "cdecl", [], 4),
+    "Deinlined.M2Init_00835DF0":       ("0x00835DF0", "cdecl", [], 4),
+    "Deinlined.M2Init_00836B60":       ("0x00836B60", "cdecl", [], 4),
+    "Deinlined.M2Init_00836E40":       ("0x00836E40", "cdecl", [], 4),
+    "Deinlined.M2Init_00837EE0":       ("0x00837EE0", "cdecl", [], 4),
+    "Deinlined.M2Init_008382A0":       ("0x008382A0", "cdecl", [], 4),
+    "Deinlined.M2Init_008385A0":       ("0x008385A0", "cdecl", [], 4),
+    "Deinlined.M2Init_00838B10":       ("0x00838B10", "cdecl", [], 4),
+    "Deinlined.M2Init_00839080":       ("0x00839080", "cdecl", [], 4),
+    "Deinlined.M2Init_00839270":       ("0x00839270", "cdecl", [], 4),
+    "Deinlined.M2Init_00839EF0":       ("0x00839EF0", "cdecl", [], 4),
+    "Deinlined.M2Init_0083A460":       ("0x0083A460", "cdecl", [], 4),
+    "Deinlined.M2Init_0083AF90":       ("0x0083AF90", "cdecl", [], 4),
     # The x86 binding's own calls for wxl.m2's models of the world (calls_x86.def), each read by
     # hand: `ret 8` at 0x008251C5, `ret 4` at 0x00825F36, `ret 0x1c` at 0x00832ADA, `ret 0xc` at
     # 0x0082D11A, `ret 4` at 0x00823F59, `ret 8` at 0x00824F19, `ret 4` at 0x004F5E70 and
@@ -985,6 +1050,17 @@ def main():
             ok = result.returncode == want_code and (not want_text or want_text in output)
             report(label, ok, "exit %d%s" % (want_code, ", with %r" % want_text
                                              if want_text else ""), output)
+
+        for index, (label, text, want_code, want_text) in enumerate(BODY_CASES):
+            case = Path(temp) / ("body%02d" % index)
+            build(case)
+            (case / "deinlined").mkdir()
+            (case / "x86.def").write_text(PARENT_X86_DEF, encoding="utf-8")
+            (case / "deinlined" / "Thing_CallsCleanly.gen.cpp").write_text(text, encoding="utf-8")
+            result = run(case, stub + ("--points", str(case / "x86.def"), "--deinlined", str(case / "deinlined")))
+            output = result.stdout + result.stderr
+            report(label, result.returncode == want_code and want_text in output,
+                   "exit %d, with %r" % (want_code, want_text), output)
 
         # The tool must say so and leave, not crash, when the MCP is not there.
         case = Path(temp) / "unreachable"

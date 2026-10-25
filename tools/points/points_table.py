@@ -113,6 +113,15 @@ def normal_type(spelled):
     return t.replace(" ", "")
 
 
+def ident_of(name):
+    """The C identifier of a points.txt name (see Point.ident)."""
+    base, overload = split_name(name)
+    ident = re.sub(r"\W", "_", base.replace("::", "_"))
+    if overload is not None:
+        ident += "".join("_" + re.sub(r"\W", "", t) for t in overload) or "_void"
+    return ident
+
+
 class Point:
     """One line of points.txt, completed."""
 
@@ -122,7 +131,10 @@ class Point:
         self.name = name              # qualified, as the fork writes it (with its parameter
                                       # types when the fork overloads it)
         self.base_name, self.overload = split_name(name)
-        self.deinlined_in = None      # the point whose recompiled x86 body holds this one's copy
+        self.parents = []             # the functions whose recompiled x86 bodies hold this one's
+                                      # copies (Point rows: a listed point, or a function of the
+                                      # fork that is a parent only, whose index is None)
+        self.parent_names = []        # (name, origin) of its deinlined lines, until load() resolves them
         self.policy = policy
         self.thread = thread
         self.stability = stability
@@ -147,10 +159,12 @@ class Point:
         """The C identifier of the point: CGCamera::UpdateCallback is CGCamera_UpdateCallback; an
         overload adds the bare names of its parameter types: M2Init(uint8_t*,uint32_t,M2Data&) is
         M2Init_uint8_t_uint32_t_M2Data."""
-        ident = re.sub(r"\W", "_", self.base_name.replace("::", "_"))
-        if self.overload is not None:
-            ident += "".join("_" + re.sub(r"\W", "", t) for t in self.overload) or "_void"
-        return ident
+        return ident_of(self.name)
+
+    @property
+    def listed(self):
+        """Whether it is a point of points.txt, rather than a function that is only a parent."""
+        return self.index is not None
 
     @property
     def convention(self):
@@ -201,16 +215,18 @@ def read_list(path):
         origin = "%s:%d" % (path.name, number)
         deinlined = DEINLINE_LINE.match(line)
         if deinlined:
-            point, parent = by_name.get(deinlined.group(1)), by_name.get(deinlined.group(2))
-            if point is None or parent is None:
-                problems.append("%s: deinlined names %s, which no line above names"
-                                % (origin, deinlined.group(1) if point is None else deinlined.group(2)))
+            point, parent = by_name.get(deinlined.group(1)), deinlined.group(2)
+            if point is None:
+                problems.append("%s: deinlined names %s, which no line above names" % (origin, deinlined.group(1)))
                 continue
             if point.address is not None:
                 problems.append("%s: %s has an x86 address; deinlined is for a function the x86 compiler "
                                 "inlined (address `-`)" % (origin, point.name))
                 continue
-            point.deinlined_in = parent
+            if parent in (n for n, _ in point.parent_names):
+                problems.append("%s: %s is deinlined in %s twice" % (origin, point.name, parent))
+                continue
+            point.parent_names.append((parent, origin))
             continue
         site = SITE_LINE.match(line)
         if site:
@@ -258,6 +274,7 @@ OFFSET_INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 class Offsets:
     def __init__(self, generated):
         self.by_address = {}          # address -> [(name, bound, length, file, line)]
+        self.by_name = {}             # name -> [address]
         todo, seen = [generated / "functions.def"], set()
         while todo:
             path = todo.pop()
@@ -270,6 +287,7 @@ class Offsets:
             for m in OFFSET_ROW.finditer(text):
                 self.by_address.setdefault(int(m.group(2), 16), []).append(
                     (m.group(1), int(m.group(3), 0), int(m.group(4), 0), m.group(7), int(m.group(8))))
+                self.by_name.setdefault(m.group(1), []).append(int(m.group(2), 16))
         if not self.by_address:
             raise Problem("%s holds no WXL_OFFSET_FUNCTION row" % (generated / "functions.def"))
 
@@ -457,22 +475,61 @@ def complete(point, client, offsets, cache, problems):
     return True
 
 
+def function_parent(name, origin, client, offsets, cache, problems):
+    """A parent that is no point of the list: a function of the fork with an address, completed as
+    a point would be (index None), or None after a problem."""
+    try:
+        base, overload = split_name(name)
+    except Problem as trouble:
+        problems.append("%s: %s" % (origin, trouble))
+        return None
+    addresses = sorted(set(offsets.by_name.get(base, [])))
+    if overload is not None and len(addresses) > 1:
+        matching = []
+        for address in addresses:
+            row = next(r for r in offsets.by_address[address] if r[0] == base)
+            text = cxx.strip_cxx((client / row[3]).read_text(encoding="utf-8", errors="replace"))
+            if definition_params(text, base, max(1, row[4] - 2)) == overload:
+                matching.append(address)
+        addresses = matching
+    if len(addresses) != 1:
+        problems.append("%s: the parent %s is neither a point above nor a single function the fork tags "
+                        "with an address (%d found)%s"
+                        % (origin, name, len(addresses), "; name the overload by its parameter types, "
+                           "`%s(type,type)`" % name if len(addresses) > 1 and overload is None else ""))
+        return None
+    parent = Point(None, addresses[0], name, "replace", "main", "provisional", "", origin)
+    if not complete(parent, client, offsets, cache, problems):
+        return None
+    return parent
+
+
 def load(points_txt, client, generated):
     points, problems = read_list(points_txt)
     offsets = Offsets(generated)
     cache = {}
     for point in points:
         complete(point, client, offsets, cache, problems)
+    by_name = {p.name: p for p in points}
+    functions = {}
     for point in points:
-        parent = point.deinlined_in
-        if parent is None:
-            continue
-        if not parent.x86:
-            problems.append("%s: %s is deinlined in %s, which has no x86 detour (%s)"
-                            % (point.origin, point.name, parent.name, parent.x86_why or "?"))
-            continue
-        point.x86 = True
-        point.x86_why = ""
+        for name, origin in point.parent_names:
+            parent = by_name.get(name)
+            if parent is None:
+                if name not in functions:
+                    functions[name] = function_parent(name, origin, client, offsets, cache, problems)
+                parent = functions[name]
+                if parent is None:
+                    continue
+            if not parent.x86:
+                problems.append("%s: %s is deinlined in %s, which has no x86 body to replace (%s)"
+                                % (origin, point.name, parent.name, parent.x86_why or "?"))
+                continue
+            point.parents.append(parent)
+        if point.parents:
+            point.x86 = True
+            point.x86_why = ""
+    for point in points:
         for address, args, origin in point.sites:
             if not point.x86 and point.address is not None:
                 problems.append("%s: a site of %s, which has no x86 detour" % (origin, point.name))

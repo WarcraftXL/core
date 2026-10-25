@@ -108,15 +108,30 @@ def x86_def(points):
 //       point's Before handlers with each argument read where `args` says ("ecx,[esp+8]").
 //   WXL_POINT_X86_ABSENT(Ident, why)
 //       a point of wxl/points.def x86 cannot detour, and why: what find() and list() tell a mod.
-//   WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params)
-//       a point the 2008 compiler inlined into the function of point Parent: the runtime replaces
-//       Parent's x86 body with its recompilation (src/deinlined/), in which this function is a
-//       real one, entered through the point while it has handlers. Its signature as the contract
-//       carries it (a reference is its address).
+//   WXL_POINT_X86_DEINLINED(Ident, name, ret, params)
+//       a point the 2008 compiler inlined into the functions its WXL_POINT_X86_DEINLINED_IN rows
+//       name: while it has handlers, the runtime replaces each of them with its recompilation
+//       (src/deinlined/), in which this function is a real one, entered through the point. Its
+//       signature as the contract carries it (a reference is its address).
+//   WXL_POINT_X86_DEINLINED_IN(Ident, Parent)
+//       one function a de-inlined point is inlined into: a WXL_POINT_X86_PARENT row.
+//   WXL_POINT_X86_PARENT(Parent, name, address, length, conv, ret, params)
+//       a function whose x86 body the runtime replaces with its recompilation from the fork
+//       (src/deinlined/<Parent>.gen.cpp) while a point inlined into it has handlers: a point of
+//       its own above, or a function of Wow.exe that is no point. Its address, length,
+//       convention and signature as Wow.exe has them (thiscall: `self` first, in ECX).
 
 #ifndef WXL_POINT_X86_DEINLINED
-#define WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params)
+#define WXL_POINT_X86_DEINLINED(Ident, name, ret, params)
 #define WXL_POINT_X86_DEINLINED_DEFAULTED
+#endif
+#ifndef WXL_POINT_X86_DEINLINED_IN
+#define WXL_POINT_X86_DEINLINED_IN(Ident, Parent)
+#define WXL_POINT_X86_DEINLINED_IN_DEFAULTED
+#endif
+#ifndef WXL_POINT_X86_PARENT
+#define WXL_POINT_X86_PARENT(Parent, name, address, length, conv, ret, params)
+#define WXL_POINT_X86_PARENT_DEFAULTED
 #endif
 #ifndef WXL_POINT_X86
 #error "define WXL_POINT_X86(Ident, name, address, length, conv, ret, params) before including x86.def"
@@ -134,17 +149,38 @@ def x86_def(points):
             out.append('WXL_POINT_X86_ABSENT(%s, "x64 only: %s")\n' % (p.ident, p.x86_why))
             continue
         params = ", ".join("%s %s" % (t, n) for t, n in p.contract_params())
-        if p.deinlined_in is not None:
-            out.append('WXL_POINT_X86_DEINLINED(%s, "%s", %s, %s, (%s))\n'
-                       % (p.ident, p.name, p.deinlined_in.ident, p.ret_kind[1], params))
+        if p.parents:
+            out.append('WXL_POINT_X86_DEINLINED(%s, "%s", %s, (%s))\n' % (p.ident, p.name, p.ret_kind[1], params))
+            for parent in p.parents:
+                out.append('WXL_POINT_X86_DEINLINED_IN(%s, %s)\n' % (p.ident, parent.ident))
             continue
         out.append('WXL_POINT_X86(%s, "%s", %s, %d, %s, %s, (%s))\n'
                    % (p.ident, p.name, column_hex(p.address), p.length, p.convention, p.ret_kind[1], params))
         for address, args, _ in p.sites:
             out.append('WXL_POINT_SITE(%s, %s, "%s")\n' % (p.ident, column_hex(address), ",".join(args)))
-    out.append("\n#ifdef WXL_POINT_X86_DEINLINED_DEFAULTED\n#undef WXL_POINT_X86_DEINLINED\n"
-               "#undef WXL_POINT_X86_DEINLINED_DEFAULTED\n#endif\n")
+    parents = all_parents(points)
+    if parents:
+        out.append("\n")
+    for parent in parents:
+        params = ", ".join("%s %s" % (t, n) for t, n in parent.contract_params())
+        out.append('WXL_POINT_X86_PARENT(%s, "%s", %s, %d, %s, %s, (%s))\n'
+                   % (parent.ident, parent.name, column_hex(parent.address), parent.length, parent.convention,
+                      parent.ret_kind[1], params))
+    out.append("\n")
+    for shape in ("WXL_POINT_X86_DEINLINED", "WXL_POINT_X86_DEINLINED_IN", "WXL_POINT_X86_PARENT"):
+        out.append("#ifdef %s_DEFAULTED\n#undef %s\n#undef %s_DEFAULTED\n#endif\n" % (shape, shape, shape))
     return "".join(out)
+
+
+def all_parents(points):
+    """Every parent of a de-inlined point, once, in the order the list first names them."""
+    seen, out = set(), []
+    for p in points:
+        for parent in p.parents:
+            if parent.name not in seen:
+                seen.add(parent.name)
+                out.append(parent)
+    return out
 
 
 # --- sdk/include/wxl/deinlined.def ------------------------------------------------------------
@@ -157,14 +193,15 @@ def deinlined_def(points):
 //   WXL_DEINLINED(Ident, name, parent, parent_address)
 //
 //   Ident, name     the point (a row of wxl/points.def), attached to like any other
-//   parent          the point whose function Wow.exe 12340 inlined it into; while the point has
-//                   handlers, the x86 runtime replaces that function's body with its recompilation
-//                   from the fork, in which `name` is called rather than copied
+//   parent          a function Wow.exe 12340 inlined it into (the fork's name); while the point
+//                   has handlers, the x86 runtime replaces that function's body with its
+//                   recompilation from the fork, in which `name` is called rather than copied
 //   parent_address  that function's address in Wow.exe 12340
 //
-// On the recompiled client (x64) every one of them is a function of its own already. A copy
-// inlined into a function that is not a parent here is not reached on x86 (generate_points.py
-// --coverage counts them).
+// A point inlined into several functions has a row for each: on x86 it fires from all of them,
+// as it does on the recompiled client (x64), where every one of them is a function of its own
+// already. A copy inlined into a function that is not a parent here is not reached on x86
+// (generate_points.py --coverage counts them).
 
 #ifndef WXL_DEINLINED
 #error "define WXL_DEINLINED(Ident, name, parent, parent_address) before including wxl/deinlined.def"
@@ -172,9 +209,9 @@ def deinlined_def(points):
 
 """]
     for p in points:
-        if p.deinlined_in is not None:
+        for parent in p.parents:
             out.append('WXL_DEINLINED(%s, "%s", "%s", %s)\n'
-                       % (p.ident, p.name, p.deinlined_in.name, column_hex(p.deinlined_in.address)))
+                       % (p.ident, p.name, parent.name, column_hex(parent.address)))
     out.append(MSVC_TAIL)
     return "".join(out)
 
@@ -354,9 +391,9 @@ def coverage(points, client, binary):
         if not p.x86:
             rows.append((p, None, None, "no x86 body: " + p.x86_why))
             continue
-        if p.deinlined_in is not None:
-            rows.append((p, None, None, "de-inlined in %s's recompiled body; a copy inlined anywhere else "
-                                        "is not reached" % p.deinlined_in.name))
+        if p.parents:
+            rows.append((p, None, None, "de-inlined in the recompiled body of %s; a copy inlined anywhere "
+                                        "else is not reached" % " and ".join(q.name for q in p.parents)))
             continue
         calls, jumps, data_refs = binary_references(sections, p.address)
         src_calls, src_refs = source_sites(client, p)

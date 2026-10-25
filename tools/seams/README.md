@@ -113,8 +113,15 @@ direct source calls with no convention of its own.
 Besides the seams, it reads two more tables of the same shape: the x86 points
 (`include/wxl/points/x86.def`, generated) and the client functions the x86 binding calls by hand
 (`include/wxl/core/binding/calls_x86.def`, `WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv,
-params)`), whose rows declare the convention `BindingX86.cpp` calls them with. `--points` and
-`--calls` name others; by default both are read when `--seams` is core's own.
+params)`), whose rows declare the convention `BindingX86.cpp` calls them with. The point table's
+`WXL_POINT_X86_PARENT` rows that are no point are read as `Parent.<Ident>` rows, and the runtime's
+recompiled parent bodies (`src/deinlined/<Parent>.gen.cpp`) as one `Deinlined.<shim>` row per
+stock function their `namespace stock` names, with the convention the body calls it with. Each
+body is then held to Wow.exe's own parent: every function it calls is one the parent calls, every
+function the parent calls is one it calls (or a lone `ret`, an empty function of the release
+client), and every global and string it names is one the parent's instructions reach.
+`--points`, `--calls` and `--deinlined` name others; by default all three are read when `--seams`
+is core's own.
 
 ## What it decides, per row
 

@@ -53,11 +53,12 @@ client function, a row of include/wxl/points/points.txt
 ```
 
 A point the stock client inlined (a `deinlined` line of points.txt) has no address to detour.
-On x86 it is reached through the function it was inlined into, its parent:
+On x86 it is reached through each function it was inlined into, its parents (a point of its own
+or a function of Wow.exe that is no point), all put in place at its first handler:
 
 ```
 parent's address in Wow.exe
-  -> the parent's chain: its own point's detour and any seam, in front
+  -> the parent's chain: its own point's detour (if it is a point) and any seam, in front
   -> the last link (priority INT_MAX), present while the de-inlined point has handlers: the
      parent recompiled from the fork (src/deinlined/<Parent>.gen.cpp, written by
      tools/extract/extract.py --deinlined), calling Wow.exe's other functions at their addresses
@@ -134,19 +135,23 @@ of each table lists its shapes and columns.
 A function the stock client inlined everywhere, which a mod should reach on x86 too.
 
 1. Its line in points.txt with address `-` (step 1 of a new point), and a `deinlined <name>
-   <parent>` line under it: the parent is a point with an x86 detour whose function in Wow.exe
-   holds the inlined copy (a new point too if it is not one yet).
-2. `generate_points.py` as for any point: the x86 row is `WXL_POINT_X86_DEINLINED`, and the
-   shared list `sdk/include/wxl/deinlined.def` gains the line.
+   <parent>` line under it for each function of Wow.exe that holds an inlined copy: a point with
+   an x86 detour, or a function the fork tags with an address (`name(types)` when the fork
+   overloads it), which then needs no point of its own.
+2. `generate_points.py` as for any point: the x86 rows are `WXL_POINT_X86_DEINLINED`, one
+   `WXL_POINT_X86_DEINLINED_IN` per parent and one `WXL_POINT_X86_PARENT` per parent function, and
+   the shared list `sdk/include/wxl/deinlined.def` gains a line per parent.
 3. `python tools/extract/extract.py --deinlined --client <fork> --binary Wow.orig.exe` writes the
    parent's recompiled body, `src/deinlined/<Parent>.gen.cpp`, and the head that enters the point
    in the de-inlined function. A body the tool cannot complete (a callee with no address, no
-   `// INLINED` definition and no empty body) is refused by name. Add the file to the x86 sources
-   of `wxl-core` and of the harness in `CMakeLists.txt`.
+   `// INLINED` definition and no empty body) is refused by name. Add the file to
+   `WXL_CORE_DEINLINED` in `CMakeLists.txt`. `check_conventions.py` then holds what the body calls
+   and names to Wow.exe's own parent.
 4. `wxl-core-stock-tests` (ctest `stock`): run the parent and its recompiled body on inputs of the
    function's own against a stock Wow.exe laid at its base, the client's surroundings stubbed at
    their addresses; both must answer and leave the same.
-5. Raise the ABI feature.
+5. Raise the ABI feature for a new point; a parent added to a point already listed appends
+   nothing to the contract.
 
 ### A new engine type
 
@@ -488,7 +493,7 @@ folder, source or transform is registered: the gate's test is two loads.
 | `python core/tools/extract/extract.py --deinlined --check` | `src/deinlined/` is what the fork gives. Runs in the fork's build when `WXL_WOW_EXE` names a stock Wow.exe (`wxl-deinlined-check`) |
 | `python core/tools/extract/test_extract.py` | the extraction tool against a small fork made on the spot: conventions, members, globals, de-inlined callees, empty functions |
 | `ctest` `stock` in `core/build/win-x86` (`WXL_WOW_EXE`) | the recompiled bodies of `src/deinlined/` against a stock Wow.exe's own code, on model files of its own: same answers, same bytes, the points fired |
-| `python core/tools/seams/check_conventions.py` | every `conv` column agrees with `Wow.exe`, the x86 points' (`include/wxl/points/x86.def`) and the x86 binding's calls (`include/wxl/core/binding/calls_x86.def`) included. Reads a stock `Wow.exe` 12340 (`--binary` or `$WXL_WOW_EXE`) with llvm-objdump |
+| `python core/tools/seams/check_conventions.py` | every `conv` column agrees with `Wow.exe`, the x86 points' and their parents' (`include/wxl/points/x86.def`), the x86 binding's calls (`include/wxl/core/binding/calls_x86.def`) and the stock functions the recompiled bodies of `src/deinlined/` call included; each body calls the functions and names the globals Wow.exe's own parent does. Reads a stock `Wow.exe` 12340 (`--binary` or `$WXL_WOW_EXE`) with llvm-objdump |
 | `python core/tools/fields/generate_update_fields.py --check` | the SDK's update-field table is what the fork gives; with `--binary`, what `Wow.exe`'s own tables hold. Runs in the fork's build |
 | `wxl-core-seam-harness --profile-live`, with Tracy's `tracy-capture -a 127.0.0.1` | the profiler's zones, plots, messages and frames reach a viewer, from a harness under Wine |
 | `sdk/tests/ingame/` in a client (`wxl-ingame` assembles it as a Mods folder) | in the real game, on each runtime: the test mods' functions called from the client's Lua, chat and CVar events, hot reload and handler order, a broken and repaired manifest, casts, a cooldown, an item use, an equipment change, `/reload` and a logout; `wxl.selftest` logs PASS or FAIL per check |
@@ -504,7 +509,7 @@ The `ctest` suites are Windows executables; from Linux they build with clang-cl 
 | seam | a client function the runtime hooks, named `<Domain>.<Function>` |
 | point | an engine function mods attach Before, Replace or After handlers to, named as the fork names it (`CGCamera::UpdateCallback`) |
 | site | an inlined copy of a point's function on x86, reached by a mid-function hook: Before handlers only |
-| de-inlined point | a point Wow.exe inlined, real on x86 in its parent's recompiled body, which takes the parent's place while the point has handlers |
+| de-inlined point | a point Wow.exe inlined, real on x86 in its parents' recompiled bodies, which take the parents' places while the point has handlers |
 | engine header | a struct of `wxl::engine` (sdk/engine), the client's own type laid out for x86 and x64, with its layout hash |
 | gate | a seam that can stop the call or rewrite its arguments |
 | binding | the facts the runtime reads out of the client (`wxl::core::binding`) |

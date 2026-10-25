@@ -173,6 +173,163 @@ def read_point_rows(path, problems):
     return rows
 
 
+PARENT_ROW = re.compile(r"\bWXL_POINT_X86_PARENT\s*\(")
+
+
+def read_parent_rows(path, problems):
+    """Every WXL_POINT_X86_PARENT row of the point table, as a row named Parent.<Ident>: a function
+    whose body the runtime replaces with its recompilation (src/deinlined/). A parent that is a
+    point of its own is its Point row already and is left out here."""
+    if not path.is_file():
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    points = set()
+    for match in POINT_ROW.finditer(text):
+        close = table.balanced(text, match.end() - 1)
+        if close > 0:
+            points.add(table.split_top_level(text[match.end():close - 1])[1].strip().strip('"'))
+    rows = []
+    for match in PARENT_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = table.split_top_level(text[open_at + 1:close - 1])
+        if len(columns) != 7:
+            problems.append("%s: a WXL_POINT_X86_PARENT row without its seven columns" % path.name)
+            continue
+        ident, name, address, _length, convention, returns, params = columns
+        name = name.strip().strip('"')
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        inner = params.strip()[1:-1].strip()
+        decls = [] if not inner else table.split_top_level(inner)
+        row = Row("Parent", ident.strip(), "%s@%s" % (name.split("(")[0], address.strip()), returns,
+                  convention.strip(), decls, origin, False)
+        row.listed = name in points
+        rows.append(row)
+    return rows
+
+
+# --- The recompiled bodies (src/deinlined/<Parent>.gen.cpp) -----------------------------------
+#
+# extract.py writes each parent's body with Wow.exe's functions and globals it uses at their
+# addresses, in its `namespace stock`. Every function there is a row checked like the seams'
+# (named Deinlined.<shim>, once per address), and the body as a whole is held to Wow.exe's own:
+# what it calls and reads, Wow.exe's parent calls and reads (check_bodies).
+
+SHIM = re.compile(r"^\s*inline const auto (\w+) = reinterpret_cast<(.+?)\((__\w+)\*\)\((.*)\)>"
+                  r"\((0x[0-9A-Fa-f]{8})\); // (\S+)", re.M)
+GLOBAL = re.compile(r"^\s*inline (.+?)& (\w+) = \*reinterpret_cast<.+?\*>\((0x[0-9A-Fa-f]{8})\);", re.M)
+STRING = re.compile(r"reinterpret_cast<const char\*>\((0x[0-9A-Fa-f]{8})\)")
+
+
+def split_types(text):
+    """A parameter list split at its top-level commas, template brackets kept whole."""
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        if c in "<(":
+            depth += 1
+        elif c in ">)":
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append(text[start:i].strip())
+            start = i + 1
+    if text[start:].strip():
+        out.append(text[start:].strip())
+    return out
+
+
+class Body:
+    """One recompiled parent body: the parent row, and the stock functions, globals and strings
+    it names."""
+
+    def __init__(self, parent, path):
+        self.parent = parent          # its Parent or Point row
+        self.path = path
+        self.shims = []               # (ident, address, name, conv, ret, [param types])
+        self.data = []                # (name, address): globals and strings
+
+
+def read_bodies(directory, parents, problems):
+    """The body of each parent row, read from <directory>/<Ident>.gen.cpp."""
+    bodies = []
+    for parent in parents:
+        path = directory / ("%s.gen.cpp" % parent.name)
+        if not path.is_file():
+            problems.append("%s (%s): its recompiled body %s is missing" % (parent.point, parent.origin, path.name))
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        body = Body(parent, path)
+        for m in SHIM.finditer(text):
+            body.shims.append((m.group(1), int(m.group(5), 16), m.group(6), m.group(3)[2:], m.group(2).strip(),
+                               split_types(m.group(4))))
+        for m in GLOBAL.finditer(text):
+            body.data.append((m.group(2), int(m.group(3), 16)))
+        for m in STRING.finditer(text):
+            body.data.append(("the string at %s" % m.group(1), int(m.group(1), 16)))
+        bodies.append(body)
+    return bodies
+
+
+def body_rows(bodies, functions):
+    """A row per stock function the bodies call, once per address: its convention as the body
+    calls it (a thiscall member is written __fastcall with a dummy EDX)."""
+    rows, seen = [], set()
+    for body in bodies:
+        origin = body.path.name
+        for ident, address, name, conv, ret, params in body.shims:
+            if address in seen:
+                continue
+            seen.add(address)
+            if conv == "fastcall" and len(params) >= 2 and params[1] == "void*" and "::" in name:
+                conv, params = "thiscall", [params[0]] + params[2:]
+            names = sorted(n for n, at in functions.by_name.items() if address in at)
+            symbol = name if name in names else (names[0] if names else name)
+            rows.append(Row("Deinlined", re.sub(r"_\d+$", "", ident) if ident.endswith("_2") else ident,
+                            "%s@0x%08X" % (symbol, address), ret, conv, params, origin, False))
+    return rows
+
+
+def bare_return(binary, address):
+    """Whether the function at `address` is a lone `ret`: an empty function of the release
+    client (DebugLog), which a recompiled body leaves out."""
+    insns = disassemble(binary, address, address + 4)
+    return bool(insns) and insns[0].mn == "ret"
+
+
+def check_bodies(binary, functions, bodies, problems):
+    """Each recompiled body against Wow.exe's own parent: every function it calls is one the stock
+    parent calls, every function the stock parent calls is one it calls (or an empty one), and
+    every global and string it names is one the stock parent reads or writes."""
+    for body in bodies:
+        parent = body.parent
+        resolved, trouble = functions.resolve(parent.spec)
+        if resolved is None:
+            problems.append("%s (%s): its symbol `%s` does not resolve: %s"
+                            % (parent.point, parent.origin, parent.spec, trouble))
+            continue
+        address, extent = resolved
+        insns = trim_tables(disassemble(binary, address, address + extent), address, address + extent)
+        calls = {branch_target(i) for i in insns if i.mn == "call"} - {None}
+        named = set()
+        for insn in insns:
+            named.update(int(h, 16) for h in re.findall(r"0x[0-9a-f]{6,8}", insn.ops))
+        mine = {at for _, at, _, _, _, _ in body.shims}
+        where = "%s (%s)" % (body.path.name, parent.point)
+        for ident, at, name, _, _, _ in body.shims:
+            if at not in calls:
+                problems.append("%s: calls %s at 0x%08X (%s), which Wow.exe's own body at 0x%08X does not call"
+                                % (where, name, at, ident, address))
+        for at in sorted(calls - mine):
+            if not bare_return(binary, at):
+                problems.append("%s: Wow.exe's own body at 0x%08X calls 0x%08X, which the recompiled one "
+                                "does not call (and which is not an empty function)" % (where, address, at))
+        for name, at in body.data:
+            if at not in named:
+                problems.append("%s: names %s at 0x%08X, which Wow.exe's own body at 0x%08X never reaches"
+                                % (where, name, at, address))
+
+
 CALL_ROW = re.compile(r"\bWXL_BINDING_CALL_X86\s*\(")
 
 
@@ -1396,6 +1553,10 @@ def main(argv=None):
     parser.add_argument("--calls", type=Path, default=None,
                         help="the x86 binding's table of the client functions it calls, whose rows are "
                              "checked like the seams'; default core's own, read when --seams is core's own")
+    parser.add_argument("--deinlined", type=Path, default=None,
+                        help="the runtime's recompiled parent bodies, whose stock calls are checked like the "
+                             "seams' and whose calls and globals are held to Wow.exe's own parents; default "
+                             "core's own src/deinlined, read when --seams is core's own")
     parser.add_argument("--thunks", type=Path, default=core / "src" / "seams" / "RegparmX86.cpp",
                         help="the hand-written regparm thunks")
     parser.add_argument("--backend", choices=("local", "mcp"), default="local",
@@ -1429,6 +1590,16 @@ def main(argv=None):
         points = core / "include" / "wxl" / "points" / "x86.def"
     point_rows = read_point_rows(points.resolve(), problems) if points else []
     rows += point_rows
+    parent_rows = read_parent_rows(points.resolve(), problems) if points else []
+    rows += [row for row in parent_rows if not row.listed]
+    deinlined = args.deinlined
+    if deinlined is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        deinlined = core / "src" / "deinlined"
+    bodies = []
+    if deinlined and parent_rows:
+        by_name = {row.name: row for row in point_rows}
+        parents = [by_name.get(row.name, row) for row in parent_rows]
+        bodies = read_bodies(deinlined.resolve(), parents, problems)
     calls = args.calls
     if calls is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
         calls = core / "include" / "wxl" / "core" / "binding" / "calls_x86.def"
@@ -1452,6 +1623,8 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     functions = Functions.load(args.offsets.resolve())
+    shim_rows = body_rows(bodies, functions)
+    rows += shim_rows
 
     thunks = read_thunks(args.thunks.resolve(), problems)
 
@@ -1462,6 +1635,8 @@ def main(argv=None):
         binary = open_binary(args)
         for row in rows:
             findings.append(check_row(binary, functions, row, args.max_callers))
+        if bodies and not args.point:
+            check_bodies(binary, functions, bodies, problems)
     except Unusable as trouble:
         hint = binary.hint if binary else (McpBinary.hint if args.backend == "mcp"
                                            else LocalBinary.hint)
@@ -1501,10 +1676,11 @@ def main(argv=None):
         return 1
 
     if not args.json:
-        print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d regparm thunk(s), %d "
-              "witness(es), %s, %d undetermined point(s), %.1fs)"
-              % (len(rows), len(point_rows), len(thunks), sum(len(r.witnesses) for r in rows), binary.describe(),
-                 notes, elapsed))
+        print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d recompiled body(ies) "
+              "calling %d stock function(s) as Wow.exe's own do, %d regparm thunk(s), %d witness(es), %s, %d "
+              "undetermined point(s), %.1fs)"
+              % (len(rows), len(point_rows), len(bodies), len(shim_rows), len(thunks),
+                 sum(len(r.witnesses) for r in rows), binary.describe(), notes, elapsed))
     return 0
 
 
