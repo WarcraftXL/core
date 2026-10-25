@@ -22,6 +22,7 @@
 #include <windows.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -1378,6 +1379,12 @@ namespace wxl::core::binding
         return DescribeArchive(Read<const uint8_t*>(archive, 4), out) ? WXL_TRUE : WXL_FALSE;
     }
 
+    wxl_bool archive_record_of(void* record, wxl_core_archive* out)
+    {
+        if (!IsClient() || !record || !out) return WXL_FALSE;
+        return DescribeArchive(static_cast<const uint8_t*>(record), out) ? WXL_TRUE : WXL_FALSE;
+    }
+
     uint32_t client_dbs(wxl_core_db_fn fn, void* user)
     {
         if (!IsClient() || !fn) return 0;
@@ -1438,6 +1445,24 @@ namespace
     // The allocator of model data: 16-byte aligned blocks of Storm's heap (SMemAlloc).
     using AllocA16Fn = void*(__cdecl*)(uint32_t size, const char* file, int32_t line);
     using FreeA16Fn  = void(__cdecl*)(void* block);
+
+    /// PumpBlpTextureAsync(texture, data) (0x004B7BD0): the texture in EAX (`mov esi, eax` at
+    /// 0x004B7BE3), the data the one stack dword ([ebp+8]), popped by the caller, as
+    /// FinalizeAsyncBlpTextureLoad calls it (0x004B7E8E: `mov eax, esi; call; add esp, 4`).
+    /// Kept out of line: the block sets EAX, which a frame of the caller's must not hold.
+    __declspec(noinline) int32_t CallPumpBlp(void* texture, const void* data)
+    {
+        const std::uintptr_t site   = WXL_SITE("PumpBlpTextureAsync", 0);
+        int32_t              result = 0;
+        __asm {
+            mov  eax, dword ptr [texture]
+            push dword ptr [data]
+            call dword ptr [site]
+            add  esp, 4
+            mov  dword ptr [result], eax
+        }
+        return result;
+    }
 }
 
 namespace wxl::core::binding
@@ -1520,6 +1545,107 @@ namespace wxl::core::binding
     {
         if (!IsClient() || !texture) return nullptr;
         return static_cast<const char*>(texture) + WXL_FIELD("CTexture", "m_filename");
+    }
+
+    uint32_t m2_cache_evict(const char* leaf, void** out, uint32_t capacity)
+    {
+        if (!IsClient() || !leaf || !*leaf) return 0;
+        // CM2Cache's 1021 buckets at +0x10, each a CM2Shared chained through m_next (+0x148) and
+        // m_previous (+0x144), the address of the link that points at it: CM2Cache::ClearSharedHash
+        // (0x0081BF50: `lea edx, [ecx+0x10]`, `mov edi, 0x3fd`, [eax+0x144], [eax+0x148]).
+        constexpr std::uintptr_t kCache    = WXL_STATIC_AT("s_cache", 0x00D3FCF0);
+        constexpr std::size_t    kBuckets  = 0x10;
+        constexpr uint32_t       kCount    = 0x3FD;
+        constexpr std::size_t    kPrevious = 0x144;
+        constexpr std::size_t    kNext     = 0x148;
+        static_assert(WXL_FIELD("CM2Shared", "m_fileNameWithoutPath") == 0x140, "m_previous follows it");
+
+        uint32_t evicted = 0;
+        for (uint32_t i = 0; i < kCount; ++i)
+        {
+            uint8_t* shared = *reinterpret_cast<uint8_t**>(kCache + kBuckets + i * 4);
+            while (shared)
+            {
+                uint8_t*    next = Read<uint8_t*>(shared, kNext);
+                const char* name = Read<const char*>(shared, WXL_FIELD("CM2Shared", "m_fileNameWithoutPath"));
+                if (name && _stricmp(name, leaf) == 0)
+                {
+                    // As ~CM2Shared unlinks it (0x0083D5B0).
+                    uint8_t** previous = Read<uint8_t**>(shared, kPrevious);
+                    if (previous) *previous = next;
+                    if (next) std::memcpy(next + kPrevious, &previous, sizeof previous);
+                    const void* none = nullptr;
+                    std::memcpy(shared + kPrevious, &none, sizeof none);
+                    std::memcpy(shared + kNext, &none, sizeof none);
+                    if (out && evicted < capacity) out[evicted] = shared;
+                    ++evicted;
+                }
+                shared = next;
+            }
+        }
+        return evicted;
+    }
+
+    wxl_bool unit_update_display(void* object)
+    {
+        if (!IsClient() || !object) return WXL_FALSE;
+        const uint32_t type = object_type_id(object);
+        if (type != WXL_OBJECT_UNIT && type != WXL_OBJECT_PLAYER) return WXL_FALSE;
+        // CGUnit_C::UpdateDisplayInfo(force): __thiscall, `ret 4`, reached through the unit's and
+        // the player's vtables only (SMSG_FORCE_DISPLAY_UPDATE's `unit->UpdateDisplayInfo(1)`).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::UpdateDisplayInfo", 0), object, int32_t(1));
+        return WXL_TRUE;
+    }
+
+    uint32_t texture_reload(const char* name, uint32_t* busy)
+    {
+        if (busy) *busy = 0;
+        if (!IsClient() || !name || !*name) return 0;
+        // s_textureList, a TSExplicitList<CTexture>: its terminator's m_next at +8, each texture's
+        // TSLink m_link at +0x64, its m_next at +4; an end pointer has its low bit set (TSList::IsEnd
+        // 0x00407900). The CTexture constructor links each one there (0x004B880D). m_flags +0x28
+        // (0x004B87B2), m_asyncObject +0x40, m_atlas +0x5C (0x004B87E4, 0x004B8800).
+        constexpr std::uintptr_t kList        = WXL_STATIC_AT("s_textureList", 0x00AC3348);
+        constexpr std::size_t    kLink        = 0x64;
+        constexpr std::size_t    kFlags       = 0x28;
+        constexpr std::size_t    kAsyncObject = 0x40;
+        constexpr std::size_t    kAtlas       = 0x5C;
+        static_assert(WXL_FIELD("CTexture", "m_filename") == kLink + 8, "m_filename follows m_link");
+
+        char path[MAX_PATH];
+        if (std::snprintf(path, sizeof path, "%s.blp", name) >= static_cast<int>(sizeof path)) return 0;
+
+        std::vector<uint8_t> data;
+        bool                 tried    = false;
+        uint32_t             reloaded = 0;
+        const auto           end      = [](const uint8_t* node) { return !node || (reinterpret_cast<std::uintptr_t>(node) & 1); };
+        for (uint8_t* texture = *reinterpret_cast<uint8_t**>(kList + 8); !end(texture);
+             texture          = Read<uint8_t*>(texture, kLink + 4))
+        {
+            const char* own = reinterpret_cast<const char*>(texture + WXL_FIELD("CTexture", "m_filename"));
+            if (_stricmp(own, name) != 0 && _stricmp(own, path) != 0) continue;
+            if (Read<const void*>(texture, kAsyncObject) || Read<const void*>(texture, kAtlas) ||
+                (Read<uint16_t>(texture, kFlags) & 4))
+            {
+                if (busy) ++*busy;
+                continue;
+            }
+            if (!tried)
+            {
+                tried      = true;
+                void* file = file_open(path);
+                if (file)
+                {
+                    data.resize(static_cast<std::size_t>(file_size(file)));
+                    const uint32_t got = data.empty() ? 0 : file_read(file, data.data(), static_cast<uint32_t>(data.size()));
+                    file_close(file);
+                    if (got != data.size()) data.clear();
+                }
+            }
+            if (data.empty()) break;
+            if (CallPumpBlp(texture, data.data())) ++reloaded;
+        }
+        return reloaded;
     }
 
     const char* map_obj_path(const void* map_obj)

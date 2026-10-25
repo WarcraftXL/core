@@ -6,6 +6,8 @@
 #include "services/StorageService.hpp"
 
 #include "services/Assets.hpp"
+#include "services/Hashes.hpp"
+#include "services/Reload.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -13,6 +15,7 @@
 
 #include "wxl/host/mod_host.hpp"
 #include "wxl/runtime/handles.hpp"
+#include "wxl/scoped_name.hpp"
 
 #include <windows.h>
 
@@ -157,6 +160,7 @@ namespace
     {
         const std::string name = Path(path);
         if (name.empty()) return WXL_FALSE;
+        const wxl::core::services::assets::AskingScope asking;
         return wxl::core::services::storage::Exists(name.c_str()) ? WXL_TRUE : WXL_FALSE;
     }
 
@@ -173,6 +177,7 @@ namespace
         const std::string name = Path(path);
         if (name.empty()) return WXL_E_INVALID;
 
+        const wxl::core::services::assets::AskingScope asking;
         wxl::core::services::assets::ClearPending();
         void* file = wxl::core::binding::file_open(name.c_str());
         if (!file) return Missing();
@@ -189,6 +194,7 @@ namespace
         const std::string name = Path(path);
         if (name.empty()) return WXL_E_INVALID;
 
+        const wxl::core::services::assets::AskingScope asking;
         wxl::core::services::assets::ClearPending();
         void* file = wxl::core::binding::file_open(name.c_str());
         if (!file) return Missing();
@@ -223,6 +229,7 @@ namespace
         const std::string name = Path(path);
         if (name.empty()) return WXL_HANDLE_NONE;
 
+        const wxl::core::services::assets::AskingScope asking;
         void* file = wxl::core::binding::file_open(name.c_str());
         if (!file) return WXL_HANDLE_NONE;
 
@@ -603,6 +610,107 @@ namespace
 
     wxl_result WXL_CALL Unserve(wxl_str path) { return wxl::core::services::assets::Unserve(path, Asking()); }
 
+    // --- overrides ----------------------------------------------------------------------------
+    //
+    // A file of the client a mod replaces with another name, for opens and existence checks,
+    // held per mod and looked at by both gates on whichever thread asks. Kept as the redirects
+    // are: the latest answers, and taking it back uncovers the one before.
+
+    constexpr size_t kOverrideMax = 259; ///< the client's paths are 260 bytes
+
+    SRWLOCK                                                g_overrideLock = SRWLOCK_INIT;
+    std::unordered_map<std::string, std::vector<Redirect>> g_overrides; ///< by Key(path)
+    std::atomic<uint32_t>                                  g_overrideCount{0};
+
+    const char* ModId(uint32_t mod)
+    {
+        const wxl::host::ModHost*   host   = wxl::core::Host();
+        const wxl::host::LoadedMod* loaded = host ? host->ModOf(mod) : nullptr;
+        return loaded ? loaded->id.c_str() : "a mod";
+    }
+
+    wxl_result WXL_CALL OverrideFile(wxl_str path, wxl_str with)
+    {
+        if (!path.data || !path.size || path.size > kOverrideMax || !with.data || !with.size || with.size > kOverrideMax)
+            return WXL_E_INVALID;
+        const uint32_t    mod = Asking();
+        const std::string key = Key(std::string_view(path.data, path.size));
+        AcquireSRWLockExclusive(&g_overrideLock);
+        std::vector<Redirect>& stack = g_overrides[key];
+        stack.erase(std::remove_if(stack.begin(), stack.end(), [&](const Redirect& r) { return r.mod == mod; }),
+                    stack.end());
+        stack.push_back(Redirect{mod, Backslashed(Path(with))});
+        g_overrideCount.store(static_cast<uint32_t>(g_overrides.size()), std::memory_order_release);
+        ReleaseSRWLockExclusive(&g_overrideLock);
+        WLOG_INFO(kTag, "mod %s overrides %.*s with %.*s", ModId(mod), static_cast<int>(path.size), path.data,
+                  static_cast<int>(with.size), with.data);
+        return WXL_OK;
+    }
+
+    /// Takes one mod's overrides back, of one name or of every name; each is logged.
+    size_t DropOverrides(uint32_t mod, const std::string* key)
+    {
+        std::vector<std::string> restored;
+        AcquireSRWLockExclusive(&g_overrideLock);
+        for (auto it = g_overrides.begin(); it != g_overrides.end();)
+        {
+            if (key && it->first != *key)
+            {
+                ++it;
+                continue;
+            }
+            std::vector<Redirect>& stack  = it->second;
+            const size_t           before = stack.size();
+            stack.erase(std::remove_if(stack.begin(), stack.end(), [&](const Redirect& r) { return r.mod == mod; }),
+                        stack.end());
+            if (stack.size() != before) restored.push_back(it->first);
+            it = stack.empty() ? g_overrides.erase(it) : std::next(it);
+        }
+        g_overrideCount.store(static_cast<uint32_t>(g_overrides.size()), std::memory_order_release);
+        ReleaseSRWLockExclusive(&g_overrideLock);
+        for (const std::string& name : restored) WLOG_INFO(kTag, "mod %s restores %s", ModId(mod), name.c_str());
+        return restored.size();
+    }
+
+    wxl_result WXL_CALL RestoreFile(wxl_str path)
+    {
+        if (!path.data || !path.size || path.size > kOverrideMax) return WXL_E_INVALID;
+        const std::string key = Key(std::string_view(path.data, path.size));
+        return DropOverrides(Asking(), &key) ? WXL_OK : WXL_E_NOT_FOUND;
+    }
+
+    // --- scoped names, hashes, reloads -------------------------------------------------------
+
+    wxl_str WXL_CALL ScopedNameOf(wxl_str mod, wxl_str path)
+    {
+        thread_local std::string scoped;
+        const std::string_view   owner = mod.data && mod.size ? std::string_view(mod.data, mod.size)
+                                                              : std::string_view(ModId(Asking()));
+        scoped = wxl::ScopedName(owner, path.data ? std::string_view(path.data, path.size) : std::string_view());
+        return wxl_str{scoped.c_str(), static_cast<uint32_t>(scoped.size())};
+    }
+
+    wxl_result WXL_CALL HashFile(wxl_str path, uint32_t flags, wxl_file_hash* out)
+    {
+        const std::string name = Path(path);
+        if (name.empty() || !out) return WXL_E_INVALID;
+        return wxl::core::services::hashes::Hash(name.c_str(), flags, out);
+    }
+
+    wxl_result WXL_CALL HashFileAsync(wxl_str path, uint32_t flags, wxl_file_hash_fn fn, void* user, uint64_t* out)
+    {
+        const std::string name = Path(path);
+        if (name.empty() || !fn || !out) return WXL_E_INVALID;
+        return wxl::core::services::hashes::HashAsync(name.c_str(), flags, fn, user, out, Asking());
+    }
+
+    wxl_result WXL_CALL ReloadAsset(wxl_str path, wxl_asset_reload* out)
+    {
+        const std::string name = Path(path);
+        if (name.empty()) return WXL_E_INVALID;
+        return wxl::core::services::reload::Reload(name.c_str(), out);
+    }
+
     const wxl_storage_api g_storage = {
         sizeof(wxl_storage_api),
         &Exists,
@@ -623,6 +731,12 @@ namespace
         &RemoveTransform,
         &ServeBytes,
         &Unserve,
+        &HashFile,
+        &HashFileAsync,
+        &OverrideFile,
+        &RestoreFile,
+        &ScopedNameOf,
+        &ReloadAsset,
     };
 }
 
@@ -721,6 +835,25 @@ namespace wxl::core::services
         }
 
         void RemoveRedirectsOf(uint32_t mod) { DropRedirects(mod, nullptr); }
+
+        bool Overridden(const char* name, char* out, size_t capacity)
+        {
+            if (!name || !out || !capacity || g_overrideCount.load(std::memory_order_acquire) == 0) return false;
+            const std::string key   = Key(name);
+            bool              found = false;
+            AcquireSRWLockShared(&g_overrideLock);
+            const auto it = g_overrides.find(key);
+            if (it != g_overrides.end() && !it->second.empty() && it->second.back().to.size() < capacity)
+            {
+                const std::string& to = it->second.back().to;
+                std::memcpy(out, to.c_str(), to.size() + 1);
+                found = true;
+            }
+            ReleaseSRWLockShared(&g_overrideLock);
+            return found;
+        }
+
+        void RemoveOverridesOf(uint32_t mod) { DropOverrides(mod, nullptr); }
 
         void CloseFilesOf(uint32_t mod)
         {

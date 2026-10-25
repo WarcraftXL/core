@@ -7,6 +7,9 @@
 
 #include "wxl/services/storage.h"
 
+#include <cstddef>
+#include <cstdint>
+
 namespace wxl::core::services
 {
     /**
@@ -50,6 +53,17 @@ namespace wxl::core::services
 
         /// Takes a mod's redirects back: it is disabled or unloaded.
         void RemoveRedirectsOf(uint32_t mod);
+
+        /**
+         * @brief The name a mod's override puts in place of @p name, from any thread.
+         *
+         * True, with the latest override's name in @p out, when a mod overrides @p name; false and
+         * nothing written otherwise. One load when no name is overridden.
+         */
+        bool Overridden(const char* name, char* out, size_t capacity);
+
+        /// Takes a mod's overrides back: it is disabled or unloaded.
+        void RemoveOverridesOf(uint32_t mod);
 
         /// Whether a name resolves, in the client's archives, a folder of the search path or a source.
         bool Exists(const char* name);

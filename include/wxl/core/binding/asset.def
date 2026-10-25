@@ -51,3 +51,24 @@ WXL_BINDING(model_skin_bytes, const void*, (const void* shared), (shared), 0)
 
 // A texture's file name: CTexture::m_filename.
 WXL_BINDING(texture_name, const char*, (const void* texture), (texture), 0)
+
+// --- What the client holds, read again (wxl.storage's reload_asset) -----------------------------
+
+// Drops from the client's model cache (CM2Cache::m_shared) every model file whose file name, its
+// folder aside, is `leaf` ("murloc.m2", any case): each is unlinked from the cache's hash as
+// CM2Shared's destructor unlinks it, so the next CM2Cache::CreateShared of that name reads the file
+// again, while the models made from it keep it until their last reference goes and frees it. Up to
+// `capacity` of them are written to `out`; the answer is how many were dropped. Main thread.
+WXL_BINDING(m2_cache_evict, uint32_t, (const char* leaf, void** out, uint32_t capacity), (leaf, out, capacity), 0)
+
+// Makes a unit's or a player's model again from its display, CGUnit_C::UpdateDisplayInfo(1), as
+// SMSG_FORCE_DISPLAY_UPDATE does: the model is created again by name, through the model cache.
+// False, nothing done, for any other object. Main thread.
+WXL_BINDING(unit_update_display, wxl_bool, (void* object), (object), WXL_FALSE)
+
+// Reads again, in place, every BLP texture of the client's texture list (s_textureList) whose name
+// is `name` (CTexture::m_filename: the path without its extension, any case): `name`.blp is read
+// whole and handed to PumpBlpTextureAsync on each, which replaces its pixels and its device
+// texture as a first load does. A texture still loading (m_asyncObject) or on the atlas (m_atlas)
+// is left alone and counted in `busy`. The answer is how many were read again. Main thread.
+WXL_BINDING(texture_reload, uint32_t, (const char* name, uint32_t* busy), (name, busy), 0)

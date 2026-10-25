@@ -32,3 +32,7 @@ WXL_BINDING(archive_of, wxl_bool, (void* archive, wxl_core_archive* out), (archi
 // Tells `fn` every client database of wxl/core/client_dbs.def, in that order, loaded or not;
 // answers how many it told.
 WXL_BINDING(client_dbs, uint32_t, (wxl_core_db_fn fn, void* user), (fn, user), 0)
+
+// The same for an archive's record, the ARCHIVEREC* System_SFile2::FindFile answers a file of an
+// archive with. False when there is none.
+WXL_BINDING(archive_record_of, wxl_bool, (void* record, wxl_core_archive* out), (record, out), WXL_FALSE)

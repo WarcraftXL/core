@@ -20,6 +20,8 @@
 #include "services/ScriptService.hpp"
 #include "services/Assets.hpp"
 #include "services/StorageService.hpp"
+#include "services/Hashes.hpp"
+#include "services/RelayService.hpp"
 
 #include "wxl/core/init.h"
 #include "wxl/host/mod_host.hpp"
@@ -106,6 +108,10 @@ namespace
         wxl::core::services::storage::RemoveRedirectsOf(token);
         // Its providers, served names and transforms: no call into its code starts again.
         wxl::core::services::assets::ReleaseOf(token);
+        // Its overrides, its hashes in flight, its relayed services and requests.
+        wxl::core::services::storage::RemoveOverridesOf(token);
+        wxl::core::services::hashes::ForgetMod(token);
+        wxl::core::services::relay::ForgetMod(token);
         wxl::core::services::data::ForgetMod(token);
         // The models it made come off what they hang on and are given back.
         wxl::core::services::m2::ForgetMod(token);

@@ -172,6 +172,9 @@ add_library(wxl-core SHARED
     src/services/DataService.cpp
     src/services/Assets.cpp
     src/services/StorageService.cpp
+    src/services/Hashes.cpp
+    src/services/Reload.cpp
+    src/services/RelayService.cpp
     src/services/FootprintService.cpp
     src/services/ActionService.cpp
     src/services/GxService.cpp
@@ -190,7 +193,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine bcrypt)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -212,6 +215,9 @@ add_executable(wxl-core-seam-harness
     src/services/DataService.cpp
     src/services/Assets.cpp
     src/services/StorageService.cpp
+    src/services/Hashes.cpp
+    src/services/Reload.cpp
+    src/services/RelayService.cpp
     src/services/FootprintService.cpp
     src/services/ActionService.cpp
     src/services/GxService.cpp
@@ -224,7 +230,7 @@ add_executable(wxl-core-seam-harness
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine bcrypt)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 

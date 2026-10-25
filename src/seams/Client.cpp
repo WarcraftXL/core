@@ -15,6 +15,8 @@
 #include "services/DataService.hpp"
 #include "services/Assets.hpp"
 #include "services/M2Service.hpp"
+#include "services/Hashes.hpp"
+#include "services/RelayService.hpp"
 #include "services/StorageService.hpp"
 
 #include "wxl/host/mod_host.hpp"
@@ -37,6 +39,8 @@ namespace wxl::seam::Client::Destroy
         wxl::core::attachment::ReleaseAll();
         wxl::core::points::ReleaseAll();
         wxl::core::services::storage::CloseEverything();
+        wxl::core::services::hashes::Stop();
+        wxl::core::services::relay::Clear();
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::data::Clear();
         wxl::core::services::m2::Clear();
@@ -45,6 +49,7 @@ namespace wxl::seam::Client::Destroy
             wxl::core::objects::Service().DropWatches(token);
             wxl::core::services::storage::RemoveSearchPathsOf(token);
             wxl::core::services::storage::RemoveRedirectsOf(token);
+            wxl::core::services::storage::RemoveOverridesOf(token);
         }
 
         host->UnloadAll();

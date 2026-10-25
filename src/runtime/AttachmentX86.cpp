@@ -26,6 +26,7 @@
 #include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/StorageService.hpp"
+#include "services/RelayService.hpp"
 
 #include "wxl/services/hook.h"
 #include "wxl/services/object.h"
@@ -72,6 +73,7 @@ namespace wxl::core::attachment
             { WXL_M2_SERVICE, WXL_M2_SERVICE_VERSION, &services::M2Api() },
             { WXL_GX_SERVICE, WXL_GX_SERVICE_VERSION, &services::GxApi() },
             { WXL_ENGINE_SERVICE, WXL_ENGINE_SERVICE_VERSION, &services::EngineApi() },
+            { WXL_RELAY_SERVICE, WXL_RELAY_SERVICE_VERSION, &services::RelayApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif
