@@ -1233,6 +1233,7 @@ type CSimpleTop Engine/Source/Frame/CSimpleTop.h CSimpleTop
   m_mousePosition.m_x                     game/World:kInputCursorNdcX
   m_mousePosition.m_y                     game/World:kInputCursorNdcY
   m_allowProtectedActions                 engine/Ui:kUiEnabledFlag                    # hand: "1 = UI shown"; fork: allowProtectedActions
+  m_mouseFocus                            -
 
 type CSimpleCamera WoW/Source/UIUtil/CSimpleCamera.h CSimpleCamera
   sizeof                                  -
@@ -1241,6 +1242,21 @@ type CSimpleCamera WoW/Source/UIUtil/CSimpleCamera.h CSimpleCamera
   m_facing.b0                             engine/Camera:kCameraRight
   m_facing.c0                             engine/Camera:kCameraUp
   m_fov                                   engine/Camera:kCameraFov
+  m_nearZ                                 -
+  m_farZ                                  -
+  m_aspect                                -
+
+type CGCamera WoW/Source/UIUtil/Camera.h CGCamera
+  m_model                                 -
+  m_targetGUID                            -
+  m_relativeTo                            -
+  m_height                                -
+  m_targetFov                             -
+  m_targetPosition                        -
+
+type CGInputControl WoW/Source/UIUtil/InputControl.h CGInputControl
+  m_flags                                 -
+  m_mouseModeFlags                        -
 
 skip game/World:kWorldFrameStandInBytes :: the byte size reserved for a stand-in frame (an allocation choice, not a layout)
 

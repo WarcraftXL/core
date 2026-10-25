@@ -129,6 +129,7 @@
 
 #include "wxl/seams/m2.def"
 #include "wxl/seams/component.def"
+#include "wxl/seams/camera.def"
 
 #ifdef WXL_SEAM_RAISES_DEFAULTED
     #undef WXL_SEAM_RAISES

@@ -14,6 +14,9 @@
 #include "services/DataService.hpp"
 #include "profile/Profile.hpp"
 #include "services/ActionService.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
+#include "services/WorldService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/EngineService.hpp"
 #include "services/GxService.hpp"
@@ -75,6 +78,9 @@ namespace wxl::core::attachment
             { WXL_GX_SERVICE, WXL_GX_SERVICE_VERSION, &services::GxApi() },
             { WXL_ENGINE_SERVICE, WXL_ENGINE_SERVICE_VERSION, &services::EngineApi() },
             { WXL_RELAY_SERVICE, WXL_RELAY_SERVICE_VERSION, &services::RelayApi() },
+            { WXL_CAMERA_SERVICE, WXL_CAMERA_SERVICE_VERSION, &services::CameraApi() },
+            { WXL_INPUT_SERVICE, WXL_INPUT_SERVICE_VERSION, &services::InputApi() },
+            { WXL_WORLD_SERVICE, WXL_WORLD_SERVICE_VERSION, &services::WorldApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif

@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 133 types, 825 field offsets, 11 member sizes.
+// 135 types, 837 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -62,6 +62,13 @@ WXL_LAYOUT_TYPE(CDataStore, "CDataStore", 0x18, "Engine/Source/Base/CDataStore.h
 WXL_LAYOUT_FIELD(CDataStore, "m_data", 0x4, "Engine/Source/Base/CDataStore.h", 8)
 WXL_LAYOUT_FIELD(CDataStore, "m_size", 0x10, "Engine/Source/Base/CDataStore.h", 8)
 WXL_LAYOUT_FIELD(CDataStore, "m_read", 0x14, "Engine/Source/Base/CDataStore.h", 8)
+WXL_LAYOUT_TYPE(CGCamera, "CGCamera", 0x320, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_model", 0x48, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_targetGUID", 0x88, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_relativeTo", 0xA0, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_height", 0x128, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_targetFov", 0x138, "WoW/Source/UIUtil/Camera.h", 75)
+WXL_LAYOUT_FIELD(CGCamera, "m_targetPosition", 0x1C4, "WoW/Source/UIUtil/Camera.h", 75)
 WXL_LAYOUT_TYPE(CGContainerData, "CGContainerData", 0x128, "WoW/Source/Object/Container.h", 22)
 WXL_LAYOUT_FIELD(CGContainerData, "m_containerFieldNumSlots", 0x0, "WoW/Source/Object/Container.h", 22)
 WXL_LAYOUT_FIELD(CGContainerData, "m_containerFieldSlot1", 0x8, "WoW/Source/Object/Container.h", 22)
@@ -103,6 +110,9 @@ WXL_LAYOUT_TYPE(CGGameObject_C_TypeBase, "CGGameObject_C_TypeBase", 0x10, "WoW/S
 WXL_LAYOUT_FIELD(CGGameObject_C_TypeBase, "m_owner", 0x4, "WoW/Source/Object/ObjectClient/GameObject_C.h", 40)
 WXL_LAYOUT_TYPE(CGGameObject_C_Type_WorldObj, "CGGameObject_C_Type_WorldObj", 0x14, "WoW/Source/Object/ObjectClient/GameObject_C.h", 154)
 WXL_LAYOUT_FIELD(CGGameObject_C_Type_WorldObj, "m_worldObject", 0x10, "WoW/Source/Object/ObjectClient/GameObject_C.h", 154)
+WXL_LAYOUT_TYPE(CGInputControl, "CGInputControl", 0x70, "WoW/Source/UIUtil/InputControl.h", 26)
+WXL_LAYOUT_FIELD(CGInputControl, "m_flags", 0x4, "WoW/Source/UIUtil/InputControl.h", 26)
+WXL_LAYOUT_FIELD(CGInputControl, "m_mouseModeFlags", 0x58, "WoW/Source/UIUtil/InputControl.h", 26)
 WXL_LAYOUT_TYPE(CGItemData, "CGItemData", 0xE8, "WoW/Source/Object/Item.h", 39)
 WXL_LAYOUT_FIELD(CGItemData, "m_itemFieldOwner", 0x0, "WoW/Source/Object/Item.h", 39)
 WXL_LAYOUT_FIELD(CGItemData, "m_itemFieldContained", 0x8, "WoW/Source/Object/Item.h", 39)
@@ -707,8 +717,12 @@ WXL_LAYOUT_FIELD(CSimpleCamera, "m_position", 0x8, "WoW/Source/UIUtil/CSimpleCam
 WXL_LAYOUT_FIELD(CSimpleCamera, "m_facing.a0", 0x14, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
 WXL_LAYOUT_FIELD(CSimpleCamera, "m_facing.b0", 0x20, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
 WXL_LAYOUT_FIELD(CSimpleCamera, "m_facing.c0", 0x2C, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
+WXL_LAYOUT_FIELD(CSimpleCamera, "m_nearZ", 0x38, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
+WXL_LAYOUT_FIELD(CSimpleCamera, "m_farZ", 0x3C, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
 WXL_LAYOUT_FIELD(CSimpleCamera, "m_fov", 0x40, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
+WXL_LAYOUT_FIELD(CSimpleCamera, "m_aspect", 0x44, "WoW/Source/UIUtil/CSimpleCamera.h", 12)
 WXL_LAYOUT_TYPE(CSimpleTop, "CSimpleTop", 0x1258, "Engine/Source/Frame/CSimpleTop.h", 59)
+WXL_LAYOUT_FIELD(CSimpleTop, "m_mouseFocus", 0x78, "Engine/Source/Frame/CSimpleTop.h", 59)
 WXL_LAYOUT_FIELD(CSimpleTop, "m_mousePosition.m_x", 0x1224, "Engine/Source/Frame/CSimpleTop.h", 59)
 WXL_LAYOUT_FIELD(CSimpleTop, "m_mousePosition.m_y", 0x1228, "Engine/Source/Frame/CSimpleTop.h", 59)
 WXL_LAYOUT_FIELD(CSimpleTop, "m_allowProtectedActions", 0x124C, "Engine/Source/Frame/CSimpleTop.h", 59)

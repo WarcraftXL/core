@@ -89,3 +89,7 @@ WXL_BINDING(unit_knows_spell, wxl_bool, (const void* object, uint32_t spell), (o
 // CGUnit_C::GetAura (null past the count): an AuraData, whose members gameplay.def reads.
 WXL_BINDING(unit_aura_count, uint32_t, (const void* object), (object), 0)
 WXL_BINDING(unit_aura_at, const void*, (const void* object, uint32_t index), (object, index), 0)
+
+// Whether the unit stands outdoors: CGUnit_C::IsOutdoors, World::QueryOutdoors of its map
+// entity, which the indoor flag of the WMO group it stands in decides.
+WXL_BINDING(unit_is_outdoors, wxl_bool, (const void* object), (object), WXL_FALSE)

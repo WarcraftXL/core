@@ -19,6 +19,8 @@
 #include "services/FootprintService.hpp"
 #include "services/ScriptService.hpp"
 #include "services/Assets.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -119,6 +121,9 @@ namespace
         wxl::core::services::footprint::ForgetMod(token);
         // Its watches go with it: the client stops reporting what no other mod watches.
         wxl::core::objects::Service().DropWatches(token);
+        // The camera goes back to the client, the pointer is let go.
+        wxl::core::services::camera::ForgetMod(token);
+        wxl::core::services::input::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

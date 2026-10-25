@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Camera domain: a seam on the world camera's update, where wxl.camera places the camera a
+// mod asked for.
+
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including camera.def"
+#endif
+
+// Places the world camera for the frame: CGWorldFrame::OnWorldUpdate calls it once a frame
+// (0x004FA7BC on x86), right before it sets up the world's projection from the camera and moves
+// the sound listener, and nothing else calls it. It follows the camera's target, a model camera
+// (a cinematic) or the object it faces, and answers 1. A class static whose address the world
+// update takes, so cdecl as declared: `(const void* data, void* param)`, a bare `ret`.
+//
+// Before puts back the field of view the client had, when wxl.camera changed it for the frame
+// before, so that the client's own update runs on its own camera. After raises CameraUpdate,
+// then writes the view a mod set, if any.
+WXL_SEAM(Camera, UpdateCallback, "CGCamera::UpdateCallback", int32_t, cdecl, (const void* data, void* param))
+WXL_SEAM_RAISES(Camera, UpdateCallback, CameraUpdate)

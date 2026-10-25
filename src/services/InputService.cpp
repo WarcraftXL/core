@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// wxl.input. A captured pointer is clipped to the one pixel at the centre of the game's window,
+// so the client reads it there (OsInputGetMousePosition asks Windows), picks under it every frame
+// and lands its clicks there; the device stops drawing it (CGxDevice::CursorSetVisible) while the
+// game's own state of the pointer is left as it is, which keeps its picking on. The motion comes
+// from Windows' raw input, registered for the window the first time a mod captures the pointer or
+// listens to MouseMotion. Everything here runs on the main thread: the window procedure and the
+// present both do.
+
+#include "services/InputService.hpp"
+
+#include "binding/Binding.hpp"
+#include "common/Log.hpp"
+#include "runtime/Core.hpp"
+
+#include "wxl/events.h"
+#include "wxl/host/mod_host.hpp"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <vector>
+
+namespace
+{
+    using namespace wxl::core;
+
+    /// The mods holding the pointer, one entry each.
+    std::vector<uint32_t> g_holders;
+
+    HWND g_window     = nullptr; ///< the game's window, from its first message
+    bool g_registered = false;   ///< raw mouse input is registered for it
+    bool g_held       = false;   ///< the pointer is clipped and hidden now
+
+    /// The last absolute position a raw report gave, for a device that reports positions (a
+    /// tablet, a remote desktop): its motion is the difference.
+    bool g_absoluteKnown = false;
+    LONG g_absoluteX     = 0;
+    LONG g_absoluteY     = 0;
+
+    uint32_t Caller()
+    {
+        const wxl::host::ModHost* host = Host();
+        return host ? host->CurrentMod() : 0u;
+    }
+
+    bool OnGameThread(const char* call)
+    {
+        static std::atomic<bool> said{false};
+        const wxl::host::ModHost* host = Host();
+        if (!host || host->OnMainThread()) return true;
+        if (!said.exchange(true))
+            WLOG_WARN(kTag, "wxl.input.%s was called off the main thread, where the game's window lives; it was "
+                            "refused",
+                      call);
+        return false;
+    }
+
+    bool Listening(wxl_event event)
+    {
+        const wxl::host::ModHost* host = Host();
+        return host && host->Listening(event);
+    }
+
+    /// Raw mouse reports for the game's window, once: the first capture or MouseMotion listener.
+    void Register()
+    {
+        if (g_registered || !g_window) return;
+        RAWINPUTDEVICE device{};
+        device.usUsagePage = 0x01; // generic desktop
+        device.usUsage     = 0x02; // mouse
+        device.dwFlags     = 0;    // the legacy messages keep coming: the game reads them
+        device.hwndTarget  = g_window;
+        g_registered       = RegisterRawInputDevices(&device, 1, sizeof device) == TRUE;
+        if (!g_registered)
+            WLOG_WARN(kTag, "wxl.input: raw mouse input could not be registered (error %lu); MouseMotion will not "
+                            "be raised",
+                      static_cast<unsigned long>(GetLastError()));
+    }
+
+    /// The motion in a raw report, or false for a report of something else.
+    bool Motion(LPARAM handle, int32_t& dx, int32_t& dy)
+    {
+        RAWINPUT raw{};
+        UINT     size = sizeof raw;
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(handle), RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) ==
+                static_cast<UINT>(-1) ||
+            raw.header.dwType != RIM_TYPEMOUSE)
+            return false;
+        const RAWMOUSE& mouse = raw.data.mouse;
+        if (mouse.usFlags & MOUSE_MOVE_ABSOLUTE)
+        {
+            // 0 to 65535 across the screen, or the whole desktop: the difference, in pixels.
+            const bool virtualDesk = (mouse.usFlags & MOUSE_VIRTUAL_DESKTOP) != 0;
+            const int  width  = GetSystemMetrics(virtualDesk ? SM_CXVIRTUALSCREEN : SM_CXSCREEN);
+            const int  height = GetSystemMetrics(virtualDesk ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
+            const LONG x      = static_cast<LONG>((static_cast<long long>(mouse.lLastX) * width) / 65535);
+            const LONG y      = static_cast<LONG>((static_cast<long long>(mouse.lLastY) * height) / 65535);
+            dx                = g_absoluteKnown ? static_cast<int32_t>(x - g_absoluteX) : 0;
+            dy                = g_absoluteKnown ? static_cast<int32_t>(y - g_absoluteY) : 0;
+            g_absoluteX       = x;
+            g_absoluteY       = y;
+            g_absoluteKnown   = true;
+            return true;
+        }
+        dx = static_cast<int32_t>(mouse.lLastX);
+        dy = static_cast<int32_t>(mouse.lLastY);
+        return true;
+    }
+
+    /// The pixel at the centre of the window's client area, in screen coordinates.
+    bool Centre(RECT& pixel)
+    {
+        RECT client{};
+        if (!GetClientRect(g_window, &client) || client.right <= 0 || client.bottom <= 0) return false;
+        POINT centre{client.right / 2, client.bottom / 2};
+        if (!ClientToScreen(g_window, &centre)) return false;
+        pixel = RECT{centre.x, centre.y, centre.x + 1, centre.y + 1};
+        return true;
+    }
+
+    /// Lets the pointer go: free to move, and drawn as the game's state says.
+    void LetGo()
+    {
+        if (!g_held) return;
+        ClipCursor(nullptr);
+        binding::input_cursor_restore();
+        g_held = false;
+    }
+
+    // --- the table --------------------------------------------------------------------------
+
+    wxl_result WXL_CALL CaptureCursor(wxl_bool captured)
+    {
+        if (!OnGameThread("CaptureCursor")) return WXL_E_INVALID;
+        const uint32_t mod  = Caller();
+        const auto     held = std::find(g_holders.begin(), g_holders.end(), mod);
+        if (captured == WXL_TRUE)
+        {
+            if (held == g_holders.end()) g_holders.push_back(mod);
+            Register();
+        }
+        else if (held != g_holders.end())
+        {
+            g_holders.erase(held);
+            if (g_holders.empty()) LetGo();
+        }
+        return WXL_OK;
+    }
+
+    wxl_bool WXL_CALL CursorCaptured() { return g_holders.empty() ? WXL_FALSE : WXL_TRUE; }
+
+    wxl_bool WXL_CALL PointerOverWorld()
+    {
+        if (!OnGameThread("PointerOverWorld")) return WXL_FALSE;
+        return binding::input_pointer_over_world();
+    }
+}
+
+namespace wxl::core::services
+{
+    const wxl_input_api& InputApi()
+    {
+        static const wxl_input_api api = [] {
+            wxl_input_api table{};
+            table.struct_size        = sizeof table;
+            table.capture_cursor     = &CaptureCursor;
+            table.cursor_captured    = &CursorCaptured;
+            table.pointer_over_world = &PointerOverWorld;
+            return table;
+        }();
+        return api;
+    }
+
+    namespace input
+    {
+        void NoteWindow(void* window)
+        {
+            if (!g_window && window) g_window = static_cast<HWND>(window);
+        }
+
+        bool RawMotion(intptr_t report, int32_t& dx, int32_t& dy)
+        {
+            return Motion(static_cast<LPARAM>(report), dx, dy);
+        }
+
+        void Present()
+        {
+            if (!g_window) return;
+            if (!g_registered && Listening(WXL_EV_MouseMotion)) Register();
+
+            const bool want = !g_holders.empty() && GetForegroundWindow() == g_window && !IsIconic(g_window);
+            if (!want)
+            {
+                LetGo();
+                return;
+            }
+
+            RECT pixel{};
+            if (!Centre(pixel))
+            {
+                LetGo();
+                return;
+            }
+            RECT clip{};
+            if (!g_held || !GetClipCursor(&clip) || !EqualRect(&clip, &pixel))
+            {
+                SetCursorPos(pixel.left, pixel.top);
+                ClipCursor(&pixel);
+            }
+            // The client shows the pointer again whenever its own state of it changes (a spell's
+            // targeting, the focus coming back): hidden again before this frame draws it.
+            if (binding::input_cursor_visible()) binding::input_cursor_set_visible(WXL_FALSE);
+            g_held = true;
+        }
+
+        void ForgetMod(uint32_t mod)
+        {
+            const auto held = std::find(g_holders.begin(), g_holders.end(), mod);
+            if (held == g_holders.end()) return;
+            g_holders.erase(held);
+            if (g_holders.empty()) LetGo();
+        }
+
+        void Clear()
+        {
+            g_holders.clear();
+            LetGo();
+        }
+    }
+}

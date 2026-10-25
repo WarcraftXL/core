@@ -301,6 +301,12 @@ namespace wxl::core::objects
         return true;
     }
 
+    bool ClientObjects::UnitIsOutdoors(void* object, wxl_bool& out) const
+    {
+        out = binding::unit_is_outdoors(object);
+        return true;
+    }
+
     // --- the active player's group -----------------------------------------------------------
 
     bool ClientObjects::PlayerPartySize(void*, uint32_t& out) const

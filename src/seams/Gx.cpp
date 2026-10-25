@@ -12,6 +12,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/FootprintService.hpp"
+#include "services/InputService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -35,6 +36,9 @@ namespace wxl::seam::Gx::ScenePresent
     {
         // Every present ends a frame on the profiler's timeline, the loading screen's included.
         wxl::core::profile::Present();
+
+        // A pointer a mod captured is held at the centre, and hidden, before the frame shows.
+        wxl::core::services::input::Present();
 
         // Only the frame Scrn.OnPaint opened ends here. The loading screen presents frames of
         // its own, and a paint with nothing to draw into presents anyway; neither opened one.

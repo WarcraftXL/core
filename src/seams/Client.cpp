@@ -14,6 +14,8 @@
 #include "runtime/Stages.hpp"
 #include "services/DataService.hpp"
 #include "services/Assets.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
 #include "services/M2Service.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -44,6 +46,8 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::data::Clear();
         wxl::core::services::m2::Clear();
+        wxl::core::services::camera::Clear();
+        wxl::core::services::input::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
         {
             wxl::core::objects::Service().DropWatches(token);

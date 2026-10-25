@@ -90,6 +90,25 @@ typedef struct wxl_core_db
 
 typedef void(WXL_CALL* wxl_core_db_fn)(const wxl_core_db* db, void* user);
 
+/// The world camera, as camera_read gives it and camera_write takes it. Directions are in world
+/// coordinates, whatever the camera is relative to. `left` is the camera's second row, which the
+/// client calls its right: +y for a camera looking down +x.
+typedef struct wxl_core_camera
+{
+    wxl_vec3 position;
+    wxl_vec3 forward;
+    wxl_vec3 left;
+    wxl_vec3 up;
+    float    fov;       ///< what it draws with: CGCamera::FOV(), m_fov plus m_targetFov, clamped
+    float    fov_base;  ///< m_fov alone, which camera_write sets
+    float    near_z;
+    float    far_z;
+    float    aspect;
+    wxl_vec3 pivot;     ///< m_targetPosition raised by m_height
+    uint64_t followed;  ///< m_targetGUID, 0 when it follows nothing
+    uint32_t cinematic; ///< nonzero while a model camera (m_model) has the view
+} wxl_core_camera;
+
 /// A model file (CM2Shared) as the loader holds it: the path it was opened by, its parsed header
 /// (or its bytes, before the parse), how many bytes that is, and its skin profile once one has
 /// been read.

@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Input domain of the client binding: the pointer as the game draws it and picks with it.
+// Main thread only.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including input.def"
+#endif
+
+// Whether the device draws the pointer: CGxDevice::m_cursorVisible. False with no device.
+WXL_BINDING(input_cursor_visible, wxl_bool, (void), (), WXL_FALSE)
+
+// Shows or hides the pointer the device draws, hardware or not: the device's own
+// CGxDevice::CursorSetVisible (virtual; the D3D devices also show or hide the hardware cursor).
+// The game's idea of the pointer (CGInputControl::m_mouseModeFlags) is left alone, so it goes on
+// picking under it. Nothing with no device.
+WXL_BINDING(input_cursor_set_visible, void, (wxl_bool visible), (visible), (void)0)
+
+// Gives the pointer's look back to the game: CGInputControl::UpdateMouseMode(force) on the active
+// input control, which shows or hides it as the game's own state says. With no input control, the
+// device's CursorSetVisible(true).
+WXL_BINDING(input_cursor_restore, void, (void), (), (void)0)
+
+// Whether the pointer is over the 3D world: CSimpleTop's m_mouseFocus is the world frame
+// (CGWorldFrame::s_currentWorldFrame). False with no world frame.
+WXL_BINDING(input_pointer_over_world, wxl_bool, (void), (), WXL_FALSE)

@@ -20,6 +20,7 @@
 #include "wxl/services/script.h"
 
 #include <windows.h>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -1109,6 +1110,14 @@ namespace wxl::core::binding
         return CallMember<const void*>(WXL_SITE("CGUnit_C::GetAura", 0), object, index);
     }
 
+    wxl_bool unit_is_outdoors(const void* object)
+    {
+        // __thiscall, no argument: World::QueryOutdoors(m_worldObject); 0 or 1 in EAX
+        // (`neg eax; sbb eax, eax; neg eax` at 0x0071B7FF), a bare `ret`.
+        if (!IsClient() || !OnMainThread() || !object) return WXL_FALSE;
+        return CallMember<int32_t>(WXL_SITE("CGUnit_C::IsOutdoors", 0), object) ? WXL_TRUE : WXL_FALSE;
+    }
+
     const void* item_stats(const void* object)
     {
         // __thiscall, no argument: g_itemDBCache.GetRecord(entry, no guid, no callback).
@@ -1206,6 +1215,198 @@ namespace wxl::core::binding
         return CallMember<bool>(WXL_SITE("CGPlayer_C::ClickToMove", 0), player, kTrackMove, &none, &point, 0.0f)
                    ? WXL_TRUE
                    : WXL_FALSE;
+    }
+
+    wxl_bool action_face(const void* player, float facing)
+    {
+        // CGInputControl::CanTurn(CGUnit_C*): __stdcall, `ret 4`; int in EAX.
+        // CGUnit_C::OnSetRawFacingLocal(uint32_t time, float facing): __thiscall, `ret 8`, called
+        // so by CameraTurnPlayer (0x005FB33A: the facing then the time pushed, ECX the mover).
+        using CanTurnFn = int32_t(__stdcall*)(const void* unit);
+        if (!IsClient() || !OnMainThread() || !player) return WXL_FALSE;
+        const uint64_t mover = *reinterpret_cast<const uint64_t*>(WXL_STATIC("CGUnit_C::s_activeMover"));
+        if (mover != object_guid(player)) return WXL_FALSE;
+        if (!reinterpret_cast<CanTurnFn>(WXL_SITE("CGInputControl::CanTurn", 0))(player)) return WXL_FALSE;
+        CallMember<void>(WXL_SITE("CGUnit_C::OnSetRawFacingLocal", 0), player, os_time_ms(), facing);
+        return WXL_TRUE;
+    }
+
+    // --- Camera ---------------------------------------------------------------------------
+
+    namespace
+    {
+        // CSimpleCamera's facing is a C33Matrix of three rows, forward, the client's right, up.
+        constexpr std::size_t kFacing = WXL_FIELD("CSimpleCamera", "m_facing.a0");
+
+        wxl_vec3 Row(const void* camera, uint32_t row)
+        {
+            return Read<wxl_vec3>(camera, kFacing + row * sizeof(wxl_vec3));
+        }
+
+        float Dot(const wxl_vec3& a, const wxl_vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+        /// v * m, the client's operator*(C3Vector, C33Matrix): v's components weigh m's rows.
+        wxl_vec3 Times(const wxl_vec3& v, const float (&m)[9])
+        {
+            return wxl_vec3{v.x * m[0] + v.y * m[3] + v.z * m[6], v.x * m[1] + v.y * m[4] + v.z * m[7],
+                            v.x * m[2] + v.y * m[5] + v.z * m[8]};
+        }
+
+        /// The facing rows CSimpleCamera::SetFacing(forward) builds (FaceDirection, 0x00607DF0):
+        /// the direction normalised, the client's right a quarter turn to the left of it in the
+        /// ground plane (+x when the direction is vertical), and up from the two. False for a
+        /// zero direction.
+        bool FaceDirection(wxl_vec3 direction, wxl_vec3 (&rows)[3])
+        {
+            const float length = std::sqrt(Dot(direction, direction));
+            if (!(length > 1e-6f)) return false;
+            const wxl_vec3 f{direction.x / length, direction.y / length, direction.z / length};
+            wxl_vec3       r{1.0f, 0.0f, 0.0f};
+            const float    flat = f.x * f.x + f.y * f.y;
+            if (flat >= 0.00000023841858f)
+            {
+                const float scale = 1.0f / std::sqrt(flat);
+                r                 = wxl_vec3{-f.y * scale, f.x * scale, 0.0f};
+            }
+            rows[0] = f;
+            rows[1] = r;
+            rows[2] = wxl_vec3{-(r.y * f.z), f.z * r.x, r.y * f.x - f.y * r.x};
+            return true;
+        }
+
+        /// The rotation from the camera's parent to the world, when it has one: ParentToWorld,
+        /// __thiscall with the C33Matrix returned through a hidden pointer, `ret 4`.
+        bool ParentRotation(const void* camera, float (&m)[9])
+        {
+            if (!Read<uint64_t>(camera, WXL_FIELD("CGCamera", "m_relativeTo"))) return false;
+            CallMember<void*>(WXL_SITE("CGCamera::ParentToWorld", 0), camera, static_cast<void*>(m));
+            return true;
+        }
+    }
+
+    void* camera_world(void)
+    {
+        if (!IsClient()) return nullptr;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        return frame ? Read<void*>(frame, WXL_FIELD("CGWorldFrame", "m_camera")) : nullptr;
+    }
+
+    wxl_bool camera_read(const void* camera, wxl_core_camera* out)
+    {
+        if (!IsClient() || !camera || !out) return WXL_FALSE;
+        out->position = Read<wxl_vec3>(camera, WXL_FIELD("CSimpleCamera", "m_position"));
+        out->forward  = Row(camera, 0);
+        out->left     = Row(camera, 1);
+        out->up       = Row(camera, 2);
+        float parent[9];
+        if (ParentRotation(camera, parent))
+        {
+            // CGCamera::Forward/Right/Up: the row times ParentToWorld().
+            out->forward = Times(out->forward, parent);
+            out->left    = Times(out->left, parent);
+            out->up      = Times(out->up, parent);
+        }
+        // CGCamera::FOV: m_targetFov + m_fov, clamped to [0, 3.1241393].
+        out->fov_base    = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_fov"));
+        const float fov  = Read<float>(camera, WXL_FIELD("CGCamera", "m_targetFov")) + out->fov_base;
+        out->fov         = fov < 0.0f ? 0.0f : (fov >= 3.1241393f ? 3.1241393f : fov);
+        out->near_z      = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_nearZ"));
+        out->far_z       = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_farZ"));
+        out->aspect      = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_aspect"));
+        out->pivot       = Read<wxl_vec3>(camera, WXL_FIELD("CGCamera", "m_targetPosition"));
+        out->pivot.z    += Read<float>(camera, WXL_FIELD("CGCamera", "m_height"));
+        out->followed    = Read<uint64_t>(camera, WXL_FIELD("CGCamera", "m_targetGUID"));
+        out->cinematic   = Read<const void*>(camera, WXL_FIELD("CGCamera", "m_model")) ? 1u : 0u;
+        return WXL_TRUE;
+    }
+
+    void camera_write(void* camera, const wxl_core_camera* view)
+    {
+        if (!IsClient() || !camera || !view) return;
+        wxl_vec3 rows[3];
+        if (!FaceDirection(view->forward, rows)) return;
+        float parent[9];
+        if (ParentRotation(camera, parent))
+        {
+            // The facing is kept in the parent's frame: each world row times the inverse
+            // rotation, which is the transpose, so its dot with each of the parent's rows.
+            for (wxl_vec3& row : rows)
+            {
+                const wxl_vec3 world = row;
+                row = wxl_vec3{Dot(world, wxl_vec3{parent[0], parent[1], parent[2]}),
+                               Dot(world, wxl_vec3{parent[3], parent[4], parent[5]}),
+                               Dot(world, wxl_vec3{parent[6], parent[7], parent[8]})};
+            }
+        }
+        char* bytes = static_cast<char*>(camera);
+        std::memcpy(bytes + WXL_FIELD("CSimpleCamera", "m_position"), &view->position, sizeof(wxl_vec3));
+        std::memcpy(bytes + kFacing, rows, sizeof rows);
+        std::memcpy(bytes + WXL_FIELD("CSimpleCamera", "m_fov"), &view->fov_base, sizeof(float));
+    }
+
+    wxl_bool world_trace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
+    {
+        // World::Intersect(const C3Vector&, const C3Vector&, C3Vector*, float*, uint32_t,
+        // HitTestDebug*): cdecl, a tail jump to CMap::Intersect (0x0077F314), which reads its six
+        // arguments and returns with a bare `ret`; bool in AL.
+        using IntersectFn = int32_t(__cdecl*)(const wxl_vec3* start, const wxl_vec3* end, wxl_vec3* hit,
+                                              float* fraction, uint32_t flags, void* debug);
+        if (!IsClient() || !OnMainThread() || !hit || map_id() < 0) return WXL_FALSE;
+        float fraction = 1.0f;
+        wxl_vec3 point{};
+        const int32_t met = reinterpret_cast<IntersectFn>(WXL_SITE("World::Intersect", 0))(&start, &finish, &point,
+                                                                                           &fraction, flags, nullptr);
+        if (!(met & 0xFF)) return WXL_FALSE;
+        *hit = point;
+        return WXL_TRUE;
+    }
+
+    // --- Input ----------------------------------------------------------------------------
+
+    namespace
+    {
+        // CGxDevice::CursorSetVisible(int) is the device vtable's slot 73 (+0x124):
+        // CGInputControl::UpdateMouseMode calls it so (`mov edx, [eax+0x124]; call edx` at
+        // 0x005FA8FA), and every device overrides it (CGxDeviceD3d at 0x0068E750).
+        constexpr std::size_t kCursorSetVisibleSlot = 0x124 / sizeof(void*);
+        using CursorSetVisibleFn = void(__fastcall*)(void* self, void* edx, int32_t visible);
+
+        void* Device() { return *reinterpret_cast<void* const*>(WXL_STATIC("g_theGxDevicePtr")); }
+    }
+
+    wxl_bool input_cursor_visible(void)
+    {
+        const void* device = IsClient() ? Device() : nullptr;
+        return device && Read<int32_t>(device, WXL_FIELD("CGxDevice", "m_cursorVisible")) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    void input_cursor_set_visible(wxl_bool visible)
+    {
+        void* device = IsClient() ? Device() : nullptr;
+        if (!device) return;
+        const void* const* vtable = Read<const void* const*>(device, 0);
+        reinterpret_cast<CursorSetVisibleFn>(const_cast<void*>(vtable[kCursorSetVisibleSlot]))(device, nullptr,
+                                                                                               visible ? 1 : 0);
+    }
+
+    void input_cursor_restore(void)
+    {
+        // CGInputControl::UpdateMouseMode(int force): __thiscall, `ret 4` (0x005FA90B).
+        if (!IsClient()) return;
+        const void* control = *reinterpret_cast<const void* const*>(WXL_STATIC("CGInputControl::s_inputControl"));
+        if (control)
+            CallMember<void>(WXL_SITE("CGInputControl::UpdateMouseMode", 0), control, int32_t(1));
+        else
+            input_cursor_set_visible(WXL_TRUE);
+    }
+
+    wxl_bool input_pointer_over_world(void)
+    {
+        if (!IsClient()) return WXL_FALSE;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        const void* top   = *reinterpret_cast<const void* const*>(WXL_STATIC("CSimpleTop::s_instance"));
+        if (!frame || !top) return WXL_FALSE;
+        return Read<const void*>(top, WXL_FIELD("CSimpleTop", "m_mouseFocus")) == frame ? WXL_TRUE : WXL_FALSE;
     }
 
     // --- Memory ---------------------------------------------------------------------------
