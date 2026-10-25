@@ -122,6 +122,8 @@ namespace
     {
         return (message >= WM_KEYFIRST && message <= WM_KEYLAST);
     }
+
+    bool IsKeyRelease(uint32_t message) { return message == WM_KEYUP || message == WM_SYSKEYUP; }
 }
 
 namespace wxl::core::services
@@ -190,6 +192,10 @@ namespace wxl::core::services
             MakeCurrent();
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(window), message, static_cast<WPARAM>(wparam),
                                            static_cast<LPARAM>(lparam));
+            // A key let go goes on to the game as well: its press may have reached the game before
+            // Dear ImGui wanted the keyboard, and a key the game never sees let go stays held there
+            // (the character walks on). The game drops a release whose press it did not see.
+            if (IsKeyRelease(message)) return false;
             const ImGuiIO& io = ImGui::GetIO();
             return (io.WantCaptureMouse && IsMouse(message)) || (io.WantCaptureKeyboard && (IsKeyboard(message)));
         }
