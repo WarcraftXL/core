@@ -1362,9 +1362,20 @@ namespace
         return WXL_TRUE;
     }
 
-    uint32_t WXL_CALL FakeTextureReload(const char* name, uint32_t* busy)
+    uint32_t WXL_CALL FakeTextureReload(const char* name, uint32_t* busy, uint32_t* atlas)
     {
         if (busy) *busy = 0;
+        if (atlas) *atlas = 0;
+        if (name && _stricmp(name, "Textures\\Loading") == 0)
+        {
+            if (busy) *busy = 1;
+            return 0;
+        }
+        if (name && _stricmp(name, "Interface\\Icons\\Shared") == 0)
+        {
+            if (atlas) *atlas = 1;
+            return 0;
+        }
         if (!name || _stricmp(name, "Textures\\Fake") != 0) return 0;
         if (busy) *busy = 1;
         return 2;
@@ -3833,9 +3844,11 @@ namespace
         Check(alloc && release, "with the allocator they were made with");
         Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0),
               "before a frame was drawn, no message is ImGui's");
-        const wxl_frame_args frame{1, 0.016f};
-        wxl::core::services::imgui::Present(frame); // nobody listens: nothing
-        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0), "nor with nobody listening");
+        Check(!wxl::core::services::imgui::BeginFrame(), "with nobody listening, no frame is opened");
+        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0), "nor is a message ImGui's");
+        const std::vector<wxl_event> raised = wxl::core::seams::RaisedEvents();
+        Check(std::find(raised.begin(), raised.end(), WXL_EV_ImGuiFrame) != raised.end(),
+              "ImGuiFrame is announced as raised, so a mod may subscribe to it");
     }
 
     void CheckWorldTrace()
@@ -5047,6 +5060,9 @@ namespace
                   "a model's skin reloads its model");
             wxl::core::objects::Service().Untrack(&unit);
             wxl::core::objects::Service().Untrack(&item);
+            Check(api.reload_asset(Str("Textures\\Loading.blp"), &done) == WXL_E_PENDING && done.busy == 1 &&
+                      api.reload_asset(Str("Interface\\Icons\\Shared.blp"), &done) == WXL_E_UNSUPPORTED && done.busy == 0,
+                  "a texture still loading is pending; one only on the interface's atlas cannot be read again");
             Check(api.reload_asset(Str("World\\Building.wmo"), &done) == WXL_E_UNSUPPORTED &&
                       api.reload_asset(Str("Textures\\None.blp"), &done) == WXL_E_NOT_FOUND,
                   "another kind is unsupported, a texture the client does not hold not found");

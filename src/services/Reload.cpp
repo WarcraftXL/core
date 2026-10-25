@@ -88,11 +88,12 @@ namespace wxl::core::services::reload
 
         wxl_asset_reload done{};
         done.struct_size = sizeof done;
+        uint32_t atlas   = 0; ///< textures held in the interface's atlas, which nothing reads again in place
 
         if (kind == Kind::Texture)
         {
             const std::string base = name.substr(0, dot);
-            done.textures          = wxl::core::binding::texture_reload(base.c_str(), &done.busy);
+            done.textures          = wxl::core::binding::texture_reload(base.c_str(), &done.busy, &atlas);
         }
         else
         {
@@ -126,8 +127,9 @@ namespace wxl::core::services::reload
             }
         }
 
-        WLOG_INFO(kReloadTag, "%s read again: %u texture(s), %u model file(s), %u unit(s) made again, %u still loading",
-                  asked, done.textures, done.models, done.objects, done.busy);
+        WLOG_INFO(kReloadTag, "%s read again: %u texture(s), %u model file(s), %u unit(s) made again, %u still loading, "
+                              "%u on the interface's atlas (not read again)",
+                  asked, done.textures, done.models, done.objects, done.busy, atlas);
         if (out && out->struct_size >= sizeof(uint32_t))
         {
             const uint32_t size = out->struct_size;
@@ -135,6 +137,7 @@ namespace wxl::core::services::reload
             out->struct_size = size;
         }
         if (done.textures || done.models) return WXL_OK;
-        return done.busy ? WXL_E_PENDING : WXL_E_NOT_FOUND;
+        if (done.busy) return WXL_E_PENDING;
+        return atlas ? WXL_E_UNSUPPORTED : WXL_E_NOT_FOUND;
     }
 }

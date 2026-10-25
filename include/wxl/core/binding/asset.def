@@ -69,6 +69,9 @@ WXL_BINDING(unit_update_display, wxl_bool, (void* object), (object), WXL_FALSE)
 // Reads again, in place, every BLP texture of the client's texture list (s_textureList) whose name
 // is `name` (CTexture::m_filename: the path without its extension, any case): `name`.blp is read
 // whole and handed to PumpBlpTextureAsync on each, which replaces its pixels and its device
-// texture as a first load does. A texture still loading (m_asyncObject) or on the atlas (m_atlas)
-// is left alone and counted in `busy`. The answer is how many were read again. Main thread.
-WXL_BINDING(texture_reload, uint32_t, (const char* name, uint32_t* busy), (name, busy), 0)
+// texture as a first load does. A texture still loading (m_asyncObject) is left alone and counted
+// in `busy`; one held in a block of the interface's atlas (m_atlas: a square texture of 64 pixels
+// or less the interface asked to share one) cannot be read again in place and is counted in
+// `atlas`. A texture the interface offered the atlas (m_flags 4) that it did not take is an
+// ordinary one. The answer is how many were read again. Main thread.
+WXL_BINDING(texture_reload, uint32_t, (const char* name, uint32_t* busy, uint32_t* atlas), (name, busy, atlas), 0)

@@ -1852,9 +1852,10 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
-    uint32_t texture_reload(const char* name, uint32_t* busy)
+    uint32_t texture_reload(const char* name, uint32_t* busy, uint32_t* atlas)
     {
         if (busy) *busy = 0;
+        if (atlas) *atlas = 0;
         if (!IsClient() || !name || !*name) return 0;
         // s_textureList, a TSExplicitList<CTexture>: its terminator's m_next at +8, each texture's
         // TSLink m_link at +0x64, its m_next at +4; an end pointer has its low bit set (TSList::IsEnd
@@ -1862,7 +1863,6 @@ namespace wxl::core::binding
         // (0x004B87B2), m_asyncObject +0x40, m_atlas +0x5C (0x004B87E4, 0x004B8800).
         constexpr std::uintptr_t kList        = WXL_STATIC_AT("s_textureList", 0x00AC3348);
         constexpr std::size_t    kLink        = 0x64;
-        constexpr std::size_t    kFlags       = 0x28;
         constexpr std::size_t    kAsyncObject = 0x40;
         constexpr std::size_t    kAtlas       = 0x5C;
         static_assert(WXL_FIELD("CTexture", "m_filename") == kLink + 8, "m_filename follows m_link");
@@ -1879,10 +1879,14 @@ namespace wxl::core::binding
         {
             const char* own = reinterpret_cast<const char*>(texture + WXL_FIELD("CTexture", "m_filename"));
             if (_stricmp(own, name) != 0 && _stricmp(own, path) != 0) continue;
-            if (Read<const void*>(texture, kAsyncObject) || Read<const void*>(texture, kAtlas) ||
-                (Read<uint16_t>(texture, kFlags) & 4))
+            if (Read<const void*>(texture, kAsyncObject))
             {
                 if (busy) ++*busy;
+                continue;
+            }
+            if (Read<const void*>(texture, kAtlas))
+            {
+                if (atlas) ++*atlas;
                 continue;
             }
             if (!tried)
