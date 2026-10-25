@@ -44,6 +44,7 @@ public:
     int32_t Add(int32_t a, const char* name);
     static void Helper(uint32_t flags);
     int32_t Inlined();
+    int32_t Load();
 };
 """
 
@@ -56,6 +57,33 @@ WXL_OFFSET_FUNCTION("Other::Folded", 0x00401200, 0x10, 0x3, "manual", "", "Src/T
 LIST = """0x00401000  Thing::Add     replace  main  stable       # a member
 0x00401100  Free           observe  any   provisional  # a free function
 -           Thing::Inlined replace  main  provisional  # x64 only
+"""
+
+
+OVERLOADS = """#include "Init.h"
+
+// INLINED
+int32_t Init(uint8_t* base, uint32_t size, const Data& data, Track& track) {
+    return 1;
+}
+
+// INLINED
+int32_t Init(uint8_t* base, uint32_t size, Data& data) {
+    return Init(base, size, data, data.track);
+}
+
+// OFFSET: 0x00401300
+int32_t Thing::Load() {
+    return Init(nullptr, 0, *this->data);
+}
+"""
+
+OVERLOAD_ROWS = """WXL_OFFSET_FUNCTION("Thing::Load", 0x00401300, 0x80, 0x40, "manual", "", "Src/Init.cpp", 14)
+"""
+
+DEINLINED_LIST = """0x00401300  Thing::Load    replace  main  provisional
+-           Init(uint8_t*,uint32_t,Data&)  replace  main  provisional
+deinlined   Init(uint8_t*,uint32_t,Data&)  Thing::Load
 """
 
 
@@ -136,6 +164,39 @@ def main():
         report("a line of no point fails --check", insert_points.main(iargs + ["--check"]) == 1)
         report("--write repairs both", insert_points.main(iargs + ["--write"]) == 0 and
                "WXL_POINT_7" not in (fork / "Src" / "Thing.cpp").read_text())
+
+        # An overload named by its types, a reference, and a de-inlined point.
+        (fork / "Src" / "Init.cpp").write_text(OVERLOADS)
+        (offsets / "functions.def").write_text(FUNCTIONS + OVERLOAD_ROWS)
+        (root / "points.txt").write_text(LIST + DEINLINED_LIST)
+        points, problems = points_table.load(root / "points.txt", fork, offsets)
+        report("an overload and a deinlined line read without a problem", not problems, "; ".join(problems))
+        load = points[3]
+        init = points[4]
+        report("the overload is found by its types, its reference lowered to an address",
+               init.base_name == "Init" and init.lowered == "i32(ptr,u32,ptr)" and init.params[2].reference,
+               init.lowered)
+        report("its identifier carries its types", init.ident == "Init_uint8_t_uint32_t_Data", init.ident)
+        report("a deinlined point is on x86 through its parent", init.x86 and init.deinlined_in is load, init.x86_why)
+        report("generate writes the de-inlined tables", generate_points.main(argv) == 0)
+        x86 = (root / "x86.def").read_text()
+        report("x86.def has its row, with its parent", 'WXL_POINT_X86_DEINLINED(Init_uint8_t_uint32_t_Data, '
+               '"Init(uint8_t*,uint32_t,Data&)", Thing_Load, int32_t, (void* base, uint32_t size, void* data))' in x86, x86[-400:])
+        shared = (root / "sdk" / "include" / "wxl" / "deinlined.def").read_text()
+        report("and the shared list names it", 'WXL_DEINLINED(Init_uint8_t_uint32_t_Data, "Init(uint8_t*,uint32_t,Data&)", '
+               '"Thing::Load", 0x00401300)' in shared, shared[-300:])
+        header = (fork / "WarcraftXL" / "Points.gen.h").read_text()
+        report("the x64 macro passes the reference by its address and calls the overload with what it points at",
+               "Data* wxl_a2" in header and "**static_cast<Data**>(wxl_a_[2])" in header and "}(p0, p1, &p2);" in header,
+               header[-1200:])
+        report("insert writes the overload's line in its own definition, not its namesake's",
+               insert_points.main(iargs + ["--write"]) == 0 and
+               "int32_t Init(uint8_t* base, uint32_t size, Data& data) {\n    WXL_POINT_4(base, size, data); // wxl.point"
+               in (fork / "Src" / "Init.cpp").read_text(), (fork / "Src" / "Init.cpp").read_text())
+        (root / "points.txt").write_text(LIST + DEINLINED_LIST.replace("Init(uint8_t*,uint32_t,Data&)", "Init"))
+        _, problems = points_table.load(root / "points.txt", fork, offsets)
+        report("an overloaded name without its types is a problem that says how to name it",
+               any("name the overload" in p for p in problems), "; ".join(problems))
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print("\n%d case(s), %d failure(s)" % (report.total, report.failures))

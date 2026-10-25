@@ -7,6 +7,10 @@
 #include "objects/Objects.hpp"
 #include "points/Points.hpp"
 #include "profile/Profile.hpp"
+#include "services/EngineService.hpp"
+#if defined(_M_IX86)
+#include "deinlined/Deinlined.hpp"
+#endif
 #include "runtime/Attachment.hpp"
 #include "runtime/Code.hpp"
 #include "runtime/Crash.hpp"
@@ -8429,6 +8433,20 @@ namespace
         if (call->side == WXL_POINT_REPLACE) PointApi().call_original(call);
     }
 
+    void CheckEngineService()
+    {
+        const wxl_engine_api& engine = wxl::core::services::EngineApi();
+        uint64_t              hash   = 0;
+        Check(engine.struct_size == sizeof(wxl_engine_api) && engine.layout("CM2Shared", &hash) == WXL_OK && hash != 0,
+              "wxl.engine answers a type's layout hash");
+        uint64_t again = 0;
+        Check(engine.layout("CGxDevice::TextureTarget", &again) == WXL_OK &&
+                  engine.layout("CGxDevice_TextureTarget", &hash) == WXL_OK && again == hash,
+              "by the fork's name or the headers' one");
+        Check(engine.layout("CNoSuchType", &hash) == WXL_E_NOT_FOUND && engine.layout(nullptr, &hash) == WXL_E_INVALID,
+              "and refuses a type it does not describe or no name");
+    }
+
     void CheckEveryPoint()
     {
         const wxl_point_api& api = PointApi();
@@ -8468,19 +8486,26 @@ namespace
                   (camera.flags & WXL_POINT_ON_X86) && (camera.flags & WXL_POINT_ON_X64),
               "the camera point: its name, lowered signature, two arguments, stable, replaceable, on both runtimes");
         const wxl_point_info& finish = infos[pts::kCM2Shared_FinishLoading];
-        Check(!(finish.flags & WXL_POINT_ON_X86) && (finish.flags & WXL_POINT_ON_X64) && !(finish.flags & WXL_POINT_STABLE),
-              "CM2Shared::FinishLoading is provisional and on the recompiled client only");
+        Check((finish.flags & WXL_POINT_ON_X86) && (finish.flags & WXL_POINT_ON_X64) && !(finish.flags & WXL_POINT_STABLE),
+              "CM2Shared::FinishLoading is provisional and on both runtimes (Wow.exe has it at 0x0083CF00)");
+        const wxl_point_info& init = infos[pts::kM2Init_uint8_t_uint32_t_M2Data];
+        Check(std::string_view(init.name.data, init.name.size) == "M2Init(uint8_t*,uint32_t,M2Data&)" &&
+                  std::string_view(init.signature.data, init.signature.size) == "i32(ptr,u32,ptr)" &&
+                  (init.flags & WXL_POINT_ON_X86) && (init.flags & WXL_POINT_ON_X64),
+              "M2Init(uint8_t*,uint32_t,M2Data&): an overload named by its types, its reference an address, on both "
+              "runtimes (de-inlined on x86)");
 
         uint32_t id = 0;
         Check(api.find("No::SuchPoint", &id) == WXL_E_NOT_FOUND, "find: a name the table does not hold is not_found");
 #if defined(_M_IX86)
-        Check(api.find("CM2Shared::FinishLoading", &id) == WXL_E_UNSUPPORTED &&
-                  std::string_view(finish.absent.data, finish.absent.size).find("x64 only") == 0,
-              "find: an inlined function is unsupported on x86, and list says `x64 only` and why");
-        Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED,
-              "find: outside Wow.exe 12340 no x86 point is there (the harness is not the client)");
+        Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED &&
+                  api.find("M2Init(uint8_t*,uint32_t,M2Data&)", &id) == WXL_E_UNSUPPORTED,
+              "find: outside Wow.exe 12340 no x86 point is there (the harness is not the client), a de-inlined "
+              "one included");
         PlaceStandIns();
         Check(api.find("CGCamera::UpdateCallback", &id) == WXL_OK, "find: placed on stand-ins, the x86 points are there");
+        Check(api.find("M2Init(uint8_t*,uint32_t,M2Data&)", &id) == WXL_OK && id == pts::kM2Init_uint8_t_uint32_t_M2Data + 1,
+              "find: a de-inlined point is there once its parent is");
 #else
         Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED,
               "find: before the client hands its table, no x64 point is there");
@@ -8744,6 +8769,105 @@ namespace
               "a compiled function's prologue passes");
     }
 
+    // --- De-inlining: a parent's recompiled body, in which an inlined function is real --------
+
+    /// The parent as Wow.exe has it: the child's work copied into it, no call to see.
+    __declspec(noinline) int32_t __fastcall StandInFinish(void* self, void*)
+    {
+        g_sink = g_sink + 6;
+        return static_cast<int32_t>(reinterpret_cast<uintptr_t>(self) & 0xFF) + 5;
+    }
+
+    struct StandInModel
+    {
+        uint32_t flags;
+        uint32_t size;
+        uint8_t  bytes[16];
+    };
+
+    int g_childBodies = 0;
+
+    /// The child as the fork writes it, and as extract.py --runtime writes its head.
+    __declspec(noinline) int32_t __cdecl TestChildBody(uint8_t* base, uint32_t size, StandInModel& data)
+    {
+        ++g_childBodies;
+        data.flags |= 0x100;
+        return base == data.bytes && size == data.size ? 1 : 0;
+    }
+
+    __declspec(noinline) int32_t __cdecl TestChild(uint8_t* base, uint32_t size, StandInModel& data)
+    {
+        if (!wxl::core::deinlined::Armed(pts::kM2Init_uint8_t_uint32_t_M2Data)) return TestChildBody(base, size, data);
+        return wxl::core::deinlined::Enter<pts::kM2Init_uint8_t_uint32_t_M2Data>(&TestChildBody, base, size, &data);
+    }
+
+    /// The parent recompiled: the same work, the child called.
+    __declspec(noinline) int32_t __fastcall TestFinishBody(void* self, void*)
+    {
+        StandInModel* model = static_cast<StandInModel*>(self);
+        g_sink           = g_sink + 60;
+        return TestChild(model->bytes, model->size, *model) ? 1000 + static_cast<int32_t>(model->size) : 0;
+    }
+
+    int g_childSeen = 0;
+    uint32_t g_childSize = 0;
+    void WXL_CALL ChildBefore(wxl_point_call* call, void*)
+    {
+        ++g_childSeen;
+        g_childSize = *static_cast<uint32_t*>(call->args[1]);
+        StandInModel* model = *static_cast<StandInModel**>(call->args[2]);
+        model->flags |= 0x1; // a write through the reference reaches the model
+    }
+
+    void WXL_CALL ChildReplace(wxl_point_call* call, void*)
+    {
+        PointApi().call_original(call);
+        *static_cast<int32_t*>(call->result) = 0; // refuse the file
+    }
+
+    int g_parentSeen = 0;
+    void WXL_CALL ParentBefore(wxl_point_call*, void*) { ++g_parentSeen; }
+
+    void CheckDeinlined()
+    {
+        const wxl_point_api& api    = PointApi();
+        const uint32_t       child  = pts::kM2Init_uint8_t_uint32_t_M2Data;
+        const uint32_t       parent = pts::kCM2Shared_FinishLoading;
+        using FinishFn              = int32_t(__thiscall*)(void*);
+        const FinishFn finish       = Opaque(reinterpret_cast<FinishFn>(&StandInFinish));
+        StandInModel      model{0, 9, {}};
+
+        g_childBodies = g_childSeen = g_parentSeen = 0;
+        Check(finish(&model) == static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF) + 5 &&
+                  !pts::x86::BodyInPlace(parent) && g_childBodies == 0,
+              "x86: with no handler on the de-inlined point, the parent runs Wow.exe's own body");
+
+        const uint32_t before = Attach(child, WXL_POINT_BEFORE, &ChildBefore, nullptr);
+        Check(before && pts::x86::BodyInPlace(parent), "x86: the de-inlined point's first handler puts the recompiled body in place");
+        Check(finish(&model) == 1009 && g_childBodies == 1 && g_childSeen == 1 && g_childSize == 9 &&
+                  model.flags == 0x101,
+              "x86: the parent now runs its recompiled body, in which the child is a call: its Before sees the "
+              "arguments, writes through the reference, and the child's body runs");
+
+        const uint32_t onParent = Attach(parent, WXL_POINT_BEFORE, &ParentBefore, nullptr);
+        Check(onParent && finish(&model) == 1009 && g_parentSeen == 1 && g_childSeen == 2,
+              "x86: the parent's own point still runs in front of the recompiled body");
+
+        const uint32_t replace = Attach(child, WXL_POINT_REPLACE, &ChildReplace, nullptr);
+        Check(replace && finish(&model) == 0 && g_childBodies == 3,
+              "x86: a Replace on the de-inlined point changes what the parent sees (the file refused)");
+        api.detach(replace);
+
+        api.detach(before);
+        Check(!pts::x86::BodyInPlace(parent), "x86: its last handler gone, the recompiled body leaves");
+        g_childBodies = 0;
+        Check(finish(&model) == static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF) + 5 &&
+                  g_childBodies == 0 && g_parentSeen == 3,
+              "x86: the parent runs Wow.exe's body again, its own point still attached");
+        api.detach(onParent);
+        Check(!wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)), "x86: and with nothing left the function is not detoured");
+    }
+
     void CheckPointDetours()
     {
         const wxl_point_api& api = PointApi();
@@ -8821,6 +8945,8 @@ namespace
         pts::x86::Place(pts::kvFrameScript_SignalEvent, Address(&StandInSignal), 0);
         pts::x86::Place(pts::kNetClient_ProcessMessage, Address(&StandInProcess), 0);
         pts::x86::AddSite(pts::kCGCamera_UpdateCallback, Address(&InlinedCamera), "[esp+4],[esp+8]");
+        pts::x86::Place(pts::kCM2Shared_FinishLoading, Address(&StandInFinish), 0);
+        pts::x86::PlaceBody(pts::kCM2Shared_FinishLoading, reinterpret_cast<void*>(&TestFinishBody));
     }
 }
 #endif
@@ -9597,6 +9723,7 @@ int main(int argc, char** argv)
     // Unbuffered, so the last line printed before a crash is never held back in a buffer.
     setvbuf(stdout, nullptr, _IONBF, 0);
 
+
     wxl::core::binding::Bind(FakeInit());
 
     wxl::host::HostConfig config;
@@ -9698,6 +9825,7 @@ int main(int argc, char** argv)
     CheckValidatorDetour();
     CheckGameplayDetours();
 #endif
+    CheckEngineService();
     CheckPointTable();
     CheckPointDispatch();
     CheckEveryPoint();
@@ -9705,6 +9833,7 @@ int main(int argc, char** argv)
     CheckPointPrologues();
     CheckPointDetours();
     CheckPointSides();
+    CheckDeinlined();
 #endif
 
     printf("\n%d failure(s)\n", g_failures);
