@@ -175,6 +175,7 @@ def deinlined_def(points):
         if p.deinlined_in is not None:
             out.append('WXL_DEINLINED(%s, "%s", "%s", %s)\n'
                        % (p.ident, p.name, p.deinlined_in.name, column_hex(p.deinlined_in.address)))
+    out.append(MSVC_TAIL)
     return "".join(out)
 
 

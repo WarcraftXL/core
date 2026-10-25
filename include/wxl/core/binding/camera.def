@@ -26,3 +26,10 @@ WXL_BINDING(camera_write, void, (void* camera, const wxl_core_camera* view), (ca
 // fraction, flags, no debug), the line test the camera's collision and the spells' line of sight
 // run. False when it meets nothing, and with nothing loaded.
 WXL_BINDING(world_trace, wxl_bool, (wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit), (start, finish, flags, hit), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

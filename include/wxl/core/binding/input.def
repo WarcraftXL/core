@@ -41,3 +41,10 @@ WXL_BINDING(input_default_action, wxl_bool, (uint32_t button), (button), WXL_FAL
 // Ends the game's mouse look, with no click: the noted action forgotten, then
 // CGInputControl::UnsetControlBit of both look bits, as the game's MouselookStop does.
 WXL_BINDING(input_mouse_look_stop, void, (void), (), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

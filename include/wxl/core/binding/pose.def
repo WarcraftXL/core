@@ -16,3 +16,10 @@ WXL_BINDING(model_bone_flags, void, (void* model, uint32_t bone, uint32_t flags,
 // CM2Model::SetBoneProceduralTransform(bone, matrix), which the game uses to twist a turning
 // unit's torso and head.
 WXL_BINDING(model_bone_transform, void, (void* model, uint32_t bone, const float* matrix), (model, bone, matrix), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif
