@@ -26,6 +26,8 @@
 #include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/Assets.hpp"
+#include "services/Hashes.hpp"
+#include "services/RelayService.hpp"
 #include "services/StorageService.hpp"
 
 #include <chrono>
@@ -39,6 +41,7 @@
 #include "wxl/objects/map.hpp"
 #include "wxl/runtime/handles.hpp"
 #include "wxl/core/filestack.hpp"
+#include "wxl/scoped_name.hpp"
 #include "wxl/services/script.h"
 #include "wxl/services/storage.h"
 
@@ -588,10 +591,14 @@ namespace
         fsk::StreamRecord* stream = nullptr;
     };
 
+    /// The record the fake's archive files are found in: what FindFile answers through `archive`.
+    char g_fakeRecord = 0;
+
     /// FindFile as the client runs it: the gate first, then a name behind two backslashes off
-    /// the disk at the base path, else the files it holds. Answers the path to open, and
-    /// whether that path is the file stack's.
-    bool FakeFind(const char* name, std::string& path, bool& stacked)
+    /// the disk at the base path, else the files it holds (in an archive, `g_fakeRecord`), then
+    /// the observing half. An open asks the archive back, an existence check does not. Answers
+    /// the path to open, and whether that path is the file stack's.
+    bool FakeFind(const char* name, std::string& path, bool& stacked, bool open = true)
     {
         char        buffer[260] = {};
         char*       out         = buffer;
@@ -600,7 +607,7 @@ namespace
         uint32_t    type        = 3;
         uint32_t*   typeAt      = &type;
         void*       archive     = nullptr;
-        void**      archiveAt   = &archive;
+        void**      archiveAt   = open ? &archive : nullptr;
         int32_t     answer      = 0;
         const char* asked       = name;
         if (wxl::seam::Storage::FindFile::Gate(&answer, &asked, &out, &size, &flags, &typeAt, &archiveAt))
@@ -610,22 +617,39 @@ namespace
             stacked = true;
             return true;
         }
-        stacked = false;
+        stacked    = false;
+        bool found = false;
         if (asked[0] == '\\' && asked[1] == '\\')
         {
             path = g_basePath + asked;
             const DWORD attributes = ::GetFileAttributesA(path.c_str());
-            return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+            found = attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+            type  = 0;
+            std::snprintf(buffer, sizeof buffer, "%s", asked);
         }
-        path = asked;
-        return FileNamed(asked) != nullptr;
+        else
+        {
+            path  = asked;
+            found = FileNamed(asked) != nullptr;
+            if (found && archiveAt) *archiveAt = &g_fakeRecord;
+        }
+        wxl::seam::Storage::FindFileResult::After(found ? 1 : 0, asked, buffer, size, flags, &type, archiveAt);
+        return found;
+    }
+
+    wxl_bool WXL_CALL FakeArchiveRecordOf(void* record, wxl_core_archive* out)
+    {
+        if (record != &g_fakeRecord || !out) return WXL_FALSE;
+        *out      = wxl_core_archive{};
+        out->path = "Data\\fake.MPQ";
+        return WXL_TRUE;
     }
 
     wxl_bool WXL_CALL FakeFileExists(const char* path)
     {
         std::string found;
         bool        stacked = false;
-        return path && FakeFind(path, found, stacked) ? WXL_TRUE : WXL_FALSE;
+        return path && FakeFind(path, found, stacked, false) ? WXL_TRUE : WXL_FALSE;
     }
 
     /// SFileOpenFile: SFile::OpenEx's gate, FindFile, then the open of what it found.
@@ -1310,6 +1334,34 @@ namespace
         return fake ? (fake->file ? fake->file : fake) : nullptr;
     }
 
+    // The client's model cache and texture list, as the reload rows reach them.
+    int g_evictAsked   = 0;
+    int g_displayAgain = 0;
+
+    uint32_t WXL_CALL FakeCacheEvict(const char* leaf, void** out, uint32_t capacity)
+    {
+        ++g_evictAsked;
+        if (!leaf || std::strcmp(leaf, "character.m2") != 0) return 0;
+        if (out && capacity) out[0] = &g_charModel; // the character model is its own file
+        return 1;
+    }
+
+    wxl_bool WXL_CALL FakeUpdateDisplay(void* object)
+    {
+        const FakeObject* unit = static_cast<const FakeObject*>(object);
+        if (!unit || (unit->typeId != WXL_OBJECT_UNIT && unit->typeId != WXL_OBJECT_PLAYER)) return WXL_FALSE;
+        ++g_displayAgain;
+        return WXL_TRUE;
+    }
+
+    uint32_t WXL_CALL FakeTextureReload(const char* name, uint32_t* busy)
+    {
+        if (busy) *busy = 0;
+        if (!name || _stricmp(name, "Textures\\Fake") != 0) return 0;
+        if (busy) *busy = 1;
+        return 2;
+    }
+
     wxl_bool WXL_CALL FakeAttachmentPoint(const void* model, uint32_t attachment, wxl_vec3* out)
     {
         if (model != &g_charModel || attachment != 32 || !out) return WXL_FALSE;
@@ -1640,6 +1692,10 @@ namespace
         init.script_heap            = &FakeScriptHeap;
         init.archive_tables         = &FakeArchiveTables;
         init.archive_of             = &FakeArchiveOf;
+        init.archive_record_of      = &FakeArchiveRecordOf;
+        init.m2_cache_evict         = &FakeCacheEvict;
+        init.unit_update_display    = &FakeUpdateDisplay;
+        init.texture_reload         = &FakeTextureReload;
         init.client_dbs             = &FakeClientDbs;
         init.model_path             = &FakeModelPath;
         init.model_bytes            = &FakeModelBytes;
@@ -4285,6 +4341,419 @@ namespace
 
         assets::ReleaseAll();
         assets::ForgetInstall();
+        g_files.clear();
+    }
+
+    // --- the asset bricks: names nobody has, content hashes, overrides, scopes, reloads, relay ---
+
+    /// A FileMissing as a handler saw it, its strings copied while they were valid.
+    struct Missing
+    {
+        std::string path, base, scope;
+        uint32_t    kind    = 0;
+        bool        open    = false;
+        bool        pending = false;
+    };
+
+    std::vector<Missing> g_missing;
+
+    void WXL_CALL OnFileMissing(void*, const void* data)
+    {
+        const auto& args = *static_cast<const wxl_file_missing_args*>(data);
+        Missing     seen;
+        seen.path    = std::string(args.path.data, args.path.size);
+        seen.base    = std::string(args.base.data, args.base.size);
+        seen.scope   = args.scope.size ? std::string(args.scope.data, args.scope.size) : std::string();
+        seen.kind    = args.kind;
+        seen.open    = args.open == WXL_TRUE;
+        seen.pending = args.pending == WXL_TRUE;
+        g_missing.push_back(seen);
+    }
+
+    std::string Hex(const uint8_t (&md5)[16])
+    {
+        static const char kDigits[] = "0123456789abcdef";
+        std::string       text;
+        for (uint8_t byte : md5)
+        {
+            text += kDigits[byte >> 4];
+            text += kDigits[byte & 0xF];
+        }
+        return text;
+    }
+
+    struct HashAnswer
+    {
+        std::atomic<int> calls{0};
+        wxl_result       result = WXL_E_FAILED;
+        std::string      md5;
+        uint32_t         layer = 0;
+    };
+
+    void WXL_CALL OnHashed(void* user, uint64_t, wxl_result result, const wxl_file_hash* hash)
+    {
+        HashAnswer& answer = *static_cast<HashAnswer*>(user);
+        answer.result      = result;
+        if (hash)
+        {
+            answer.md5   = Hex(hash->md5);
+            answer.layer = hash->layer;
+        }
+        ++answer.calls;
+    }
+
+    /// Pumps the main thread's queue until @p done or a second passes.
+    template <class Done>
+    bool PumpUntil(Done done)
+    {
+        for (int i = 0; i < 200 && !done(); ++i)
+        {
+            wxl::core::services::hashes::Pump();
+            wxl::core::services::relay::Pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return done();
+    }
+
+    // A service published through wxl.relay, and a caller of it.
+    struct FakeService
+    {
+        std::vector<wxl_request> received;
+        std::vector<std::string> methods;
+        std::vector<wxl_request> cancelled;
+        bool                     answerAtOnce = false;
+        wxl_relay_endpoint       table{};
+
+        static void WXL_CALL Request(void* user, wxl_request request, wxl_str method, const wxl_value* args,
+                                     uint32_t count)
+        {
+            FakeService& self = *static_cast<FakeService*>(user);
+            self.received.push_back(request);
+            self.methods.push_back(std::string(method.data, method.size));
+            if (!self.answerAtOnce) return;
+            // An echo of its first argument and a number.
+            wxl_value values[2]{};
+            if (count && args[0].type == WXL_VALUE_STRING) values[0] = args[0];
+            values[1].type      = WXL_VALUE_NUMBER;
+            values[1].as.number = 42;
+            wxl::core::services::RelayApi().answer(request, values, 2);
+        }
+
+        static void WXL_CALL Cancelled(void* user, wxl_request request)
+        {
+            static_cast<FakeService*>(user)->cancelled.push_back(request);
+        }
+
+        const wxl_relay_endpoint* Table()
+        {
+            table = wxl_relay_endpoint{sizeof table, this, &Request, &Cancelled};
+            return &table;
+        }
+    };
+
+    struct Reply
+    {
+        int         calls  = 0;
+        wxl_result  result = WXL_E_UNSUPPORTED;
+        std::string first;
+        double      number = 0;
+    };
+
+    void WXL_CALL OnReply(void* user, wxl_request, wxl_result result, const wxl_value* values, uint32_t count)
+    {
+        Reply& reply = *static_cast<Reply*>(user);
+        ++reply.calls;
+        reply.result = result;
+        if (count && values[0].type == WXL_VALUE_STRING) reply.first.assign(values[0].as.string.data, values[0].as.string.size);
+        if (count > 1 && values[1].type == WXL_VALUE_NUMBER) reply.number = values[1].as.number;
+    }
+
+    void CheckAssetBricks()
+    {
+        namespace assets = wxl::core::services::assets;
+        const wxl_storage_api& api = wxl::core::services::StorageApi();
+        Check(api.struct_size >= offsetof(wxl_storage_api, reload_asset) + sizeof(void*),
+              "wxl.storage carries hashes, overrides, scoped names and reloads");
+
+        BuildFakeStack();
+        g_files.clear();
+        g_files.push_back(FakeFile{"World\\Base.txt", "the client's", 0, false});
+        const wxl_subscription heard = g_host->Events().Subscribe(WXL_EV_FileMissing, &OnFileMissing, nullptr, 0);
+        Mute(WXL_EV_FileOpen);
+        Mute(WXL_EV_FileOpened);
+
+        // --- FileMissing ---
+        g_missing.clear();
+        void* none = FakeFileOpen("Creature\\Nowhere\\Nowhere.m2");
+        Check(!none && g_missing.size() == 1 && g_missing[0].path == "Creature\\Nowhere\\Nowhere.m2" &&
+                  g_missing[0].kind == WXL_ASSET_MODEL && g_missing[0].open && !g_missing[0].pending &&
+                  g_missing[0].scope.empty() && g_missing[0].base == g_missing[0].path,
+              "an open no layer answers raises FileMissing: the name, a model, an open");
+        g_missing.clear();
+        Check(FakeFileExists("Interface\\None.toc") == WXL_FALSE && g_missing.size() == 1 && !g_missing[0].open &&
+                  g_missing[0].kind == WXL_ASSET_INTERFACE,
+              "so does an existence check, told apart from an open");
+        g_missing.clear();
+        void* base = FakeFileOpen("World\\Base.txt");
+        FakeFileClose(base);
+        Check(base && g_missing.empty(), "a file some layer has raises nothing");
+        Check(api.exists(Str("Creature\\Nowhere\\Nowhere.m2")) == WXL_FALSE && ReadAll(api, "World\\Nothing.txt") == "<none>" &&
+                  g_missing.empty(),
+              "nor does a mod's own wxl.storage call");
+        {
+            FakeProvider later;
+            later.pending = {"creature\\later\\later.m2"};
+            uint64_t id   = 0;
+            api.add_provider(later.Table(), 0, &id);
+            Check(!FakeFileOpen("Creature\\Later\\Later.m2") && g_missing.size() == 1 && g_missing[0].pending,
+                  "a name a provider answers \"not yet\" for is missing and pending");
+            api.remove_provider(id);
+        }
+        g_missing.clear();
+        Check(!FakeFileOpen("Creature\\X\\X[my.mod].m2") && g_missing.size() == 1 &&
+                  g_missing[0].path == "Creature\\X\\X[my.mod].m2" && g_missing[0].scope == "my.mod" &&
+                  g_missing[0].base == "Creature\\X\\X.m2",
+              "a scoped name neither it nor its base has: the name asked, its scope and its base");
+
+        // --- scoped names ---
+        const auto scoped = [&](const char* mod, const char* path) {
+            const wxl_str name = api.scoped_name(Str(mod), Str(path));
+            return std::string(name.data ? name.data : "", name.size);
+        };
+        Check(scoped("my.mod", "Creature\\Foo\\Foo.m2") == "Creature\\Foo\\Foo[my.mod].m2" &&
+                  scoped("my.mod", "Interface\\Readme") == "Interface\\Readme[my.mod]" &&
+                  scoped("my.mod", "Dir.v2\\File") == "Dir.v2\\File[my.mod]",
+              "a scope is the mod's id in brackets before the file name's extension");
+        Check(scoped("a]b", "X.m2").empty() && scoped("my.mod", "X[my.mod].m2").empty() && scoped("my.mod", "").empty(),
+              "no scope for a mod id it cannot hold, a name already in one, or no name");
+        {
+            wxl::ScopedParts parts;
+            Check(wxl::SplitScopedName("Creature\\Foo\\Foo[my.mod]00.skin", &parts) && parts.mod == "my.mod" &&
+                      parts.base == "Creature\\Foo\\Foo00.skin" && !wxl::SplitScopedName("World\\[x]\\a.txt"),
+                  "what the client derives from a scoped model stays in its scope; a bracket of a folder is none");
+        }
+        Check(ReadAll(api, "World\\Base[my.mod].txt") == "the client's" && api.exists(Str("World\\Base[my.mod].txt")),
+              "a scoped name nothing serves is the client's own file");
+        Check(api.serve(Str("World\\Base[my.mod].txt"), "mine", 4, 0) == WXL_OK &&
+                  ReadAll(api, "World\\Base[my.mod].txt") == "mine" && ReadAll(api, "World\\Base.txt") == "the client's",
+              "served at 0, the scoped name is the mod's copy and the client's file stays its own");
+
+        // --- overrides ---
+        Check(api.override_file(Str("World\\Base.txt"), Str("World\\Base[my.mod].txt")) == WXL_OK &&
+                  ReadAll(api, "World\\Base.txt") == "mine",
+              "an override puts the mod's copy in place of the client's file");
+        Check(FakeFileExists("World\\Ghost.txt") == WXL_FALSE &&
+                  api.override_file(Str("World\\Ghost.txt"), Str("World\\Base.txt")) == WXL_OK &&
+                  FakeFileExists("World\\Ghost.txt") == WXL_TRUE,
+              "and answers the client's existence checks too");
+        {
+            constexpr uint32_t kOther = 9;
+            const uint32_t previous = g_host->SwapCurrentMod(kOther);
+            api.serve(Str("World\\Base[other].txt"), "theirs", 6, 0);
+            api.override_file(Str("World\\Base.txt"), Str("World\\Base[other].txt"));
+            const std::string latest = ReadAll(api, "World\\Base.txt");
+            wxl::core::services::storage::RemoveOverridesOf(kOther);
+            assets::ReleaseOf(kOther);
+            g_host->SwapCurrentMod(previous);
+            Check(latest == "theirs" && ReadAll(api, "World\\Base.txt") == "mine",
+                  "the latest of two mods' overrides wins, and its mod going uncovers the earlier");
+        }
+        api.unserve(Str("World\\Base[my.mod].txt"));
+        Check(ReadAll(api, "World\\Base.txt") == "the client's",
+              "an override whose scoped copy is gone falls back to the client's own file");
+        Check(api.restore_file(Str("World\\Base.txt")) == WXL_OK && api.restore_file(Str("World\\Base.txt")) == WXL_E_NOT_FOUND &&
+                  api.restore_file(Str("World\\Ghost.txt")) == WXL_OK && FakeFileExists("World\\Ghost.txt") == WXL_FALSE,
+              "restored once; again is not found; the client's answers come back");
+        Check(api.override_file(Str(""), Str("x")) == WXL_E_INVALID &&
+                  api.override_file(Str(std::string(260, 'a').c_str()), Str("x")) == WXL_E_INVALID,
+              "an empty name or one past 259 bytes is refused");
+
+        // --- content hashes ---
+        wxl::core::services::hashes::ForgetCache();
+        wxl_file_hash hash{};
+        hash.struct_size = sizeof hash;
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "264705c71ad404bef10ffa7dfbe2a94b" &&
+                  hash.size == 12 && hash.layer == WXL_FILE_LAYER_ARCHIVE &&
+                  std::string(hash.source.data, hash.source.size) == "Data\\fake.MPQ",
+              "an archive's file hashes to the MD5 of its bytes, its archive named");
+        FileNamed("World\\Base.txt")->bytes = "THE CLIENT'S";
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "264705c71ad404bef10ffa7dfbe2a94b",
+              "a second ask answers from what was kept");
+        Check(api.hash_file(Str("World\\Base.txt"), WXL_HASH_FRESH, &hash) == WXL_OK &&
+                  Hex(hash.md5) == "06489070e9742e6455e883d71adf48a8",
+              "WXL_HASH_FRESH reads it again");
+        api.serve(Str("World\\Base[my.mod].txt"), "mine", 4, 0);
+        Check(api.hash_file(Str("World\\Base[my.mod].txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "918b81db5e91d031548b963c93845e5b" &&
+                  hash.layer == WXL_FILE_LAYER_SERVED,
+              "served bytes hash as they are served");
+        api.override_file(Str("World\\Base.txt"), Str("World\\Base[my.mod].txt"));
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && hash.layer == WXL_FILE_LAYER_SERVED,
+              "an overridden name hashes as what the client would read");
+        api.restore_file(Str("World\\Base.txt"));
+        api.unserve(Str("World\\Base[my.mod].txt"));
+        g_missing.clear();
+        Check(api.hash_file(Str("World\\Nothing.txt"), 0, &hash) == WXL_E_NOT_FOUND && g_missing.empty(),
+              "a name no layer has is not found, and raises nothing");
+        {
+            FakeProvider later;
+            later.pending = {"world\\soon.txt"};
+            uint64_t id   = 0;
+            api.add_provider(later.Table(), 1, &id);
+            Check(api.hash_file(Str("World\\Soon.txt"), 0, &hash) == WXL_E_PENDING, "one a provider has not yet is pending");
+            api.remove_provider(id);
+        }
+        {
+            HashAnswer answer;
+            uint64_t   request = 0;
+            Check(api.hash_file_async(Str("World\\Base.txt"), WXL_HASH_FRESH, &OnHashed, &answer, &request) == WXL_OK &&
+                      request != 0,
+                  "hash_file_async answers a request at once");
+            Check(PumpUntil([&] { return answer.calls.load() > 0; }) && answer.calls.load() == 1 &&
+                      answer.result == WXL_OK && answer.md5 == "06489070e9742e6455e883d71adf48a8",
+                  "and the hash comes later, at the main thread's pump");
+            HashAnswer dropped;
+            constexpr uint32_t kGoing = 9;
+            const uint32_t previous = g_host->SwapCurrentMod(kGoing);
+            api.hash_file_async(Str("World\\Base.txt"), WXL_HASH_FRESH, &OnHashed, &dropped, &request);
+            g_host->SwapCurrentMod(previous);
+            wxl::core::services::hashes::ForgetMod(kGoing);
+            PumpUntil([] { return false; });
+            Check(dropped.calls.load() == 0, "a request of a mod that went is never answered");
+        }
+
+        // --- reloads ---
+        {
+            wxl_asset_reload done{};
+            done.struct_size = sizeof done;
+            Check(api.reload_asset(Str("Textures\\Fake.blp"), &done) == WXL_OK && done.textures == 2 && done.busy == 1,
+                  "a texture is read again in place, one still loading left alone");
+            FakeObject unit;
+            unit.guid   = 0x77;
+            unit.typeId = WXL_OBJECT_UNIT;
+            FakeObject item;
+            item.guid   = 0x78;
+            item.typeId = WXL_OBJECT_ITEM;
+            wxl::core::objects::Service().Track(&unit);
+            wxl::core::objects::Service().Track(&item);
+            g_displayAgain = 0;
+            done           = wxl_asset_reload{sizeof done, 0, 0, 0, 0};
+            Check(api.reload_asset(Str("Character\\Character.MDX"), &done) == WXL_OK && done.models == 1 &&
+                      done.objects == 1 && g_displayAgain == 1,
+                  "a model is dropped from the cache and the unit drawn with it made again, not the item");
+            done = wxl_asset_reload{sizeof done, 0, 0, 0, 0};
+            Check(api.reload_asset(Str("Character\\Character00.skin"), &done) == WXL_OK && done.models == 1,
+                  "a model's skin reloads its model");
+            wxl::core::objects::Service().Untrack(&unit);
+            wxl::core::objects::Service().Untrack(&item);
+            Check(api.reload_asset(Str("World\\Building.wmo"), &done) == WXL_E_UNSUPPORTED &&
+                      api.reload_asset(Str("Textures\\None.blp"), &done) == WXL_E_NOT_FOUND,
+                  "another kind is unsupported, a texture the client does not hold not found");
+            wxl_result away = WXL_OK;
+            std::thread([&] { away = api.reload_asset(Str("Textures\\Fake.blp"), &done); }).join();
+            Check(away == WXL_E_INVALID, "and only the main thread may ask");
+        }
+
+        // --- the relay ---
+        {
+            namespace relay = wxl::core::services::relay;
+            const wxl_relay_api& rapi = wxl::core::services::RelayApi();
+            constexpr uint32_t kPublisher = 11, kCaller = 12;
+            FakeService service;
+            uint32_t    previous = g_host->SwapCurrentMod(kPublisher);
+            Check(rapi.publish(Str("test.echo"), service.Table()) == WXL_OK && rapi.published(Str("TEST.echo")) == WXL_TRUE,
+                  "a mod publishes a service, found in any case");
+            g_host->SwapCurrentMod(kCaller);
+            Check(rapi.publish(Str("test.echo"), service.Table()) == WXL_E_INVALID && rapi.unpublish(Str("test.echo")) == WXL_E_NOT_FOUND,
+                  "another mod can neither take the name nor take it back");
+
+            Reply       first;
+            wxl_value   arg{};
+            arg.type      = WXL_VALUE_STRING;
+            arg.as.string = Str("hello");
+            wxl_request request = 0;
+            service.answerAtOnce = true;
+            Check(rapi.call(Str("test.echo"), Str("echo"), &arg, 1, &OnReply, &first, &request) == WXL_OK && request &&
+                      service.received.empty() && first.calls == 0,
+                  "a call answers its number at once, and nothing is handed to anyone yet");
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            Check(service.received.size() == 1 && service.methods[0] == "echo" && first.calls == 1 &&
+                      first.result == WXL_OK && first.first == "hello" && first.number == 42,
+                  "the pump hands the request to the service, and its answer to the caller");
+
+            service.answerAtOnce = false;
+            Reply later;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("slow"), nullptr, 0, &OnReply, &later, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            wxl_value value{};
+            value.type      = WXL_VALUE_BOOL;
+            value.as.boolean = WXL_TRUE;
+            wxl_result fromThread = WXL_E_FAILED;
+            std::thread([&] { fromThread = rapi.answer(request, &value, 1); }).join();
+            Check(fromThread == WXL_OK && later.calls == 0, "a service answers later, from a thread of its own");
+            relay::Pump();
+            Check(later.calls == 1 && later.result == WXL_OK && rapi.answer(request, &value, 1) == WXL_E_NOT_FOUND,
+                  "the answer comes at the next pump; a second one is refused");
+
+            Reply failed;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("bad"), nullptr, 0, &OnReply, &failed, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            rapi.fail(request, Str("no such asset"));
+            relay::Pump();
+            Check(failed.calls == 1 && failed.result == WXL_E_FAILED && failed.first == "no such asset",
+                  "a failure reaches the caller with its reason");
+
+            Reply nobody;
+            rapi.call(Str("test.nobody"), Str("x"), nullptr, 0, &OnReply, &nobody, &request);
+            relay::Pump();
+            Check(nobody.calls == 1 && nobody.result == WXL_E_NOT_FOUND, "a name nobody publishes fails as not found");
+
+            Reply cancelled;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("long"), nullptr, 0, &OnReply, &cancelled, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            g_host->SwapCurrentMod(kPublisher);
+            Check(rapi.cancel(request) == WXL_E_NOT_FOUND, "only its caller may cancel a request");
+            g_host->SwapCurrentMod(kCaller);
+            Check(rapi.cancel(request) == WXL_OK, "its caller takes it back");
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            Check(service.cancelled.size() == 1 && service.cancelled[0] == request && rapi.answer(request, nullptr, 0) == WXL_E_NOT_FOUND &&
+                      cancelled.calls == 0,
+                  "the service is told, its answer refused, the caller never answered");
+
+            Reply orphan;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("orphan"), nullptr, 0, &OnReply, &orphan, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            relay::ForgetMod(kCaller);
+            relay::Pump();
+            Check(service.cancelled.size() == 2 && orphan.calls == 0, "a caller that goes cancels its requests");
+
+            Reply gone;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("gone"), nullptr, 0, &OnReply, &gone, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            relay::ForgetMod(kPublisher);
+            relay::Pump();
+            Check(gone.calls == 1 && gone.result == WXL_E_NOT_FOUND && rapi.published(Str("test.echo")) == WXL_FALSE,
+                  "a service whose mod goes fails what it had not answered, and is gone");
+            relay::Clear();
+        }
+
+        Unmute(WXL_EV_FileOpen);
+        Unmute(WXL_EV_FileOpened);
+        g_host->Events().Unsubscribe(heard);
+        assets::ReleaseAll();
+        assets::ForgetInstall();
+        wxl::core::services::hashes::ForgetCache();
         g_files.clear();
     }
 
@@ -9775,6 +10244,7 @@ int main(int argc, char** argv)
     CheckSound();
     CheckStorageService();
     CheckAssetPipeline();
+    CheckAssetBricks();
     CheckDataService();
     CheckRender();
     CheckSpell();

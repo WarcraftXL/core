@@ -789,6 +789,8 @@ GROUND_TRUTH = {
     # System_SFile2::FindFile reads [ebp+8] (0x004247C0) up to [ebp+0x1C] (0x004247A9) and ends
     # in a bare `ret` (0x00424B0A); SFile::FileExistsEx pushes six and `add esp, 0x18` at 0x00424B38.
     "Storage.FindFile":                ("0x00424780", "cdecl", [], 6),
+    # The observed half of System_SFile2::FindFile, the same function: as above.
+    "Storage.FindFileResult":          ("0x00424780", "cdecl", [], 6),
     # The asset pipeline's events. CMapArea::AsyncCallback reads [ebp+8] (0x007D7024), a bare
     # `ret` (0x007D7044); AsyncTextureSuccessCallback the same (0x004B7E84, 0x004B7F0D); both are
     # called by AsyncFileReadPollHandler through ECX at 0x004B9B9E, `add esp, 4`.
