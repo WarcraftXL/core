@@ -1433,6 +1433,81 @@ namespace
         return WXL_TRUE;
     }
 
+    // --- wxl.m2's models of the world and bone watchers: what the binding was asked ------------
+
+    struct FakeWorldState
+    {
+        int              made     = 0;
+        int              placed   = 0;
+        int              unplaced = 0;
+        wxl_m2_placement placement{};
+        wxl_m2_placement transform{};
+        uint32_t         anim  = 0;
+        float            speed = 0.0f;
+        float            alpha = 1.0f;
+        int              emitting = -1;
+    };
+    FakeWorldState g_world;
+
+    void* WXL_CALL FakeCreateWorldModel(const char* path)
+    {
+        if (!path || !*path) return nullptr;
+        ++g_world.made;
+        FakeM2Model* model = new FakeM2Model{};
+        g_fakeLive.push_back(model);
+        return model;
+    }
+    wxl_bool WXL_CALL FakePlaceWorld(void* model, const wxl_m2_placement* placement)
+    {
+        if (!model || !placement || g_mapId < 0) return WXL_FALSE;
+        ++g_world.placed;
+        g_world.placement = *placement;
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeUnplaceWorld(void* model)
+    {
+        if (model) ++g_world.unplaced;
+    }
+    void WXL_CALL FakeSetTransform(void*, const wxl_m2_placement* placement) { g_world.transform = *placement; }
+    void WXL_CALL FakePlayAnimation(void*, uint32_t anim, float speed) { g_world.anim = anim, g_world.speed = speed; }
+    wxl_bool WXL_CALL FakeM2Loaded(const void* model)
+    {
+        return model && static_cast<const FakeM2Model*>(model)->loaded ? WXL_TRUE : WXL_FALSE;
+    }
+    uint32_t WXL_CALL FakeAnimationLength(void*, uint32_t anim) { return anim == 0 ? 1333u : 0u; }
+    void WXL_CALL FakeSetAlpha(void*, float alpha) { g_world.alpha = alpha; }
+    void WXL_CALL FakeSetEmitting(void*, wxl_bool emitting) { g_world.emitting = emitting ? 1 : 0; }
+    wxl_bool WXL_CALL FakeAttachmentWorld(void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (model != &g_charModel || attachment != 32) return WXL_FALSE;
+        *out = wxl_vec3{100.0f, 200.0f, 31.5f};
+        return WXL_TRUE;
+    }
+
+    /// The bones of a fake model as the binding hands them to watchers: two files, told apart by
+    /// the model's `file` (null: the model is its own file), path "a.m2" or "b.m2".
+    int g_bonesAsked = 0;
+    wxl_bool WXL_CALL FakeM2Bones(void* model, wxl_m2_bones* out)
+    {
+        ++g_bonesAsked;
+        FakeM2Model* fake = AsFake(model);
+        if (!fake || !fake->loaded) return WXL_FALSE;
+        out->model      = model;
+        out->file       = fake->file ? fake->file : model;
+        out->path       = fake->texType == 2 ? wxl_str{"b.m2", 4} : wxl_str{"a.m2", 4};
+        out->bone_count = 3;
+        out->matrices   = &fake->matrices[0][0];
+        out->time_ms    = 42;
+        return WXL_TRUE;
+    }
+    wxl_bool WXL_CALL FakeFileBone(const void* file, uint32_t index, int16_t* parent, wxl_vec3* pivot)
+    {
+        if (!file || index >= 3) return WXL_FALSE;
+        std::memcpy(parent, g_bodyBones.bytes[index] + 0x08, sizeof *parent);
+        std::memcpy(pivot, g_bodyBones.bytes[index] + 0x4C, sizeof *pivot);
+        return WXL_TRUE;
+    }
+
     /// One fake model file, its bytes and skin, and the shadow bones counted on it.
     struct FakeM2File
     {
@@ -1639,6 +1714,12 @@ namespace
     wxl_bool WXL_CALL FakeTrace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
     {
         g_traceFlags = flags;
+        // The ground at z = 0, for a ray straight down.
+        if (start.x == finish.x && start.y == finish.y && start.z >= 0.0f && finish.z <= 0.0f)
+        {
+            *hit = wxl_vec3{start.x, start.y, 0.0f};
+            return WXL_TRUE;
+        }
         // A wall at x = 10.
         if ((start.x < 10.0f) == (finish.x < 10.0f)) return WXL_FALSE;
         const float t = (10.0f - start.x) / (finish.x - start.x);
@@ -1733,6 +1814,18 @@ namespace
         init.m2_skeleton            = &FakeSkeleton;
         init.m2_file_info           = &FakeM2FileInfo;
         init.m2_file_animate_bones  = &FakeM2FileAnimateBones;
+        init.m2_create_world_model  = &FakeCreateWorldModel;
+        init.m2_place_world         = &FakePlaceWorld;
+        init.m2_unplace_world       = &FakeUnplaceWorld;
+        init.m2_set_transform       = &FakeSetTransform;
+        init.m2_play_animation      = &FakePlayAnimation;
+        init.m2_loaded              = &FakeM2Loaded;
+        init.m2_animation_length    = &FakeAnimationLength;
+        init.m2_set_alpha           = &FakeSetAlpha;
+        init.m2_set_emitting        = &FakeSetEmitting;
+        init.m2_attachment_world    = &FakeAttachmentWorld;
+        init.m2_bones               = &FakeM2Bones;
+        init.m2_file_bone           = &FakeFileBone;
         init.pending_cast_caster    = &FakePendingCaster;
         init.pending_cast_spell_id  = &FakePendingSpellId;
         init.pending_cast_count     = &FakePendingCount;
@@ -10341,6 +10434,158 @@ namespace
         (void)unit;
     }
 
+    // --- wxl.m2: models of the world and bone watchers ------------------------------------------
+
+    struct BoneCounts
+    {
+        std::atomic<int> asked{0};
+        std::atomic<int> called{0};
+        std::atomic<int> faulted{0};
+    };
+    BoneCounts g_boneCounts;
+
+    wxl_bool WXL_CALL OnlyA(void*, wxl_str path, uint32_t count, void*)
+    {
+        ++g_boneCounts.asked;
+        return count == 3 && path.size == 4 && path.data[0] == 'a' ? WXL_TRUE : WXL_FALSE;
+    }
+    void WXL_CALL MoveFirstBone(const wxl_m2_bones* bones, void* user)
+    {
+        ++g_boneCounts.called;
+        bones->matrices[0] = static_cast<float>(bones->time_ms) + (user ? 1.0f : 0.0f);
+    }
+    void WXL_CALL FaultingWatcher(const wxl_m2_bones*, void*)
+    {
+        ++g_boneCounts.faulted;
+        *static_cast<volatile int*>(nullptr) = 1;
+    }
+
+    void CheckM2World()
+    {
+        const wxl_m2_api& m2 = wxl::core::services::M2Api();
+        g_world              = FakeWorldState{};
+        const int32_t map    = g_mapId;
+
+        Check(m2.create_world_model(M2Str("")) == nullptr, "a world model needs a file");
+        void* effect = m2.create_world_model(M2Str("Spells\\Fire_Base.m2"));
+        Check(effect && g_world.made == 1, "a model is made in the world's scene");
+
+        wxl_m2_placement at{};
+        at.struct_size = sizeof at;
+        at.position    = wxl_vec3{1.0f, 2.0f, 3.0f};
+        at.yaw         = 0.5f;
+        g_mapId        = -1;
+        Check(m2.place_model(effect, &at) == WXL_E_FAILED && g_world.placed == 0, "nothing is placed with no map loaded");
+        g_mapId = 0;
+        FakeM2Model stranger;
+        Check(m2.place_model(&stranger, &at) == WXL_E_INVALID && m2.place_model(effect, nullptr) == WXL_E_INVALID,
+              "a model the mod did not make, or no placement, is refused");
+        Check(m2.place_model(effect, &at) == WXL_OK && g_world.placed == 1 && g_world.placement.yaw == 0.5f &&
+                  g_world.placement.scale == 1.0f && g_world.placement.position.z == 3.0f,
+              "a placement reaches the client, a scale of 0 read as 1");
+        wxl_m2_placement older{};
+        older.struct_size = static_cast<uint32_t>(offsetof(wxl_m2_placement, yaw));
+        older.position    = wxl_vec3{4.0f, 5.0f, 6.0f};
+        older.yaw         = 9.0f;
+        Check(m2.place_model(effect, &older) == WXL_OK && g_world.placement.position.x == 4.0f &&
+                  g_world.placement.yaw == 0.0f && g_world.placement.scale == 1.0f,
+              "a shorter placement is read no further than its struct_size");
+
+        at.scale = 2.0f;
+        Check(m2.set_model_transform(effect, &at) == WXL_OK && g_world.transform.scale == 2.0f,
+              "a model's transform on its point reaches the client");
+        Check(m2.play_animation(effect, 158, 0.0f) == WXL_OK && g_world.anim == 158 && g_world.speed == 1.0f &&
+                  m2.play_animation(&stranger, 1, 1.0f) == WXL_E_INVALID,
+              "an animation plays at speed 1 unless asked, on the mod's models only");
+        m2.set_alpha(effect, 2.0f);
+        m2.set_emitting(effect, WXL_FALSE);
+        Check(g_world.alpha == 1.0f && g_world.emitting == 0, "alpha is held to [0, 1]; emitters are switched");
+
+        uint32_t length = 0;
+        Check(m2.model_loaded(effect) && m2.animation_length(effect, 0, &length) == WXL_OK && length == 1333,
+              "a loaded model answers how long an animation lasts");
+        AsFake(effect)->loaded = false;
+        Check(!m2.model_loaded(effect) && m2.animation_length(effect, 0, &length) == WXL_E_FAILED,
+              "and fails while it loads");
+        AsFake(effect)->loaded = true;
+        wxl_vec3 hand{};
+        Check(m2.attachment_world(&g_charModel, 32, &hand) == WXL_OK && hand.z == 31.5f &&
+                  m2.attachment_world(&g_charModel, 1, &hand) == WXL_E_NOT_FOUND,
+              "a point of a loaded model is read in the world; not found for one it lacks");
+
+        float          ground = -1.0f;
+        const wxl_vec3 above{5.0f, 5.0f, 10.0f};
+        Check(m2.ground_height(&above, 2.0f, 50.0f, &ground) == WXL_OK && ground == 0.0f &&
+                  g_traceFlags == 0x120111,
+              "the ground is traced straight down, with the mask the client's spell effects use");
+        const wxl_vec3 below{5.0f, 5.0f, -5.0f};
+        Check(m2.ground_height(&below, 1.0f, 1.0f, &ground) == WXL_E_NOT_FOUND &&
+                  m2.ground_height(&above, -1.0f, 1.0f, &ground) == WXL_E_INVALID,
+              "no ground in reach is not found; a negative reach is refused");
+
+        // Leaving the world takes the placed models out of it, once.
+        g_uiReloading = 1;
+        wxl::seam::World::LeaveWorld::Before();
+        Check(g_world.unplaced == 0, "a /reload leaves the placed models where they are");
+        g_uiReloading = 0;
+        wxl::seam::World::LeaveWorld::Before();
+        Check(g_world.unplaced == 1, "leaving the world takes them out of it");
+        const int freed = g_fakeModelsFreed;
+        m2.release_model(effect);
+        Check(g_world.unplaced == 1 && g_fakeModelsFreed == freed + 1, "a model taken out is only released after");
+        void* again = m2.create_world_model(M2Str("Spells\\Fire_Base.m2"));
+        m2.place_model(again, &at);
+        m2.release_model(again);
+        Check(g_world.unplaced == 2 && g_fakeModelsFreed == freed + 2, "a placed model released is taken out first");
+
+        // Bone watchers.
+        uint32_t token = 0;
+        Check(m2.watch_bones(nullptr, nullptr, nullptr, &token) == WXL_E_INVALID && !wxl::core::services::m2::WatchingBones(),
+              "a watcher needs a function");
+        int  user = 0;
+        Check(m2.watch_bones(&OnlyA, &MoveFirstBone, &user, &token) == WXL_OK && token != 0 &&
+                  wxl::core::services::m2::WatchingBones(),
+              "a watcher is taken");
+        FakeM2Model a, b;
+        b.texType = 2; // the fake names it b.m2
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&b, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_boneCounts.asked == 2 && g_boneCounts.called == 2 && a.matrices[0][0] == 43.0f && b.matrices[0][0] == 0.0f,
+              "the filter is asked once per file, the watcher called each frame for the files it took");
+        int16_t  parent = 0;
+        wxl_vec3 pivot{};
+        Check(m2.bone_info(&a, 1, &parent, &pivot) == WXL_OK && parent == 0 && pivot.z == 1.0f &&
+                  m2.bone_info(&a, 3, &parent, &pivot) == WXL_E_NOT_FOUND,
+              "a file's bone: its parent and pivot; not found past the last");
+
+        uint32_t faulty = 0;
+        Check(m2.watch_bones(nullptr, &FaultingWatcher, nullptr, &faulty) == WXL_OK, "a second watcher is taken");
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_boneCounts.faulted == 1 && g_boneCounts.called == 4 && g_boneCounts.asked == 4,
+              "a watcher that faults is dropped; the others go on, the files asked again of the new set");
+
+        m2.unwatch_bones(token);
+        Check(!wxl::core::services::m2::WatchingBones(), "unwatched, no watcher is left");
+        const int asked = g_bonesAsked;
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_bonesAsked == asked && g_boneCounts.called == 4, "with no watcher the client is not even asked");
+
+        std::vector<uint32_t> tokens;
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            uint32_t t = 0;
+            if (m2.watch_bones(nullptr, &MoveFirstBone, nullptr, &t) == WXL_OK) tokens.push_back(t);
+        }
+        uint32_t past = 0;
+        Check(tokens.size() == 16 && m2.watch_bones(nullptr, &MoveFirstBone, nullptr, &past) == WXL_E_FAILED,
+              "sixteen watchers at most");
+        wxl::core::services::m2::ForgetMod(wxl::core::Host() ? wxl::core::Host()->CurrentMod() : 0);
+        Check(!wxl::core::services::m2::WatchingBones(), "a disabled mod's watchers go with it");
+        g_mapId = map;
+    }
+
     // --- M2Shared: the loader's stages as events, and wxl.m2file ----------------------------------
 
     void CheckModelStages()
@@ -10700,6 +10945,7 @@ int main(int argc, char** argv)
     CheckModelBatch();
     CheckAppearance();
     CheckM2Service();
+    CheckM2World();
     CheckModelStages();
     CheckX64Only();
 #if defined(_M_IX86)

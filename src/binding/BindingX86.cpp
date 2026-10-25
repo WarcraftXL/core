@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -999,19 +1000,286 @@ namespace wxl::core::binding
         std::memcpy(count, &value, sizeof value);
     }
 
-    void* m2_create_world_model(const char*) { return nullptr; }
-    wxl_bool m2_place_world(void*, const wxl_m2_placement*) { return WXL_FALSE; }
-    void m2_unplace_world(void*) {}
-    void m2_set_transform(void*, const wxl_m2_placement*) {}
-    void m2_play_animation(void*, uint32_t, float) {}
-    wxl_bool m2_loaded(const void*) { return WXL_FALSE; }
-    uint32_t m2_animation_length(void*, uint32_t) { return 0; }
-    void m2_set_alpha(void*, float) {}
-    void m2_set_emitting(void*, wxl_bool) {}
-    wxl_bool m2_attachment_world(void*, uint32_t, wxl_vec3*) { return WXL_FALSE; }
-    wxl_bool m2_ground_height(const wxl_vec3*, float, float, float*) { return WXL_FALSE; }
-    wxl_bool m2_bones(void*, wxl_m2_bones*) { return WXL_FALSE; }
-    wxl_bool m2_file_bone(const void*, uint32_t, int16_t*, wxl_vec3*) { return WXL_FALSE; }
+    // --- M2: models of the world (wxl.m2's world calls) -----------------------------------------
+    //
+    // As the client places its spell effects (CEffect::PostInitialize, CGWorldFrame::
+    // SpellEffectEnumProc): the model's world matrix set by hand, a static map entity that culls
+    // it, and an enumeration callback the map calls while it draws, which animates the model and
+    // shows it while the map does.
+
+    // Every function the calls below reach, as calls_x86.def declares them for check_conventions.
+#define WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params) \
+    static_assert(WXL_SEAM_SITE(symbol, 0) != 0, #domain "." #name " resolves in Wow.exe");
+#include "wxl/core/binding/calls_x86.def"
+#undef WXL_BINDING_CALL_X86
+
+    namespace
+    {
+        constexpr uint32_t kWorldMatrix = 0x8000;  // m_fFlags: m_worldTransform set by hand (SetWorldTransform)
+        constexpr uint32_t kProjected   = 0x4;     // m_fFlags: projected batches lie on the terrain
+        constexpr uint32_t kShown       = 0x8;     // m_fFlags: drawn, for a model hung on nothing
+        constexpr uint32_t kAnimShown   = 0x10000; // m_fFlags: animated while drawn, likewise
+        constexpr std::size_t kMatrixSize = 16 * sizeof(float);
+        constexpr std::size_t kFileNameSize = 260; // CM2Shared::m_fileName
+
+        struct PendingAnim
+        {
+            uint32_t anim;
+            float    speed;
+        };
+
+        // Main thread only, as wxl.m2 calls it and the client calls back.
+        std::unordered_map<void*, PendingAnim> g_pendingAnims;
+        std::unordered_map<void*, void*>       g_worldEntities;
+
+        void PlayNow(void* model, uint32_t anim, float speed)
+        {
+            // CM2Model::HasSequence(id): __thiscall, `ret 4` (0x00825F36). The stand animation
+            // when the file has none of that id, as the client falls back.
+            if (!x86::CallMember<int32_t>(WXL_SITE_AT("CM2Model::HasSequence", 0x00825EE0, 0), model, anim)) anim = 0;
+            // CM2Model::SetBoneSequence(bone, sequence, variation, time, speed, blend, primary):
+            // __thiscall, `ret 0x1c` (0x00832ADA); bone 0xFFFFFFFF is every bone.
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetBoneSequence", 0), model, 0xFFFFFFFFu, anim, 0xFFFFFFFFu,
+                                  0u, speed, int32_t(1), int32_t(1));
+        }
+
+        /// The model's loaded callback: CM2Model::UpdateLoaded calls it cdecl (model, arg) and
+        /// pops both (0x0082519A).
+        void __cdecl OnWorldModelLoaded(void* model, void*)
+        {
+            const auto it   = g_pendingAnims.find(model);
+            PendingAnim anim{0, 1.0f};
+            if (it != g_pendingAnims.end())
+            {
+                anim = it->second;
+                g_pendingAnims.erase(it);
+            }
+            PlayNow(model, anim.anim, anim.speed);
+        }
+
+        /// What SpellEffectEnumProc does for its effect: a MAP_OBJECT_FUNC, cdecl (param, flags,
+        /// guid, param32), a bare `ret` (0x004F5959).
+        int32_t __cdecl WorldModelEnum(void*, uint32_t flags, uint64_t, uintptr_t param32)
+        {
+            void* model = reinterpret_cast<void*>(param32);
+            if (!model) return 1;
+            // CM2Model::SetAnimating(int): __thiscall, `ret 4` (0x00823F59).
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetAnimating", 0), model, int32_t(1));
+            // CM2Model::IsLoaded(wait, recursive): __thiscall, `ret 8` (0x00824F19).
+            if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::IsLoaded", 0), model, int32_t(0), int32_t(0)) &&
+                !Read<void*>(model, WXL_FIELD("CM2Model", "m_attachParent")))
+            {
+                const uint32_t visible = flags & 1;
+                uint32_t       f       = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags"));
+                f = (f & ~kShown) | (visible << 3);
+                f = (f & ~kAnimShown) | (visible << 16);
+                std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+            }
+            return 1;
+        }
+
+        /// The placement's matrix, built by the client's own C44Matrix members as the recompiled
+        /// client builds it: identity, turned around z, y and x, scaled, then moved.
+        void PlacementMatrix(const wxl_m2_placement& at, float* m)
+        {
+            std::memset(m, 0, kMatrixSize);
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+            // C44Matrix::RotateAroundZ/Y/X(angle), Scale(float): __thiscall, `ret 4` each
+            // (0x004C33B9, 0x004C3379, 0x004C3339, 0x004C1C3D).
+            if (at.yaw != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundZ", 0), m, at.yaw);
+            if (at.pitch != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundY", 0), m, at.pitch);
+            if (at.roll != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundX", 0), m, at.roll);
+            x86::CallMember<void>(WXL_SITE_AT("C44Matrix::Scale", 0x004C1BF0, 0), m, at.scale > 0.0f ? at.scale : 1.0f);
+            m[12] = at.position.x;
+            m[13] = at.position.y;
+            m[14] = at.position.z;
+        }
+
+        /// CM2Model::SetWorldTransform(const C44Matrix&) (0x004D8630), as the fork writes it.
+        void SetWorldTransform(void* model, const float* m)
+        {
+            uint8_t* base = static_cast<uint8_t*>(model);
+            uint32_t f    = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) | kWorldMatrix;
+            std::memcpy(base + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+            std::memcpy(base + WXL_FIELD("CM2Model", "m_worldTransform"), m, kMatrixSize);
+        }
+    }
+
+    void* m2_create_world_model(const char* path)
+    {
+        if (!IsClient() || !path || !*path) return nullptr;
+        void* scene = *reinterpret_cast<void* const*>(WXL_STATIC("World::s_m2Scene"));
+        if (!scene) return nullptr;
+        // CM2Scene::CreateModel(path, flags): __thiscall, `ret 8` (0x0081F8FF).
+        void* model = x86::CallMember<void*>(WXL_SITE("CM2Scene::CreateModel", 0), scene, path, uint32_t(0));
+        // CM2Model::SetLoadedCallback(fn, arg): __thiscall, `ret 8` (0x008251C5); it calls back at
+        // once when the model has loaded already.
+        if (model)
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetLoadedCallback", 0), model, &OnWorldModelLoaded,
+                                  static_cast<void*>(nullptr));
+        return model;
+    }
+
+    wxl_bool m2_place_world(void* model, const wxl_m2_placement* placement)
+    {
+        if (!IsClient() || !model || !placement || map_id() < 0) return WXL_FALSE;
+        if (!*reinterpret_cast<void* const*>(WXL_STATIC("World::s_m2Scene"))) return WXL_FALSE;
+        m2_detach_model(model);
+        float matrix[16];
+        PlacementMatrix(*placement, matrix);
+        SetWorldTransform(model, matrix);
+        uint8_t* base = static_cast<uint8_t*>(model);
+        uint32_t f    = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) | kProjected;
+        std::memcpy(base + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+        float world[16];
+        std::memcpy(world, base + WXL_FIELD("CM2Model", "m_worldTransform"), sizeof world);
+
+        void*& entity = g_worldEntities[model];
+        if (!entity)
+        {
+            // CMap::ObjectCreateStatic(model, matrix, func, funcParam, param32): cdecl, a bare
+            // `ret` (0x00782342).
+            using CreateStatic = void*(__cdecl*)(void*, const float*, int32_t(__cdecl*)(void*, uint32_t, uint64_t, uintptr_t),
+                                                 void*, uintptr_t);
+            entity = reinterpret_cast<CreateStatic>(WXL_SITE("CMap::ObjectCreateStatic", 0))(
+                model, world, &WorldModelEnum, nullptr, reinterpret_cast<uintptr_t>(model));
+            if (!entity)
+            {
+                g_worldEntities.erase(model);
+                return WXL_FALSE;
+            }
+        }
+
+        float box[6]    = {};  // CAaBox: b, t
+        float sphere[4] = {};  // CAaSphere: c, r
+        float light[3]  = {};
+        if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::IsLoaded", 0), model, int32_t(0), int32_t(0)))
+        {
+            // CM2Model::GetBoundingBox() / GetBoundingSphere(): __thiscall with the hidden return
+            // pointer, `ret 4` (0x004F5E70, 0x004F5EF7).
+            x86::CallMember<void*>(WXL_SITE("CM2Model::GetBoundingBox", 0), model, static_cast<void*>(box));
+            x86::CallMember<void*>(WXL_SITE("CM2Model::GetBoundingSphere", 0), model, static_cast<void*>(sphere));
+            light[0] = sphere[0], light[1] = sphere[1], light[2] = sphere[2];
+        }
+        light[2] = 1.0f;
+        // CMap::ObjectUpdate(entity, matrix, box, sphere, light, bool, flags): cdecl, a bare
+        // `ret` (0x007804F4).
+        using Update = void(__cdecl*)(void*, float*, float*, float*, float*, int32_t, uint32_t);
+        reinterpret_cast<Update>(WXL_SITE("CMap::ObjectUpdate", 0))(entity, world, box, sphere, light, 0, 0xFFFFFFFFu);
+        return WXL_TRUE;
+    }
+
+    void m2_unplace_world(void* model)
+    {
+        const auto it = g_worldEntities.find(model);
+        if (it == g_worldEntities.end()) return;
+        void* entity = it->second;
+        g_worldEntities.erase(it);
+        if (!IsClient() || !model) return;
+        // World::ObjectDestroy(entity): cdecl, a bare `ret` (0x00782731).
+        if (entity) x86::CallFree<void>(WXL_SITE("World::ObjectDestroy", 0), entity);
+        uint32_t f = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & ~(kShown | kAnimShown);
+        std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+    }
+
+    void m2_set_transform(void* model, const wxl_m2_placement* placement)
+    {
+        if (!IsClient() || !model || !placement) return;
+        float matrix[16];
+        PlacementMatrix(*placement, matrix);
+        SetWorldTransform(model, matrix);
+    }
+
+    void m2_play_animation(void* model, uint32_t anim, float speed)
+    {
+        if (!IsClient() || !model) return;
+        if (!Loaded(model))
+        {
+            g_pendingAnims[model] = PendingAnim{anim, speed};
+            return;
+        }
+        PlayNow(model, anim, speed);
+    }
+
+    wxl_bool m2_loaded(const void* model) { return IsClient() && model && Loaded(model) ? WXL_TRUE : WXL_FALSE; }
+
+    uint32_t m2_animation_length(void* model, uint32_t anim)
+    {
+        if (!IsClient() || !model || !Loaded(model)) return 0;
+        if (!x86::CallMember<int32_t>(WXL_SITE_AT("CM2Model::HasSequence", 0x00825EE0, 0), model, anim)) return 0;
+        // CM2Model::GetSequenceInfo(id, variation, M2SequenceInfo&): __thiscall, `ret 0xc` (0x0082D11A).
+        alignas(4) uint8_t info[WXL_TYPE_SIZE("M2SequenceInfo")] = {};
+        x86::CallMember<void>(WXL_SITE("CM2Model::GetSequenceInfo", 0), model, anim, 0u, static_cast<void*>(info));
+        return Read<uint32_t>(info, WXL_FIELD("M2SequenceInfo", "m_duration"));
+    }
+
+    void m2_set_alpha(void* model, float alpha)
+    {
+        if (IsClient() && model)
+            std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_baseAlpha"), &alpha, sizeof alpha);
+    }
+
+    void m2_set_emitting(void* model, wxl_bool emitting)
+    {
+        if (!IsClient() || !model) return;
+        // CM2Model::SetEmittersEnabled(int) / SetRibbonsEnabled(uint): __thiscall, `ret 4`
+        // (0x00827A3C, 0x00824270).
+        x86::CallMember<void>(WXL_SITE("CM2Model::SetEmittersEnabled", 0), model, int32_t(emitting ? 1 : 0));
+        x86::CallMember<void>(WXL_SITE("CM2Model::SetRibbonsEnabled", 0), model, uint32_t(emitting ? 1 : 0));
+    }
+
+    wxl_bool m2_attachment_world(void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (!IsClient() || !model || !out || !Loaded(model) || !Read<void*>(model, WXL_FIELD("CM2Model", "m_scene")))
+            return WXL_FALSE;
+        // CM2Model::HasAttachment(id): __thiscall, `ret 4` (0x00827437).
+        if (!x86::CallMember<int32_t>(WXL_SITE("CM2Model::HasAttachment", 0), model, attachment)) return WXL_FALSE;
+        // CM2Model::GetAttachmentPosition(id): __thiscall with the hidden return pointer, `ret 8`
+        // (0x0083140C).
+        wxl_vec3 position{};
+        x86::CallMember<void*>(WXL_SITE("CM2Model::GetAttachmentPosition", 0), model, static_cast<void*>(&position),
+                               attachment);
+        *out = position;
+        return WXL_TRUE;
+    }
+
+    // --- M2: bones for wxl.m2's bone watchers, on the animate threads -----------------------------
+
+    wxl_bool m2_bones(void* model, wxl_m2_bones* out)
+    {
+        if (!IsClient() || !model || !out || !Loaded(model)) return WXL_FALSE;
+        const uint8_t* shared   = static_cast<const uint8_t*>(Via(model, WXL_FIELD("CM2Model", "m_shared")));
+        const void*    scene    = Via(model, WXL_FIELD("CM2Model", "m_scene"));
+        float*         matrices = Read<float*>(model, WXL_FIELD("CM2Model", "m_boneMatrices"));
+        const void*    header   = shared ? Via(shared, WXL_FIELD("CM2Shared", "m_data")) : nullptr;
+        if (!shared || !scene || !matrices || !header) return WXL_FALSE;
+        const char* name = reinterpret_cast<const char*>(shared + WXL_FIELD("CM2Shared", "m_fileName"));
+        out->model       = model;
+        out->file        = const_cast<uint8_t*>(shared);
+        out->path        = wxl_str{name, static_cast<uint32_t>(strnlen(name, kFileNameSize))};
+        out->bone_count  = Read<uint32_t>(header, WXL_FIELD("M2Data", "m_bones.m_count"));
+        out->matrices    = matrices;
+        std::memcpy(out->model_matrix, static_cast<const uint8_t*>(model) + WXL_FIELD("CM2Model", "m_matrixF4"),
+                    sizeof out->model_matrix);
+        std::memcpy(out->view_to_world, static_cast<const uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_viewInv"),
+                    sizeof out->view_to_world);
+        out->time_ms = Read<uint32_t>(scene, WXL_FIELD("CM2Scene", "m_time"));
+        return WXL_TRUE;
+    }
+
+    wxl_bool m2_file_bone(const void* file, uint32_t index, int16_t* parent, wxl_vec3* pivot)
+    {
+        if (!IsClient() || !file) return WXL_FALSE;
+        const void* header = Via(file, WXL_FIELD("CM2Shared", "m_data"));
+        if (!header) return WXL_FALSE;
+        uint32_t       count = 0;
+        const uint8_t* bones = Array<uint8_t>(header, WXL_FIELD("M2Data", "m_bones.m_count"), count);
+        if (!bones || index >= count) return WXL_FALSE;
+        const uint8_t* bone = bones + static_cast<std::size_t>(index) * WXL_TYPE_SIZE("M2CompBone");
+        if (parent) *parent = Read<int16_t>(bone, WXL_FIELD("M2CompBone", "m_parentIndex"));
+        if (pivot) *pivot = Read<wxl_vec3>(bone, WXL_FIELD("M2CompBone", "m_pivot"));
+        return WXL_TRUE;
+    }
 
     wxl_bool object_position(const void* object, wxl_vec3* out)
     {

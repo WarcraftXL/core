@@ -173,6 +173,35 @@ def read_point_rows(path, problems):
     return rows
 
 
+CALL_ROW = re.compile(r"\bWXL_BINDING_CALL_X86\s*\(")
+
+
+def read_call_rows(path, problems):
+    """Every WXL_BINDING_CALL_X86 row: a client function the x86 binding calls by hand, read as a
+    row named <domain>.<name>."""
+    if not path.is_file():
+        problems.append("the binding's call table is missing: %s" % path)
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    rows = []
+    for match in CALL_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = table.split_top_level(text[open_at + 1:close - 1])
+        if len(columns) != 6:
+            problems.append("%s: a WXL_BINDING_CALL_X86 row without its six columns" % path.name)
+            continue
+        domain, name, spec, returns, convention, params = columns
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        inner = params.strip()[1:-1].strip()
+        decls = [] if not inner else table.split_top_level(inner)
+        rows.append(Row(domain.strip(), name.strip(), spec.strip().strip('"'), returns, convention.strip(),
+                        decls, origin, False))
+    return rows
+
+
 # --- The offsets table ------------------------------------------------------------------------
 
 OFFSET_ROW = re.compile(r'WXL_OFFSET_FUNCTION\(\s*"([^"]*)"\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*'
@@ -1364,6 +1393,9 @@ def main(argv=None):
     parser.add_argument("--points", type=Path, default=None,
                         help="the generated x86 point table, whose rows are checked like the seams'; "
                              "default core's own, read when --seams is core's own too")
+    parser.add_argument("--calls", type=Path, default=None,
+                        help="the x86 binding's table of the client functions it calls, whose rows are "
+                             "checked like the seams'; default core's own, read when --seams is core's own")
     parser.add_argument("--thunks", type=Path, default=core / "src" / "seams" / "RegparmX86.cpp",
                         help="the hand-written regparm thunks")
     parser.add_argument("--backend", choices=("local", "mcp"), default="local",
@@ -1397,6 +1429,10 @@ def main(argv=None):
         points = core / "include" / "wxl" / "points" / "x86.def"
     point_rows = read_point_rows(points.resolve(), problems) if points else []
     rows += point_rows
+    calls = args.calls
+    if calls is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        calls = core / "include" / "wxl" / "core" / "binding" / "calls_x86.def"
+    rows += read_call_rows(calls.resolve(), problems) if calls else []
     if not rows:
         print("check_conventions: no seam row was read from %s" % args.seams, file=sys.stderr)
         for problem in problems:

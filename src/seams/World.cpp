@@ -8,6 +8,7 @@
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
 #include "runtime/Core.hpp"
+#include "services/M2Service.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -74,7 +75,11 @@ namespace wxl::seam::World::LeaveWorld
 {
     void WXL_CALL Before()
     {
-        if (!g_inWorld || wxl::core::binding::ui_reloading()) return;
+        if (wxl::core::binding::ui_reloading()) return;
+        // The objects and the map go next: the models mods placed in the world leave with the
+        // client's own spell effects.
+        wxl::core::services::m2::LeaveWorld();
+        if (!g_inWorld) return;
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;
         Leave(host, WorldPosition());

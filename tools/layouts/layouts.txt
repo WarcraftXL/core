@@ -444,6 +444,7 @@ type CM2Scene Engine/Source/Model2/M2Scene.h CM2Scene
   m_frameStamp                            game/M2:kOffSceneFrame
   m_animateList                           game/M2:kOffSceneAnimateHead
   m_view                                  game/M2:kOffSceneAnimateCtx
+  m_viewInv                               -
 
 type M2Element Engine/Source/Model2/M2Scene.h M2Element
   sizeof                                  -
@@ -547,6 +548,10 @@ type M2Data Engine/Source/Model2/M2Data.h M2Data
   m_attachments.m_offset                  game/M2:kOffHdrAttachPtr
   m_attachmentIndicesById.m_count         game/M2:kOffHdrBoneIdxLutCount              # hand: bone-index-by-id LUT; fork: attachment indices by id
   m_attachmentIndicesById.m_offset        game/M2:kOffHdrBoneIdxLutPtr
+
+type M2SequenceInfo Engine/Source/Model2/M2Model.h M2SequenceInfo
+  sizeof                                  -
+  m_duration                              -
 
 type M2Sequence Engine/Source/Model2/M2Data.h M2Sequence
   sizeof                                  game/M2:kSeqStride

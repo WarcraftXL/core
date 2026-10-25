@@ -877,6 +877,31 @@ GROUND_TRUTH = {
     # FinishLoading is reached by LoadSucceededCallback's tail jump with ECX set (0x0083D35A), moves
     # ECX at 0x0083CF01 and ends in bare `ret`s (0x0083CF0F, 0x0083D23D, 0x0083D25F, 0x0083D2C1).
     "Point.CM2Shared_FinishLoading":   ("0x0083CF00", "thiscall", ["ecx"], 0),
+    # The x86 binding's own calls for wxl.m2's models of the world (calls_x86.def), each read by
+    # hand: `ret 8` at 0x008251C5, `ret 4` at 0x00825F36, `ret 0x1c` at 0x00832ADA, `ret 0xc` at
+    # 0x0082D11A, `ret 4` at 0x00823F59, `ret 8` at 0x00824F19, `ret 4` at 0x004F5E70 and
+    # 0x004F5EF7 (the hidden return pointer), `ret 4` at 0x00827A3C and 0x00824270, `ret 4` at
+    # 0x00827437, `ret 8` at 0x0083140C (hidden pointer and id), `ret 4` at 0x004C3339,
+    # 0x004C3379, 0x004C33B9 and 0x004C1C3D; bare `ret`s at 0x00782342, 0x007804F4, 0x00782731.
+    "M2Call.SetLoadedCallback":        ("0x008251B0", "thiscall", ["ecx"], 2),
+    "M2Call.HasSequence":              ("0x00825EE0", "thiscall", ["ecx"], 1),
+    "M2Call.SetBoneSequence":          ("0x00832AB0", "thiscall", ["ecx"], 7),
+    "M2Call.GetSequenceInfo":          ("0x0082CED0", "thiscall", ["ecx"], 3),
+    "M2Call.SetAnimating":             ("0x00823F10", "thiscall", ["ecx"], 1),
+    "M2Call.IsLoaded":                 ("0x00824F00", "thiscall", ["ecx"], 2),
+    "M2Call.GetBoundingBox":           ("0x004F5E20", "thiscall", ["ecx"], 1),
+    "M2Call.GetBoundingSphere":        ("0x004F5E80", "thiscall", ["ecx"], 1),
+    "M2Call.SetEmittersEnabled":       ("0x008279F0", "thiscall", ["ecx"], 1),
+    "M2Call.SetRibbonsEnabled":        ("0x00824230", "thiscall", ["ecx"], 1),
+    "M2Call.HasAttachment":            ("0x008273D0", "thiscall", ["ecx"], 1),
+    "M2Call.GetAttachmentPosition":    ("0x00831330", "thiscall", ["ecx"], 2),
+    "M2Call.RotateAroundX":            ("0x004C3300", "thiscall", ["ecx"], 1),
+    "M2Call.RotateAroundY":            ("0x004C3340", "thiscall", ["ecx"], 1),
+    "M2Call.RotateAroundZ":            ("0x004C3380", "thiscall", ["ecx"], 1),
+    "M2Call.Scale":                    ("0x004C1BF0", "thiscall", ["ecx"], 1),
+    "M2Call.ObjectCreateStatic":       ("0x00782000", "cdecl", [], 5),
+    "M2Call.ObjectUpdate":             ("0x00780240", "cdecl", [], 7),
+    "M2Call.ObjectDestroy":            ("0x007826E0", "cdecl", [], 1),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read
