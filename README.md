@@ -193,7 +193,7 @@ What a mod can reach **today**, by build:
 | `wxl.profile` | yes: zones, plots, messages and frame sets on the Tracy profiler's timeline, beside the runtime's own zones for every event and mod handler (`WXL_PROFILE`) | the same, and zones in the client's main loop |
 | `wxl.footprint` | yes: Storm's allocations by source file while a mod counts them (detours of `SMemAlloc`, `SMemFree`, `SMemReAlloc`), the device's textures and buffers by pool, the sound and script heaps, each archive's tables, each client database, the address space; `MemoryPressure` | the same, from seam calls in the client's allocator |
 | `wxl.m2file` (parsed model files) | yes: arrays read and pointed as addresses, memory anywhere, the shadow pass's bone animation; the loader's stages as `ModelParsed`, `SkinProfileParsed`, `ModelSequenceLoad` | the same, arrays as offsets from themselves and memory within 1 GB of them |
-| `wxl.m2` (models) | yes: an object's model, `ItemDisplayInfo` rows, race prefixes, models made, hung (to follow the parent's bones or on one key bone too), shown, textured, kept on the interface's copies; `AppearanceChanged` | the same, through the binding |
+| `wxl.m2` (models) | yes: an object's model, `ItemDisplayInfo` rows, race prefixes, models made, hung (to follow the parent's bones or on one key bone too), shown, textured, kept on the interface's copies; `AppearanceChanged`; models of the world placed as the client places its spell effects (a static map entity, `CMap::ObjectCreateStatic`), animated, faded, the ground under a point; bone watchers after `M2.AnimateMT` | the same, through the binding |
 | `wxl.gx` (the D3D9 device) | yes: the device and a state invalidation; `ModelBatchDrawn` after every model batch, its numbers rebuilt from the skin section and the device's buffers and viewport | the same, the numbers as the device recorded them |
 | `wxl.engine` (engine layouts) | yes: each type of the SDK's engine headers, its x86 layout hash | yes: its x64 hash, which the client's build holds its own types to |
 | `wxl.camera` (the world camera) | yes: its position, facing rows (through the parent's rotation on a vehicle or a transport), field of view and pivot read at measured offsets; a mod's view written at the end of `CGCamera::UpdateCallback`, after `CameraUpdate` | the same, through the binding |
@@ -324,7 +324,7 @@ source. Everything else observes.
 | `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
 | `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound. The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens |
-| `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton; one load while none is |
+| `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton, then the bone watchers get the pose; one load while none is |
 | `M2Shared.Initialize` | `CM2Shared::Initialize()`, a parsed model made ready | `ModelParsed` before, ahead of its skin profile's choice and its textures |
 | `M2Shared.InitializeSkinProfile` | `CM2Shared::InitializeSkinProfile()`, a parsed skin profile sized for drawing | `SkinProfileParsed` before, with the model's header and the skin's |
 | `M2Shared.FinishLoadingLowPrioritySequence` | `CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequence_index, uint8_t* buffer, uint32_t size)`, an external sequence file parsed against its model | `ModelSequenceLoad` before, with the sequence's unparsed bytes |
@@ -332,7 +332,7 @@ source. Everything else observes.
 | `Component.RemoveItem` | `CCharacterComponent::RemoveItem(slot)` | `AppearanceChanged` (removed) before, while the display is still on the slot |
 | `Component.FreeComponent` | `CCharacterComponent::FreeComponent(component)`, an appearance given back | `AppearanceChanged` (freed) before |
 | `Component.RemoveVisuals` | `CCharacterComponent::RemoveVisuals(model)`, which strips the attachments of the copies the interface draws | nothing: the models `wxl.m2` hung on the stripped points, and copies of them, are hung back after |
-| `Spell.Packet_Group_30` | `Packet_Group_30(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_SPELL_START` and `SMSG_SPELL_GO` | `SpellCastStart` or `SpellCastGo` before, by the opcode, read off the message before the client parses it: the caster, the object target, the cast time or the hit and miss counts |
+| `Spell.Packet_Group_30` | `Packet_Group_30(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_SPELL_START` and `SMSG_SPELL_GO` | `SpellCastStart` or `SpellCastGo` before, by the opcode, read off the message before the client parses it: the caster, the object target, the source and destination points with their transports, the cast time or the hit and miss counts |
 | `Spell.Packet_SMSG_SPELL_FAILURE` | `Packet_SMSG_SPELL_FAILURE(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)` | `SpellCastInterrupted` before, for any caster in view, with the reason the server sent |
 | `Spell.SpellFailed` | `Spell_C_SpellFailed(PendingSpellCast* cast, const SpellRec* spell, int32_t reason, int32_t misc1, int32_t misc2, bool reset_cooldown)` | `SpellCastFailed` before: the local player's cast refused by the server or by the client's own checks |
 | `Spell.CastSpell` (gated) | `Spell_C_CastSpell(CGUnit_C* caster, int32_t spell_id, const CGItem_C* item, uint64_t target, PendingSpellCast* cast, bool confirmed)` | `SpellCastRequest` at the gate; refusing it answers false and nothing is sent |
@@ -495,7 +495,8 @@ tools/extract/                   a fork function as C++ for the stock client: a 
 ## 🤝 Contributors
 
 Tyrallis brought the model services (`wxl.m2file`, `wxl.m2`, `wxl.gx`) and the character
-appearance and model seams they stand on (pull request #1 of sdk, core and client).
+appearance and model seams they stand on (pull request #1 of sdk, core and client), then
+`wxl.m2`'s models of the world, its bone watchers and the cast's ground point (pull requests #4).
 
 ## 📄 License
 

@@ -164,7 +164,10 @@ A function the stock client inlined everywhere, which a mod should reach on x86 
 2. A field row (`WXL_BINDING_FIELD*`) is generated on both sides. If x86 does not know the field
    yet, add it to `core/tools/layouts/layouts.txt` and rerun `measure_layouts.py`.
 3. A call row (`WXL_BINDING`) is written by hand twice: in `core/src/binding/BindingX86.cpp` and in
-   `client/WarcraftXL/Binding.cpp`. Either side missing fails to link.
+   `client/WarcraftXL/Binding.cpp`. Either side missing fails to link. A client function the x86
+   side calls gets a row in `include/wxl/core/binding/calls_x86.def` with the convention it is
+   called with, which `check_conventions.py` holds against `Wow.exe` as it holds the seams, and a
+   line of hand-read ground truth in `tools/seams/test_check_conventions.py`.
 
 ### A native function handed to the client
 
@@ -485,7 +488,7 @@ folder, source or transform is registered: the gate's test is two loads.
 | `python core/tools/extract/extract.py --deinlined --check` | `src/deinlined/` is what the fork gives. Runs in the fork's build when `WXL_WOW_EXE` names a stock Wow.exe (`wxl-deinlined-check`) |
 | `python core/tools/extract/test_extract.py` | the extraction tool against a small fork made on the spot: conventions, members, globals, de-inlined callees, empty functions |
 | `ctest` `stock` in `core/build/win-x86` (`WXL_WOW_EXE`) | the recompiled bodies of `src/deinlined/` against a stock Wow.exe's own code, on model files of its own: same answers, same bytes, the points fired |
-| `python core/tools/seams/check_conventions.py` | every `conv` column agrees with `Wow.exe`, the x86 points' (`include/wxl/points/x86.def`) included. Reads a stock `Wow.exe` 12340 (`--binary` or `$WXL_WOW_EXE`) with llvm-objdump |
+| `python core/tools/seams/check_conventions.py` | every `conv` column agrees with `Wow.exe`, the x86 points' (`include/wxl/points/x86.def`) and the x86 binding's calls (`include/wxl/core/binding/calls_x86.def`) included. Reads a stock `Wow.exe` 12340 (`--binary` or `$WXL_WOW_EXE`) with llvm-objdump |
 | `python core/tools/fields/generate_update_fields.py --check` | the SDK's update-field table is what the fork gives; with `--binary`, what `Wow.exe`'s own tables hold. Runs in the fork's build |
 | `wxl-core-seam-harness --profile-live`, with Tracy's `tracy-capture -a 127.0.0.1` | the profiler's zones, plots, messages and frames reach a viewer, from a harness under Wine |
 | `sdk/tests/ingame/` in a client (`wxl-ingame` assembles it as a Mods folder) | in the real game, on each runtime: the test mods' functions called from the client's Lua, chat and CVar events, hot reload and handler order, a broken and repaired manifest, casts, a cooldown, an item use, an equipment change, `/reload` and a logout; `wxl.selftest` logs PASS or FAIL per check |

@@ -110,6 +110,12 @@ the first frame. `check_conventions.py` closes that: it reads the function out o
 compares what the instructions do with what the row claims. x86 only -- the x64 realisation is
 direct source calls with no convention of its own.
 
+Besides the seams, it reads two more tables of the same shape: the x86 points
+(`include/wxl/points/x86.def`, generated) and the client functions the x86 binding calls by hand
+(`include/wxl/core/binding/calls_x86.def`, `WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv,
+params)`), whose rows declare the convention `BindingX86.cpp` calls them with. `--points` and
+`--calls` name others; by default both are read when `--seams` is core's own.
+
 ## What it decides, per row
 
 It resolves the row's `symbol` column against `include/wxl/offsets/generated/functions.def`, the
