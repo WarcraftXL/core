@@ -19,6 +19,9 @@
 #include "seams/Gameplay.hpp"
 #include "seams/Table.hpp"
 #include "services/ActionService.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
+#include "services/WorldService.hpp"
 #include "services/DataService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/GxService.hpp"
@@ -58,12 +61,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -1541,6 +1546,61 @@ namespace
         return g_refuseActions ? WXL_FALSE : WXL_TRUE;
     }
 
+    wxl_bool WXL_CALL FakeActFace(const void* player, float facing)
+    {
+        Did("face", Obj(player)->guid, static_cast<uint64_t>(facing * 100.0f + 0.5f));
+        return g_refuseActions ? WXL_FALSE : WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeOutdoors(const void* o) { return Obj(o)->clientFlags & 0x1u ? WXL_FALSE : WXL_TRUE; }
+
+    /// The world camera as the fake client keeps it, and what was written to it.
+    struct FakeCamera
+    {
+        wxl_core_camera view{};
+        uint32_t        writes = 0;
+    };
+    FakeCamera  g_camera;
+    FakeCamera* g_worldCamera = nullptr; ///< null out of the world
+
+    void* WXL_CALL FakeCameraWorld() { return g_worldCamera; }
+
+    wxl_bool WXL_CALL FakeCameraRead(const void* camera, wxl_core_camera* out)
+    {
+        if (!camera || !out) return WXL_FALSE;
+        *out = static_cast<const FakeCamera*>(camera)->view;
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeCameraWrite(void* camera, const wxl_core_camera* view)
+    {
+        FakeCamera& fake   = *static_cast<FakeCamera*>(camera);
+        fake.view.position = view->position;
+        fake.view.forward  = view->forward;
+        // FOV() is m_fov plus the effects' offset, which the fake keeps as the difference.
+        fake.view.fov      = view->fov_base + (fake.view.fov - fake.view.fov_base);
+        fake.view.fov_base = view->fov_base;
+        ++fake.writes;
+    }
+
+    uint32_t g_traceFlags = 0;
+
+    wxl_bool WXL_CALL FakeTrace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
+    {
+        g_traceFlags = flags;
+        // A wall at x = 10.
+        if ((start.x < 10.0f) == (finish.x < 10.0f)) return WXL_FALSE;
+        const float t = (10.0f - start.x) / (finish.x - start.x);
+        *hit = wxl_vec3{10.0f, start.y + (finish.y - start.y) * t, start.z + (finish.z - start.z) * t};
+        return WXL_TRUE;
+    }
+
+    uint32_t g_cursorHides = 0, g_cursorRestores = 0;
+    void WXL_CALL FakeCursorSetVisible(wxl_bool visible) { if (!visible) ++g_cursorHides; }
+    void WXL_CALL FakeCursorRestore() { ++g_cursorRestores; }
+    wxl_bool WXL_CALL FakeCursorVisible() { return WXL_TRUE; }
+    wxl_bool WXL_CALL FakeOverWorld() { return WXL_TRUE; }
+
     wxl_core_init FakeInit()
     {
         wxl_core_init init{};
@@ -1668,6 +1728,16 @@ namespace
         init.action_use_item        = &FakeActUse;
         init.action_follow          = &FakeActFollow;
         init.action_move_to         = &FakeActMove;
+        init.action_face            = &FakeActFace;
+        init.unit_is_outdoors       = &FakeOutdoors;
+        init.camera_world           = &FakeCameraWorld;
+        init.camera_read            = &FakeCameraRead;
+        init.camera_write           = &FakeCameraWrite;
+        init.world_trace            = &FakeTrace;
+        init.input_cursor_visible   = &FakeCursorVisible;
+        init.input_cursor_set_visible = &FakeCursorSetVisible;
+        init.input_cursor_restore   = &FakeCursorRestore;
+        init.input_pointer_over_world = &FakeOverWorld;
         init.terrain_click_guid     = &FakeTerrainGuid;
         init.terrain_click_x        = &FakeTerrainX;
         init.terrain_click_y        = &FakeTerrainY;
@@ -2587,16 +2657,20 @@ namespace
         Check(act.target(unit) == WXL_OK && act.clear_target() == WXL_OK && act.interact(unit) == WXL_OK &&
                   act.cast_spell(133, unit) == WXL_OK && act.cast_spell(133, WXL_HANDLE_NONE) == WXL_OK &&
                   act.stop_casting() == WXL_OK && act.use_item(item, unit) == WXL_OK && act.follow(unit) == WXL_OK &&
-                  act.move_to(wxl_vec3{12.0f, 0.0f, 0.0f}) == WXL_OK,
+                  act.move_to(wxl_vec3{12.0f, 0.0f, 0.0f}) == WXL_OK && act.face(1.0) == WXL_OK &&
+                  act.face(-1.0) == WXL_OK,
               "every action reaches the client");
+        // Facings as hundredths of a radian: 1, and -1 wrapped into [0, 2 pi).
         const std::vector<std::string> expected = {"target 789 0", "target 0 0",    "interact 789 0",
                                                    "cast 85 789",  "cast 85 0",     "stop 0 0",
-                                                   "use 123 789",  "follow 42 789", "move 42 c"};
+                                                   "use 123 789",  "follow 42 789", "move 42 c",
+                                                   "face 42 64",   "face 42 210"};
         Check(g_actions == expected, "with the guids and the spell, none for the current target");
         Check(act.assist(unit) == WXL_E_FAILED, "assisting a unit that targets nothing fails");
         Check(act.use_item(unit, WXL_HANDLE_NONE) == WXL_E_INVALID && act.follow(item) == WXL_E_INVALID,
               "an object of the wrong kind is invalid");
         Check(act.cast_spell(0, WXL_HANDLE_NONE) == WXL_E_INVALID, "a spell id of 0 is invalid");
+        Check(act.face(std::numeric_limits<double>::quiet_NaN()) == WXL_E_INVALID, "a facing that is no number is invalid");
         Check(act.target(0xDEAD) == WXL_E_NOT_FOUND, "a stale handle is gone");
         g_refuseActions = true;
         Check(act.interact(unit) == WXL_E_FAILED, "what the client refuses answers failed");
@@ -3469,6 +3543,159 @@ namespace
               "a handler that writes handled takes the call away from the client");
         Check(answer == 0, "and the window procedure answers 0, as one that handled a message does");
 
+        g_host->Events().Unsubscribe(sub);
+    }
+
+
+    // --- wxl.camera: the view a mod sets, over the client's, around the camera's update -------
+
+    uint32_t g_cameraUpdates = 0;
+    void WXL_CALL OnCameraUpdate(void*, const void*) { ++g_cameraUpdates; }
+
+    void CheckCamera()
+    {
+        namespace cam = wxl::core::services::camera;
+        const wxl_camera_api& api = wxl::core::services::CameraApi();
+
+        wxl_vec3 point{};
+        double   fov = 0.0;
+        g_worldCamera = nullptr;
+        Check(api.position(&point) == WXL_E_UNSUPPORTED && api.fov(&fov) == WXL_E_UNSUPPORTED,
+              "out of the world the camera reads as unsupported");
+
+        g_camera                = FakeCamera{};
+        g_camera.view.position  = wxl_vec3{1.0f, 2.0f, 3.0f};
+        g_camera.view.forward   = wxl_vec3{1.0f, 0.0f, 0.0f};
+        g_camera.view.up        = wxl_vec3{0.0f, 0.0f, 1.0f};
+        g_camera.view.fov       = 1.6f; // with an effect's offset of 0.1
+        g_camera.view.fov_base  = 1.5f;
+        g_camera.view.pivot     = wxl_vec3{5.0f, 5.0f, 1.8f};
+        g_camera.view.followed  = 0;
+        g_worldCamera           = &g_camera;
+        Check(api.position(&point) == WXL_OK && point.z == 3.0f && api.forward(&point) == WXL_OK && point.x == 1.0f &&
+                  api.up(&point) == WXL_OK && point.z == 1.0f && api.fov(&fov) == WXL_OK && std::fabs(fov - 1.6) < 1e-6,
+              "the camera reads where it is, where it looks and what it draws with");
+        Check(api.pivot(&point) == WXL_E_NOT_FOUND, "a camera that follows nothing has no pivot");
+        g_camera.view.followed = 0x42;
+        Check(api.pivot(&point) == WXL_OK && point.z == 1.8f, "the pivot is the followed object's at its height");
+        Check(api.cinematic() == WXL_FALSE, "no cinematic");
+
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_CameraUpdate, &OnCameraUpdate, nullptr, 0);
+        wxl::core::frame::Reset();
+        wxl_frame_args frame{};
+        wxl::core::frame::Begin(frame);
+
+        g_cameraUpdates = 0;
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_cameraUpdates == 1 && g_camera.writes == 0, "an update raises CameraUpdate and writes nothing with no view");
+
+        FakeCamera other;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &other);
+        Check(g_cameraUpdates == 1, "another camera's update is not the world camera's");
+
+        Check(api.set_view(wxl_vec3{0, 0, 0}, wxl_vec3{0, 0, 0}, 0.0) == WXL_E_INVALID &&
+                  api.set_view(wxl_vec3{0, 0, 0}, wxl_vec3{1, 0, 0}, 4.0) == WXL_E_INVALID,
+              "a view with no direction, or a field of view past pi, is invalid");
+        Check(api.release_view() == WXL_E_NOT_FOUND, "releasing a view one does not hold is not found");
+
+        Check(api.set_view(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0}, 1.2) == WXL_OK, "a view is set");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == 1 && g_camera.view.position.x == 7.0f && g_camera.view.forward.y == 1.0f,
+              "the view is written over the client's at the end of the update");
+        Check(std::fabs(g_camera.view.fov - 1.2f) < 1e-6f && std::fabs(g_camera.view.fov_base - 1.1f) < 1e-6f,
+              "the field of view drawn is the view's, the effects' offset kept");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        Check(std::fabs(g_camera.view.fov_base - 1.5f) < 1e-6f, "the client's own field of view is back before its update");
+
+        g_camera.view.cinematic = 1;
+        const uint32_t writes   = g_camera.writes;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == writes, "a cinematic keeps the view");
+        g_camera.view.cinematic = 0;
+
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.release_view() == WXL_OK && std::fabs(g_camera.view.fov_base - 1.5f) < 1e-6f,
+              "releasing the view puts the client's field of view back");
+        const uint32_t released = g_camera.writes;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == released, "and the client has its camera again");
+
+        api.set_view(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0);
+        cam::ForgetMod(0);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == released, "a mod's view goes with it");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.set_view(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a view is refused");
+
+        wxl::core::frame::End(frame);
+        g_host->Events().Unsubscribe(sub);
+        g_worldCamera = nullptr;
+    }
+
+    // --- wxl.world: the client's line test ----------------------------------------------------
+
+    void CheckWorldTrace()
+    {
+        const wxl_world_api& api = wxl::core::services::WorldApi();
+        wxl_vec3             hit{};
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{20, 4, 0}, 0, &hit) == WXL_TRUE && hit.x == 10.0f && hit.y == 2.0f &&
+                  g_traceFlags == WXL_TRACE_CAMERA,
+              "a trace meets the wall where it is, through the camera's mask when given none");
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{5, 0, 0}, WXL_TRACE_LINE_OF_SIGHT, &hit) == WXL_FALSE &&
+                  g_traceFlags == WXL_TRACE_LINE_OF_SIGHT,
+              "a clear way meets nothing, through the mask given");
+        wxl_bool fromThread = WXL_TRUE;
+        std::thread([&] { fromThread = api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{20, 0, 0}, 0, &hit); }).join();
+        Check(fromThread == WXL_FALSE, "off the main thread nothing is met");
+    }
+
+    // --- wxl.input: captures per mod, the wheel kept from the client ---------------------------
+
+    bool g_keepWheel = false;
+    float g_wheel    = 0.0f;
+    void WXL_CALL OnWheel(void*, const void* args)
+    {
+        const wxl_mouse_wheel_args& wheel = *static_cast<const wxl_mouse_wheel_args*>(args);
+        g_wheel += wheel.delta;
+        if (g_keepWheel && wheel.handled) *wheel.handled = WXL_TRUE;
+    }
+
+    void CheckInputService()
+    {
+        const wxl_input_api& api = wxl::core::services::InputApi();
+        Check(api.cursor_captured() == WXL_FALSE, "nobody holds the pointer at first");
+        Check(api.capture_cursor(WXL_TRUE) == WXL_OK && api.capture_cursor(WXL_TRUE) == WXL_OK &&
+                  api.cursor_captured() == WXL_TRUE,
+              "a capture holds the pointer, twice is still one");
+        Check(api.capture_cursor(WXL_FALSE) == WXL_OK && api.cursor_captured() == WXL_FALSE,
+              "giving it back lets it go");
+        api.capture_cursor(WXL_TRUE);
+        wxl::core::services::input::ForgetMod(0);
+        Check(api.cursor_captured() == WXL_FALSE, "a mod's capture goes with it");
+        Check(api.pointer_over_world() == WXL_TRUE, "the pointer over the world is the client's answer");
+        // The harness's window is no window: holding the pointer there does nothing, and lets go.
+        api.capture_cursor(WXL_TRUE);
+        wxl::core::services::input::Present();
+        wxl::core::services::input::Clear();
+        Check(api.cursor_captured() == WXL_FALSE, "the shutdown lets every capture go");
+
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_MouseWheel, &OnWheel, nullptr, 0);
+        void*     window  = reinterpret_cast<void*>(0x2000);
+        uint32_t  message = 0x020A; // WM_MOUSEWHEEL
+        uintptr_t wparam  = static_cast<uintptr_t>(static_cast<uint16_t>(-240)) << 16;
+        intptr_t  lparam  = 0;
+        intptr_t  answer  = -1;
+        g_wheel           = 0.0f;
+        g_keepWheel       = false;
+        Check(!wxl::seam::Input::WindowProc::Gate(&answer, &window, &message, &wparam, &lparam) && g_wheel == -2.0f,
+              "a turn of the wheel is raised in notches, towards the player negative, and reaches the client");
+        g_keepWheel = true;
+        Check(wxl::seam::Input::WindowProc::Gate(&answer, &window, &message, &wparam, &lparam) && answer == 0,
+              "a MouseWheel handler that writes handled keeps the turn from the client");
         g_host->Events().Unsubscribe(sub);
     }
 
@@ -10240,6 +10467,9 @@ int main(int argc, char** argv)
     CheckClientError();
     CheckClientDestroy();
     CheckInput();
+    CheckInputService();
+    CheckCamera();
+    CheckWorldTrace();
     CheckStorage();
     CheckSound();
     CheckStorageService();

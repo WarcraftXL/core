@@ -860,6 +860,10 @@ GROUND_TRUTH = {
     # callback (its address pushed, never called directly) reading one dword, bare `ret`;
     # vFrameScript_SignalEvent is called at 0x005326E8 with three pushed and twelve cleaned.
     "Point.CGCamera_UpdateCallback":   ("0x00607B00", "cdecl", [], 2),
+    # The camera seam on the same function, read by hand as its point is: called once, at
+    # 0x004FA7BC, two dwords pushed and none cleaned there (the caller's frame pops them), a bare
+    # `ret`.
+    "Camera.UpdateCallback":           ("0x00607B00", "cdecl", [], 2),
     "Point.CM2Cache_CreateShared":     ("0x0081C390", "thiscall", ["ecx"], 2),
     "Point.CGWorldFrame_RenderWorld":  ("0x004FAF90", "cdecl", [], 1),
     "Point.vFrameScript_SignalEvent":  ("0x0081AC90", "cdecl", [], 3),
