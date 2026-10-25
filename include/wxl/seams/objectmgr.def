@@ -115,3 +115,10 @@ WXL_SEAM_AFTER(ObjectMgr, FillInPartialObjectData, "FillInPartialObjectData", in
 // [ebp+0x14]) and a bare `ret` (0x004D74C9), as every message handler of the client.
 WXL_SEAM_AFTER(ObjectMgr, Packet_SMSG_UPDATE_OBJECT, "Packet_SMSG_UPDATE_OBJECT", int32_t, cdecl, (void* param, uint32_t msg_id, uint32_t time, void* msg))
 WXL_SEAM_RAISES(ObjectMgr, Packet_SMSG_UPDATE_OBJECT, ObjectUpdate)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

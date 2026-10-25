@@ -25,6 +25,13 @@ namespace wxl::core::services
         /// waits for the animate threads inside CM2Scene::Animate.
         void PoseAttached(void* model);
 
+        /// Whether any mod watches bones: the AnimateMT seam's whole cost for them when none does.
+        bool WatchingBones();
+
+        /// Hands `model`'s bones, just posed, to every bone watcher that wants its file. Animate
+        /// threads.
+        void DispatchBones(void* model);
+
         /// Whether any mod holds a model it made: the RemoveVisuals seam's whole cost when none.
         bool HasModels();
 

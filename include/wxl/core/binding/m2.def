@@ -84,3 +84,57 @@ WXL_BINDING(m2_file_info, wxl_bool, (const void* file, wxl_core_m2_file* out), (
 
 // Counts one more animated bone on the model file, so its models' shadow pass animates them.
 WXL_BINDING(m2_file_animate_bones, void, (void* file), (file), (void)0)
+
+// --- Models of the world, as wxl.m2's world calls drive them ------------------------------------
+
+// A new model of `path` in the world's scene (World::s_m2Scene), one reference held by the caller.
+// Null outside the world.
+WXL_BINDING(m2_create_world_model, void*, (const char* path), (path), 0)
+
+// Puts `model` in the world at `placement` (detached first), making its map entity the first time
+// and moving it after. False outside the world.
+WXL_BINDING(m2_place_world, wxl_bool, (void* model, const wxl_m2_placement* placement), (model, placement), WXL_FALSE)
+
+// Takes `model` out of the world: its map entity destroyed. Nothing for a model never placed.
+WXL_BINDING(m2_unplace_world, void, (void* model), (model), (void)0)
+
+// The model's own transform: what it is moved by on the point it hangs on.
+WXL_BINDING(m2_set_transform, void, (void* model, const wxl_m2_placement* placement), (model, placement), (void)0)
+
+// Plays animation `anim` on every bone from its start at `speed`, or, while the model loads, once
+// it has.
+WXL_BINDING(m2_play_animation, void, (void* model, uint32_t anim, float speed), (model, anim, speed), (void)0)
+
+// Whether the model's file has loaded.
+WXL_BINDING(m2_loaded, wxl_bool, (const void* model), (model), WXL_FALSE)
+
+// One play of animation `anim` of a loaded model, in milliseconds; 0 for none.
+WXL_BINDING(m2_animation_length, uint32_t, (void* model, uint32_t anim), (model, anim), 0)
+
+// The model's base alpha.
+WXL_BINDING(m2_set_alpha, void, (void* model, float alpha), (model, alpha), (void)0)
+
+// Whether its emitters and ribbons emit.
+WXL_BINDING(m2_set_emitting, void, (void* model, wxl_bool emitting), (model, emitting), (void)0)
+
+// Where attachment `attachment` of a loaded model is in the world. False for none or not loaded.
+WXL_BINDING(m2_attachment_world, wxl_bool, (void* model, uint32_t attachment, wxl_vec3* out), (model, attachment, out), WXL_FALSE)
+
+// The ground's height under `at`: World::Intersect from `up` above to `down` below with the flags
+// the client's spell effects use (0x120111). False for no hit or outside the world.
+WXL_BINDING(m2_ground_height, wxl_bool, (const wxl_vec3* at, float up, float down, float* out_z), (at, up, down, out_z), WXL_FALSE)
+
+// A loaded model's bones as AnimateMT just posed them: its file, path, bone matrices (writable),
+// its own matrix (m_matrixF4), the scene's camera-relative-to-world matrix (m_viewInv) and clock.
+// False for a model not loaded or without bone matrices.
+WXL_BINDING(m2_bones, wxl_bool, (void* model, wxl_m2_bones* out), (model, out), WXL_FALSE)
+
+// Bone `index` of a model file (CM2Shared): its parent index and pivot. False past the last bone.
+WXL_BINDING(m2_file_bone, wxl_bool, (const void* file, uint32_t index, int16_t* parent, wxl_vec3* pivot), (file, index, parent, pivot), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

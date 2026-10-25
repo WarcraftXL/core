@@ -61,3 +61,10 @@ WXL_SEAM_WITNESS(Unit, MountDisplayIDUpdateHandler, 0x004D5254)
 // override calls this one first. thiscall (frame), `ret 4` (0x0073E40D). After applies the head
 // turns of wxl.pose over what the game just set on the head bone.
 WXL_SEAM_AFTER(Unit, PreAnimate, "CGUnit_C::PreAnimate", void, thiscall, (void* self, void* frame))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

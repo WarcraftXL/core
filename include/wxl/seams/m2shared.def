@@ -55,3 +55,10 @@ WXL_SEAM_RAISES(M2Shared, InitializeSkinProfile, SkinProfileParsed)
 // the sequence and once for each that shares its keys. Before: ModelSequenceLoad. thiscall.
 WXL_SEAM_BEFORE(M2Shared, FinishLoadingLowPrioritySequence, "CM2Shared::FinishLoadingLowPrioritySequence@0x0083C6E0", int32_t, thiscall, (void* self, uint32_t sequence_index, uint8_t* buffer, uint32_t size))
 WXL_SEAM_RAISES(M2Shared, FinishLoadingLowPrioritySequence, ModelSequenceLoad)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

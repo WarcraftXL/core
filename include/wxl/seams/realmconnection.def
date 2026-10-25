@@ -38,3 +38,10 @@ WXL_SEAM_RAISES(RealmConnection, HandleCharEnum, GlueCharacter)
 // eight bytes. Before raises GlueEnterWorld.
 WXL_SEAM_BEFORE(RealmConnection, RequestCharacterLogin, "RealmConnection::RequestCharacterLogin", void, thiscall, (void* self, uint64_t guid, int32_t a2))
 WXL_SEAM_RAISES(RealmConnection, RequestCharacterLogin, GlueEnterWorld)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

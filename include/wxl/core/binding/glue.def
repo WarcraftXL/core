@@ -18,3 +18,10 @@ WXL_BINDING(glue_current_screen, const char*, (void), (), 0)
 // dwords where a Grunt list carries the realm id as a byte. -1 for a null login or outside the
 // client.
 WXL_BINDING(login_server_type, int32_t, (const void* login), (login), -1)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

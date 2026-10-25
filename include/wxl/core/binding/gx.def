@@ -34,3 +34,10 @@ WXL_BINDING(gx_invalidate_state, void, (void), (), (void)0)
 // model hangs on, the numbers of the device's draw and its viewport. False when the device drew
 // nothing for it (no context, a lost device).
 WXL_BINDING(gx_model_draw, wxl_bool, (const void* render, wxl_model_batch_args* out), (render, out), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

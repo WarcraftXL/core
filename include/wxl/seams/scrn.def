@@ -20,3 +20,10 @@
 // them (0x004A8BA4 pushes both and cleans eight bytes), so the row declares them.
 WXL_SEAM_BEFORE(Scrn, OnPaint, "OnPaint", int32_t, cdecl, (const void* data, void* param))
 WXL_SEAM_RAISES(Scrn, OnPaint, FrameBegin)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

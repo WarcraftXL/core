@@ -40,13 +40,38 @@ namespace
     /// The most targets one SMSG_SPELL_GO can list in either of its lists: a byte count.
     constexpr size_t kMaxTargets = 255;
 
-    /// The target block both cast messages end with: the flags, then the object target when
-    /// the flags name one. What follows (item, source, destination, string) is not read.
+    /// The bits of the target flags for an item target (a packed guid), a source point and a
+    /// destination point (a packed transport guid and three floats each).
+    constexpr uint32_t kItemTargetFlags = 0x110;
+    constexpr uint32_t kSourceLocation  = 0x20;
+    constexpr uint32_t kDestLocation    = 0x40;
+
+    bool ReadPoint(MessageReader& in, wxl_vec3& out)
+    {
+        uint64_t transport = 0;
+        return in.PackedGuid(transport) && in.F32(out.x) && in.F32(out.y) && in.F32(out.z);
+    }
+
+    /// The target block both cast messages end with: the flags, the object target, the item
+    /// target, the source and the destination point, each when the flags name it. A block cut
+    /// short keeps what was read: the object target is all older readers wanted.
     bool ReadTarget(MessageReader& in, wxl_spell_cast_args& args)
     {
         if (!in.U32(args.target_flags)) return false;
-        if (!(args.target_flags & kObjectTargetFlags)) return true;
-        return in.PackedGuid(args.target_guid);
+        if ((args.target_flags & kObjectTargetFlags) && !in.PackedGuid(args.target_guid)) return false;
+        uint64_t item = 0;
+        if ((args.target_flags & kItemTargetFlags) && !in.PackedGuid(item)) return true;
+        if (args.target_flags & kSourceLocation)
+        {
+            if (!ReadPoint(in, args.source)) return true;
+            args.has_source = WXL_TRUE;
+        }
+        if (args.target_flags & kDestLocation)
+        {
+            if (!ReadPoint(in, args.dest)) return true;
+            args.has_dest = WXL_TRUE;
+        }
+        return true;
     }
 
     /// A handle for a guid the server named: the object's when the client holds it.

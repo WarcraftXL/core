@@ -49,3 +49,10 @@ WXL_BINDING(filestack_top, void**, (void), (), 0)
 // The stack the client starts with, System_File::Stacked::s_initstack: while the top is this one,
 // the client has not built its stack yet and nothing may be written into it.
 WXL_BINDING(filestack_initial, const void*, (void), (), 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

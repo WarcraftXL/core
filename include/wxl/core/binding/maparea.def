@@ -12,3 +12,10 @@
 // The tile's index in the map's 64x64 grid: CMapArea::m_index, which CMap::LoadArea writes.
 WXL_BINDING_FIELD(map_area_tile_x, int32_t, CMapArea, m_index.x, -1)
 WXL_BINDING_FIELD(map_area_tile_y, int32_t, CMapArea, m_index.y, -1)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

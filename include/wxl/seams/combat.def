@@ -87,3 +87,10 @@ WXL_SEAM_BEFORE(Combat, UnitCombatLogAuraDose, "UnitCombatLogAuraDose", void, cd
 WXL_SEAM_RAISES(Combat, UnitCombatLogAuraDose, UnitAuraRefreshed)
 WXL_SEAM_BEFORE(Combat, UnitCombatLogAuraRefreshed, "UnitCombatLogAuraRefreshed", void, cdecl, (void* unit, const void* aura, int32_t spell_id, uint8_t a4))
 WXL_SEAM_RAISES(Combat, UnitCombatLogAuraRefreshed, UnitAuraRefreshed)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

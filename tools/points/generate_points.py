@@ -76,10 +76,24 @@ def contract_def(points):
         out.append('WXL_POINT(%s, "%s", %s, (%s), "%s", %su, %s, %s, %s, %s)\n'
                    % (p.ident, p.name, p.ret_kind[1], params, p.lowered, column_hex(p.layout_hash),
                       p.policy, p.thread, p.stability, p.runtimes))
+    out.append(MSVC_TAIL)
     return "".join(out)
 
 
 # --- core/include/wxl/points/x86.def -----------------------------------------------------------
+
+# MSVC takes a file whose first directive is #ifndef X and whose last is its #endif for one guarded
+# by X, and skips it when it is included again with X defined: a table read several times in one
+# translation unit ends with a directive of its own.
+MSVC_TAIL = """
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif
+"""
+
 
 def x86_def(points):
     out = [HEADER, """//

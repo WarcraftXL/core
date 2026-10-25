@@ -30,3 +30,10 @@ WXL_SEAM_RAISES(Loot, SetObject, LootClosed)
 // cdecl. Before raises LootSlotCleared with the entry it is about to empty.
 WXL_SEAM_BEFORE(Loot, ClearSlot, "CGLootInfo::ClearSlot", void, cdecl, (uint8_t slot))
 WXL_SEAM_RAISES(Loot, ClearSlot, LootSlotCleared)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

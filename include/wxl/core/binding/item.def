@@ -30,3 +30,10 @@ WXL_BINDING_FIELD(item_stats_subclass, uint32_t, ItemStats_C, m_subClass, 0)
 WXL_BINDING_FIELD(item_stats_inventory_type, uint32_t, ItemStats_C, m_inventoryType, 0)
 WXL_BINDING_FIELD(item_stats_stackable, int32_t, ItemStats_C, m_stackable, 0)
 WXL_BINDING_FIELD(item_stats_sell_price, uint32_t, ItemStats_C, m_sellPrice, 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

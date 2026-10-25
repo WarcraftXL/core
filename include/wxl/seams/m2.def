@@ -29,3 +29,10 @@ WXL_SEAM_AFTER(M2, AnimateMT, "CM2Model::AnimateMT", void, thiscall, (void* self
 // flags at load and animates here instead: its one bone matrix is the model's transform. After is
 // called once that bone is set, and at the early return. thiscall.
 WXL_SEAM_AFTER(M2, AnimateMTSimple, "CM2Model::AnimateMTSimple", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

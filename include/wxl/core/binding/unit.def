@@ -93,3 +93,10 @@ WXL_BINDING(unit_aura_at, const void*, (const void* object, uint32_t index), (ob
 // Whether the unit stands outdoors: CGUnit_C::IsOutdoors, World::QueryOutdoors of its map
 // entity, which the indoor flag of the WMO group it stands in decides.
 WXL_BINDING(unit_is_outdoors, wxl_bool, (const void* object), (object), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -121,3 +121,10 @@ WXL_SEAM_RAISES(Spell, Packet_Group_31, SpellCooldownChanged)
 // and whether the server may be told.
 WXL_SEAM_BEFORE(Spell, CancelSpell, "Spell_C_CancelSpell", void, cdecl, (void* cast, uint8_t stop_recast, uint8_t notify_server, int32_t reason))
 WXL_SEAM_RAISES(Spell, CancelSpell, SpellCastCancel)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -41,3 +41,10 @@ WXL_SEAM_RAISES(Map, CreateDoodadDefAt, DoodadSpawn)
 // 16-bit value in a dword ([ebp+0x1C]), a bare `ret` (0x007BF11F).
 WXL_SEAM_AFTER(Map, CreateDoodadDefInMapObj, "CMap::CreateDoodadDef@0x007BEF40", void*, cdecl, (uint32_t doodad_ref, void* doodad_def, char* name, uint32_t key, void* mat, uint16_t doodad_set))
 WXL_SEAM_RAISES(Map, CreateDoodadDefInMapObj, DoodadSpawn)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

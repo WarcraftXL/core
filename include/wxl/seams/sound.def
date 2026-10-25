@@ -26,3 +26,10 @@ WXL_SEAM_RAISES(Sound, PlaySoundKit, SoundPlay)
 // bools are pushed as whole dwords of which the low byte counts.
 WXL_SEAM_BEFORE(Sound, CreateWaveData, "SE2::CreateWaveData", int32_t, cdecl, (void* system, const char* file_name, uint32_t mode, void* sound, void* load_sound_group, void* sound_group, uint32_t random_start, int32_t priority, int32_t reverb, uint32_t streaming, uint32_t decode_buffer_size, int32_t software, float cone_inside, float cone_outside, float cone_outside_volume, const void* cone_orientation))
 WXL_SEAM_RAISES(Sound, CreateWaveData, SoundFileLoad)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

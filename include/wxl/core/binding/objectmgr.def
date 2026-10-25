@@ -42,3 +42,10 @@ WXL_BINDING(object_unwatch_type, wxl_bool, (uint32_t type, uint32_t offset, wxl_
 // type, offset, handler, param). False when the client holds no such object, whose handlers went
 // with it. Main thread only.
 WXL_BINDING(object_unwatch_one, wxl_bool, (uint64_t guid, uint32_t type, uint32_t offset, wxl_core_mirror_fn handler, void* param), (guid, type, offset, handler, param), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -56,3 +56,10 @@ WXL_BINDING(script_create_events, void, (const char** names, uint32_t count), (n
 // Signals the event at `index` to every frame listening, with the `arg_count` values on top of
 // the stack as arguments; the values are left on the stack: FrameScript_SignalEvent(index, L, n).
 WXL_BINDING(script_signal_event, void, (uint32_t index, void* state, int32_t arg_count), (index, state, arg_count), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

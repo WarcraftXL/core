@@ -75,3 +75,10 @@ WXL_BINDING(unit_update_display, wxl_bool, (void* object), (object), WXL_FALSE)
 // `atlas`. A texture the interface offered the atlas (m_flags 4) that it did not take is an
 // ordinary one. The answer is how many were read again. Main thread.
 WXL_BINDING(texture_reload, uint32_t, (const char* name, uint32_t* busy, uint32_t* atlas), (name, busy, atlas), 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

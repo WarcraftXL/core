@@ -13,3 +13,10 @@
 // AchievementEarned.
 WXL_SEAM_BEFORE(Achievement, Packet_SMSG_ACHIEVEMENT_EARNED, "Packet_SMSG_ACHIEVEMENT_EARNED", int32_t, cdecl, (void* param, uint32_t msg_id, uint32_t time, void* msg))
 WXL_SEAM_RAISES(Achievement, Packet_SMSG_ACHIEVEMENT_EARNED, AchievementEarned)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

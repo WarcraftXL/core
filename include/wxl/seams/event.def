@@ -25,3 +25,10 @@
 // the call and cleans two stack slots after it.
 WXL_SEAM_BEFORE(Event, DispatchUpdate, "IEvtDispatchUpdate", void, regparm, (void* context, uint32_t curr_time, float elapsed_sec))
 WXL_SEAM_RAISES(Event, DispatchUpdate, Update)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

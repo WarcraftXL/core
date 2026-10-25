@@ -21,3 +21,10 @@ WXL_BINDING_FIELD(message_size, uint32_t, CDataStore, m_size, 0)
 // The read cursor: where the message starts for whoever is about to read it. A store that has
 // been reset carries 0xFFFFFFFF here, which is past m_size and says there is nothing to read.
 WXL_BINDING_FIELD(message_read, uint32_t, CDataStore, m_read, 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

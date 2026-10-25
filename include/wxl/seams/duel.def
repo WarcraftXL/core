@@ -28,3 +28,10 @@ WXL_SEAM_BEFORE(Duel, Packet_SMSG_DUEL_WINNER, "Packet_SMSG_DUEL_WINNER", int32_
 WXL_SEAM_RAISES(Duel, Packet_SMSG_DUEL_WINNER, DuelWon)
 WXL_SEAM_BEFORE(Duel, Packet_SMSG_DUEL_COMPLETE, "Packet_SMSG_DUEL_COMPLETE", int32_t, cdecl, (void* param, uint32_t msg_id, uint32_t time, void* msg))
 WXL_SEAM_RAISES(Duel, Packet_SMSG_DUEL_COMPLETE, DuelFinished)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

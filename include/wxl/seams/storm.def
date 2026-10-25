@@ -42,3 +42,10 @@ WXL_SEAM(Storm, SMemReAlloc, "SMemReAlloc", void*, stdcall, (void* ptr, size_t b
 // one the session's end line. linenumber is negative for Storm's own kinds: -5 an exception and
 // -3 a leak report, whose text is in filename.
 WXL_SEAM_BEFORE(Storm, SErrDisplayError, "SErrDisplayError", int32_t, stdcall, (uint32_t errorcode, const char* filename, int32_t linenumber, const char* description, int32_t recoverable, uint32_t exitcode, uint32_t unknown))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

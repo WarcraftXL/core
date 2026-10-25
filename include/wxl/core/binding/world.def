@@ -16,3 +16,10 @@ WXL_BINDING(map_id, int32_t, (void), (), -1)
 // target, the player. Still the old place at the start of a teleport's preload. False, with
 // nothing written, while no map is loaded.
 WXL_BINDING(world_position, wxl_bool, (wxl_vec3* out), (out), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

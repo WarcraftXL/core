@@ -9,6 +9,10 @@
 // parent's bones of the same key bone id or name (WXL_M2_ATTACH_FOLLOW_BONES), or all of them one
 // key bone of the parent moved by an offset (attach_to_bone). The same code poses on both
 // clients, from the skeletons the binding describes.
+//
+// A mod may also place models of its own in the world (spell effects: create_world_model,
+// place_model) and watch the bones the client poses (live physics: watch_bones), on the x64
+// client, whose binding answers those rows.
 
 #include "services/M2Service.hpp"
 
@@ -17,12 +21,17 @@
 #include "objects/Objects.hpp"
 #include "runtime/Core.hpp"
 
+#include "wxl/host/guard.hpp"
+
 #include "wxl/host/mod_host.hpp"
 
 #include <ankerl/unordered_dense.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstring>
+#include <shared_mutex>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -51,6 +60,7 @@ namespace
         uint32_t owner;
         void*    file; ///< its CM2Shared: what its interface copies are known by once they loaded
         Pose     pose;
+        bool     world = false; ///< placed in the world: it has a map entity to take down
     };
 
     struct FilePose
@@ -121,12 +131,115 @@ namespace
         auto it = g_models.find(model);
         if (it == g_models.end()) return;
         SetPose(it->second, Pose{});
+        const bool world = it->second.world;
         g_models.erase(it);
+        if (world) binding::m2_unplace_world(model);
         binding::m2_detach_model(model);
         binding::m2_release_model(model);
     }
 
     std::string Text(wxl_str text) { return text.data ? std::string(text.data, text.size) : std::string(); }
+
+    // --- Bone watchers: called on the animate threads ----------------------------------------
+    //
+    // A fixed table, so the animate threads never see it move: a slot is filled on the main thread
+    // and only ever switched off after. Which watchers want a file is decided once per file and
+    // kept here, under a lock both animate threads take; a change to the watchers starts it over.
+
+    constexpr uint32_t kBoneSlots = 16;
+
+    struct BoneWatcher
+    {
+        wxl_m2_bones_filter_fn filter = nullptr;
+        wxl_m2_bones_fn        fn     = nullptr;
+        void*                  user   = nullptr;
+        uint32_t               owner  = 0;
+        uint32_t               token  = 0;
+        std::atomic<bool>      live{false};
+    };
+
+    BoneWatcher           g_bones[kBoneSlots];
+    std::atomic<uint32_t> g_boneLive{0};
+    std::atomic<uint32_t> g_boneEpoch{1};
+
+    uint32_t g_nextBoneToken = 1;
+
+    struct FileWant
+    {
+        std::string path;
+        uint32_t    epoch = 0;
+        uint32_t    mask  = 0; // bit per slot of g_bones
+    };
+    std::shared_mutex                   g_wantLock;
+    std::unordered_map<void*, FileWant> g_wants;
+
+    void DropBones(BoneWatcher& watcher)
+    {
+        if (!watcher.live.exchange(false)) return;
+        --g_boneLive;
+        ++g_boneEpoch;
+    }
+
+    struct BoneCall
+    {
+        const BoneWatcher*  watcher;
+        const wxl_m2_bones* bones;
+        wxl_bool            wanted;
+    };
+
+    void InvokeBoneFilter(void* context)
+    {
+        BoneCall* call = static_cast<BoneCall*>(context);
+        call->wanted = call->watcher->filter
+                           ? call->watcher->filter(call->bones->file, call->bones->path, call->bones->bone_count,
+                                                   call->watcher->user)
+                           : WXL_TRUE;
+    }
+
+    void InvokeBoneWatcher(void* context)
+    {
+        const BoneCall* call = static_cast<const BoneCall*>(context);
+        call->watcher->fn(call->bones, call->watcher->user);
+    }
+
+    /// Calls one bone watcher under the guard; a fault switches it off.
+    bool GuardedBones(BoneWatcher& watcher, void (*fn)(void*), BoneCall& call)
+    {
+        wxl::host::Fault fault;
+        if (wxl::host::CallGuarded(fn, &call, &fault)) return true;
+        char what[96];
+        wxl::host::DescribeFault(fault, what, sizeof what);
+        WLOG_ERROR(kTag, "a bone watcher faulted and was dropped: %s", what);
+        DropBones(watcher);
+        return false;
+    }
+
+    /// The watchers that want `bones`' file: asked once per file, kept until the watchers change.
+    uint32_t WantsOf(const wxl_m2_bones& bones)
+    {
+        const uint32_t         epoch = g_boneEpoch.load();
+        const std::string_view path(bones.path.data ? bones.path.data : "", bones.path.size);
+        {
+            std::shared_lock lock(g_wantLock);
+            auto             it = g_wants.find(bones.file);
+            if (it != g_wants.end() && it->second.epoch == epoch && it->second.path == path) return it->second.mask;
+        }
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < kBoneSlots; ++i)
+        {
+            BoneWatcher& watcher = g_bones[i];
+            if (!watcher.live.load()) continue;
+            BoneCall call{&watcher, &bones, WXL_FALSE};
+            if (GuardedBones(watcher, &InvokeBoneFilter, call) && call.wanted) mask |= 1u << i;
+        }
+        std::unique_lock lock(g_wantLock);
+        FileWant&        want = g_wants[bones.file];
+        want.path.assign(path);
+        want.epoch = epoch;
+        want.mask  = mask;
+        return mask;
+    }
+
 
     // --- Posing -------------------------------------------------------------------------------
 
@@ -406,10 +519,142 @@ namespace
         return WXL_OK;
     }
 
+    // --- Bone watchers ----------------------------------------------------------------------
+
+    wxl_result WXL_CALL WatchBones(wxl_m2_bones_filter_fn filter, wxl_m2_bones_fn fn, void* user, uint32_t* out_token)
+    {
+        if (!fn) return WXL_E_INVALID;
+        for (BoneWatcher& watcher : g_bones)
+        {
+            if (watcher.live.load()) continue;
+            watcher.filter = filter;
+            watcher.fn     = fn;
+            watcher.user   = user;
+            watcher.owner  = CurrentMod();
+            watcher.token  = g_nextBoneToken++;
+            watcher.live.store(true);
+            ++g_boneLive;
+            ++g_boneEpoch;
+            if (out_token) *out_token = watcher.token;
+            return WXL_OK;
+        }
+        return WXL_E_FAILED;
+    }
+
+    void WXL_CALL UnwatchBones(uint32_t token)
+    {
+        for (BoneWatcher& watcher : g_bones)
+            if (watcher.token == token) DropBones(watcher);
+    }
+
+    wxl_result WXL_CALL BoneInfo(void* file, uint32_t index, int16_t* out_parent, wxl_vec3* out_pivot)
+    {
+        if (!file) return WXL_E_INVALID;
+        return binding::m2_file_bone(file, index, out_parent, out_pivot) ? WXL_OK : WXL_E_NOT_FOUND;
+    }
+
+    // --- Models of the world --------------------------------------------------------------------
+
+    wxl_m2_placement Placement(const wxl_m2_placement* in)
+    {
+        wxl_m2_placement out{};
+        out.struct_size = sizeof out;
+        out.scale       = 1.0f;
+        if (!in) return out;
+        const uint32_t size = in->struct_size ? in->struct_size : sizeof out;
+        if (size >= offsetof(wxl_m2_placement, position) + sizeof(wxl_vec3)) out.position = in->position;
+        if (size >= offsetof(wxl_m2_placement, roll) + sizeof(float))
+        {
+            out.yaw   = in->yaw;
+            out.pitch = in->pitch;
+            out.roll  = in->roll;
+        }
+        if (size >= offsetof(wxl_m2_placement, scale) + sizeof(float) && in->scale > 0.0f) out.scale = in->scale;
+        return out;
+    }
+
+    void* WXL_CALL CreateWorldModel(wxl_str path)
+    {
+        const std::string file = Text(path);
+        if (file.empty()) return nullptr;
+        void* model = binding::m2_create_world_model(file.c_str());
+        if (!model) return nullptr;
+        Model record{};
+        record.owner = CurrentMod();
+        record.file  = binding::m2_model_file(model);
+        g_models[model] = record;
+        return model;
+    }
+
+    wxl_result WXL_CALL PlaceModel(void* model, const wxl_m2_placement* placement)
+    {
+        Model* known = Known(model);
+        if (!known || !placement) return WXL_E_INVALID;
+        SetPose(*known, Pose{});
+        const wxl_m2_placement at = Placement(placement);
+        if (!binding::m2_place_world(model, &at)) return WXL_E_FAILED;
+        known->world = true;
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL SetModelTransform(void* model, const wxl_m2_placement* placement)
+    {
+        if (!Known(model) || !placement) return WXL_E_INVALID;
+        const wxl_m2_placement at = Placement(placement);
+        binding::m2_set_transform(model, &at);
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL PlayAnimation(void* model, uint32_t anim_id, float speed)
+    {
+        if (!Known(model)) return WXL_E_INVALID;
+        binding::m2_play_animation(model, anim_id, speed > 0.0f ? speed : 1.0f);
+        return WXL_OK;
+    }
+
+    wxl_bool WXL_CALL ModelLoaded(void* model)
+    {
+        return model ? binding::m2_loaded(model) : WXL_FALSE;
+    }
+
+    wxl_result WXL_CALL AnimationLength(void* model, uint32_t anim_id, uint32_t* out_ms)
+    {
+        if (!model || !out_ms) return WXL_E_INVALID;
+        if (!binding::m2_loaded(model)) return WXL_E_FAILED;
+        *out_ms = binding::m2_animation_length(model, anim_id);
+        return WXL_OK;
+    }
+
+    void WXL_CALL SetAlpha(void* model, float alpha)
+    {
+        if (Known(model)) binding::m2_set_alpha(model, alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha);
+    }
+
+    void WXL_CALL SetEmitting(void* model, wxl_bool emitting)
+    {
+        if (Known(model)) binding::m2_set_emitting(model, emitting);
+    }
+
+    wxl_result WXL_CALL AttachmentWorld(void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (!model || !out) return WXL_E_INVALID;
+        if (!binding::m2_loaded(model)) return WXL_E_FAILED;
+        return binding::m2_attachment_world(model, attachment, out) ? WXL_OK : WXL_E_NOT_FOUND;
+    }
+
+    wxl_result WXL_CALL GroundHeight(const wxl_vec3* at, float up, float down, float* out_z)
+    {
+        if (!at || !out_z || up < 0.0f || down < 0.0f) return WXL_E_INVALID;
+        return binding::m2_ground_height(at, up, down, out_z) ? WXL_OK : WXL_E_NOT_FOUND;
+    }
+
     const wxl_m2_api kApi = {
         sizeof(wxl_m2_api), &ObjectModel,  &ItemDisplay,     &RacePrefix,      &CreateModel,
         &ReleaseModel,      &AttachModel,  &DetachModel,     &ModelParent,     &SetGeosets,
         &ReplaceTexture,    &AttachmentPoint, &AttachToBone,
+        &CreateWorldModel,  &PlaceModel,   &SetModelTransform, &PlayAnimation, &ModelLoaded,
+        &AnimationLength,   &SetAlpha,     &SetEmitting,     &AttachmentWorld, &GroundHeight,
+        &WatchBones,        &UnwatchBones, &BoneInfo,
     };
 }
 
@@ -429,6 +674,24 @@ namespace wxl::core::services
                 PoseOnBone(model, pose.keyBone, pose.offset);
             else if (pose.kind == Pose::Bones)
                 PoseFromParent(model);
+        }
+
+        bool WatchingBones() { return g_boneLive.load() != 0; }
+
+        void DispatchBones(void* model)
+        {
+            wxl_m2_bones bones{};
+            bones.struct_size = sizeof bones;
+            if (!binding::m2_bones(model, &bones) || !bones.file) return;
+            const uint32_t mask = WantsOf(bones);
+            for (uint32_t i = 0; i < kBoneSlots; ++i)
+            {
+                if (!(mask & (1u << i))) continue;
+                BoneWatcher& watcher = g_bones[i];
+                if (!watcher.live.load()) continue;
+                BoneCall call{&watcher, &bones, WXL_TRUE};
+                GuardedBones(watcher, &InvokeBoneWatcher, call);
+            }
         }
 
         bool HasModels() { return !g_models.empty(); }
@@ -452,10 +715,17 @@ namespace wxl::core::services
             for (const auto& [model, record] : g_models)
                 if (record.owner == mod) theirs.push_back(model);
             for (void* model : theirs) Forget(model);
+            for (BoneWatcher& watcher : g_bones)
+                if (watcher.owner == mod) DropBones(watcher);
         }
 
         void Clear()
         {
+            for (BoneWatcher& watcher : g_bones) DropBones(watcher);
+            {
+                std::unique_lock lock(g_wantLock);
+                g_wants.clear();
+            }
             g_models.clear();
             g_followFiles.clear();
             g_following.store(0, std::memory_order_relaxed);

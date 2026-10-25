@@ -26,3 +26,10 @@ WXL_BINDING_FIELD(visible_item_id, int32_t, VisibleItem_C, m_itemId, 0)
 // only the local player's m_player carries past the descriptor block. Read it for the local
 // player only.
 WXL_BINDING_FIELD_VIA(player_money, uint32_t, CGPlayer_C, m_player, CGPlayerLocalData, m_playerFieldCoinage, 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

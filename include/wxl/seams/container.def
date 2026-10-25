@@ -32,3 +32,10 @@ WXL_SEAM_WITNESS(Container, UpdateInvContents, 0x004D5254)
 WXL_SEAM_BEFORE(Container, UpdateContainerContents, "UpdateContainerContents", int32_t, cdecl, (uint64_t guid, uint32_t field_offset, uint32_t field_size, const void* old_value, void* param))
 WXL_SEAM_RAISES(Container, UpdateContainerContents, InventorySlotChanged)
 WXL_SEAM_WITNESS(Container, UpdateContainerContents, 0x004D5254)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -999,6 +999,20 @@ namespace wxl::core::binding
         std::memcpy(count, &value, sizeof value);
     }
 
+    void* m2_create_world_model(const char*) { return nullptr; }
+    wxl_bool m2_place_world(void*, const wxl_m2_placement*) { return WXL_FALSE; }
+    void m2_unplace_world(void*) {}
+    void m2_set_transform(void*, const wxl_m2_placement*) {}
+    void m2_play_animation(void*, uint32_t, float) {}
+    wxl_bool m2_loaded(const void*) { return WXL_FALSE; }
+    uint32_t m2_animation_length(void*, uint32_t) { return 0; }
+    void m2_set_alpha(void*, float) {}
+    void m2_set_emitting(void*, wxl_bool) {}
+    wxl_bool m2_attachment_world(void*, uint32_t, wxl_vec3*) { return WXL_FALSE; }
+    wxl_bool m2_ground_height(const wxl_vec3*, float, float, float*) { return WXL_FALSE; }
+    wxl_bool m2_bones(void*, wxl_m2_bones*) { return WXL_FALSE; }
+    wxl_bool m2_file_bone(const void*, uint32_t, int16_t*, wxl_vec3*) { return WXL_FALSE; }
+
     wxl_bool object_position(const void* object, wxl_vec3* out)
     {
         if (!IsClient() || !object || !out) return WXL_FALSE;

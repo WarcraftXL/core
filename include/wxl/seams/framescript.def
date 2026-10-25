@@ -73,3 +73,10 @@ WXL_SEAM_RAISES(FrameScript, vSignalEvent, WindowClosed)
 // left it on top of the stack, before the client rewrites it.
 WXL_SEAM_BEFORE(FrameScript, HandleError, "FrameScript_HandleError", int32_t, cdecl, (void* state))
 WXL_SEAM_RAISES(FrameScript, HandleError, ScriptError)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

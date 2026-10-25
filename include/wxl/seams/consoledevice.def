@@ -19,3 +19,10 @@
 // It reads only its title; its caller pushes and cleans the two flags as well
 // (`push 1; push 1; push title; call; add esp, 0xc`), so the row declares them.
 WXL_SEAM_AFTER(ConsoleDevice, Initialize, "ConsoleDeviceInitialize", void, cdecl, (const char* title, bool unused_a2, bool unused_a3))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

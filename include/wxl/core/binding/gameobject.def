@@ -20,3 +20,10 @@ WXL_BINDING_FIELD_VIA(gameobject_level, uint32_t, CGGameObject_C, m_gameObject, 
 WXL_BINDING_FIELD_VIA(gameobject_state, int8_t, CGGameObject_C, m_gameObject, CGGameObjectData, m_state, 0)
 WXL_BINDING_FIELD_VIA(gameobject_type_id, int8_t, CGGameObject_C, m_gameObject, CGGameObjectData, m_typeID, 0)
 WXL_BINDING_FIELD_VIA(gameobject_art_kit, int8_t, CGGameObject_C, m_gameObject, CGGameObjectData, m_artKit, 0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

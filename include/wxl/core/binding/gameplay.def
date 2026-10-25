@@ -87,3 +87,10 @@ WXL_BINDING(resurrect_answer, void, (uint64_t offerer, uint32_t sickness, uint32
 // CGDuelInfo::CancelDuel and the arbiter dropped, which is what the handler does for a challenge
 // from an ignored player.
 WXL_BINDING(duel_answer, void, (uint64_t arbiter, uint64_t challenger, wxl_bool accept), (arbiter, challenger, accept), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif
