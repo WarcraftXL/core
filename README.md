@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.21-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.22-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -303,6 +303,7 @@ source. Everything else observes.
 | `Storage.OpenFile` (gated) | `SFile::OpenEx(SArchive*, const char* name, uint32_t flags, SFileImpl** result)` | `FileOpen` at the gate, `redirect` holding what a mod's `wxl.storage` redirect answers; a path written into `redirect` is what the client opens instead, then a folder of the search path that wins the name |
 | `Storage.OpenEx` | the same `SFile::OpenEx`, observed: on x86 a second link of the same chain, nearer the function than the gate | `FileOpened` after, at every return, with the name opened, whether a file came back and its size; nothing is read while nobody listens |
 | `Storage.FindFile` (gated) | `System_SFile2::FindFile(name, path, size, flags, type, archive)`, where every name the client opens or looks for is resolved | nothing: a folder of the search path, a provider or served bytes that win the name answer it, and a kind some mod transforms is opened through the runtime's file layer |
+| `Storage.FindFileResult` | the same function, observed after it: where the name was found, or that it was found nowhere | `FileMissing`, when no layer has the name the client opened or looked for |
 | `Sound.PlaySoundKit` (gated) | `SI2::PlaySoundKit(int32_t kit, ...)` | `SoundPlay` at the gate; suppressing it keeps the sound from starting. Both of the client's overloads of this name end here, so a sound named by path arrives with the id its name resolved to |
 | `Client.Destroy` | `WowClientDestroy()` | nothing, but it is where `WXL_STAGE_SHUTDOWN` and the unload run: the last moment at which a mod can be told anything |
 | `ConsoleDevice.Initialize` | `ConsoleDeviceInitialize(const char* title, bool, bool)` | nothing, but its return is `WXL_STAGE_GRAPHICS`: the device is made after the first database is read and before the script context exists, which is the order the stages promise |
