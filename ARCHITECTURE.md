@@ -306,6 +306,27 @@ its picking and clicks act at the centre. The window procedure's gate raises `Mo
 raw input, which the service registers for the window at the first capture or listener, and
 `MouseWheel`, which a handler keeps from the client.
 
+### The mouse look kept out, heads, Dear ImGui
+
+The game's mouse look starts when a key binding's Lua action sets a look bit with
+`CGInputControl::SetControlBit` (0x1 the right button, 0x2 the left) and ends at
+`UnsetControlBit`, which does the click's default action when the hold was short. While a mod
+blocks it (`wxl.input`), the two gates of `seams/inputcontrol.def` keep the look bits from the
+game, note when each button went down, and at the release do the default action the press noted
+(`CGWorldFrame::PerformDefaultAction`) when it came within 0.8 s: the game never holds a button.
+
+`wxl.pose` (`src/services/PoseService.cpp`) keeps the heads mods turned; after each
+`CGUnit_C::PreAnimate` (`Unit.PreAnimate`), where the game sets its own twist, the head moves on
+towards its target and is written as the head key bone's procedural transform.
+
+`wxl.imgui` (`src/services/ImGuiService.cpp`) owns one Dear ImGui and one ImPlot context, built
+from the SDK's copy (`sdk/deps/imgui`, `sdk/deps/implot`) with its Win32 and Direct3D 9
+backends. At every present of a painted frame, while a mod listens to `ImGuiFrame`, it opens a
+frame, raises the event, and draws with the game's device inside its scene; the device's state
+is saved and restored by the backend and the game told to send its own again. The window
+procedure's gate hands every message to ImGui first and stops the ones it wants. Mods compile the
+same copy (`wxl::imgui`) and point it at these contexts and this allocator (`ImGuiService::Bind`).
+
 ### The profiler
 
 WarcraftXL.dll carries the process's one Tracy client (`deps/tracy`, v0.14.1), compiled with
@@ -420,7 +441,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.

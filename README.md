@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.23-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.24-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -199,6 +199,9 @@ What a mod can reach **today**, by build:
 | `wxl.camera` (the world camera) | yes: its position, facing rows (through the parent's rotation on a vehicle or a transport), field of view and pivot read at measured offsets; a mod's view written at the end of `CGCamera::UpdateCallback`, after `CameraUpdate` | the same, through the binding |
 | `wxl.input` (the pointer) | yes: held at the centre of the window by `ClipCursor`, hidden through the device's `CursorSetVisible` while the game's own pointer state is left on; `MouseMotion` from raw input, `MouseWheel` from `WM_MOUSEWHEEL` at the window procedure's gate | the same |
 | `wxl.world` (the world's geometry) | yes: `World::Intersect` | the same |
+| `wxl.input`'s block of the mouse look | yes: gates on `CGInputControl::SetControlBit` and `UnsetControlBit` keep the look bits from the game, and a short click is done through `CGWorldFrame::PerformDefaultAction` | the same, gates in the fork |
+| `wxl.pose` (heads) | yes: after `CGUnit_C::PreAnimate`, the head key bone's procedural transform (`CM2Model::SetBoneFlags`, `SetBoneProceduralTransform`) | the same |
+| `wxl.imgui` (Dear ImGui, ImPlot) | yes: one context, drawn at the present with the D3D9 device (the SDK's copy and its Win32 and DX9 backends), the window's messages fed at the window procedure's gate | the same |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -313,6 +316,9 @@ source. Everything else observes.
 | `Scrn.OnPaint` | `OnPaint(const void* data, void* param)`, the paint handler | `FrameBegin` before, only when the device has a context and the window can be seen -- the test the paint makes itself |
 | `Gx.ScenePresent` | `GxScenePresent()` | `FrameEnd` before, for the frame `Scrn.OnPaint` opened and only for it: the loading screen presents frames of its own, which raise nothing. The last draw list is flushed after it. About once a second while a mod watches the address space, `MemoryPressure` before, when its largest free block just fell under the threshold |
 | `SimpleTop.OnLayerRender` | `CSimpleTop::OnLayerRender()` | `UiRenderEnd` after: every stratum of the interface is drawn, the world inside it |
+| `InputControl.SetControlBit` (gated) | `CGInputControl::SetControlBit(uint32_t bit, uint32_t time)` | while a mod blocks the mouse look, its look bits are kept from the game and the press noted |
+| `InputControl.UnsetControlBit` (gated) | `CGInputControl::UnsetControlBit(uint32_t bit, uint32_t time, int32_t keep_smoothing)` | the release of a look bit kept out, with the default action of a short click |
+| `Unit.PreAnimate` | `CGUnit_C::PreAnimate(void* frame)` | After applies the head turns of `wxl.pose` |
 | `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
 | `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world |
 | `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
