@@ -78,6 +78,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -3857,6 +3858,32 @@ namespace
               "and so does its release");
         bit = 0x10, result = -1;
         Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time), "a movement bit alone is the game's");
+
+        // A movement key (MOVEBACKWARD, 0x20) pressed and let go around a held button, in either
+        // order: the game gets both edges, and the button stays the gate's.
+        const auto set = [&](uint32_t b, uint32_t t) {
+            bit = b, time = t, result = -1;
+            const bool taken = wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+            return std::make_pair(taken, bit);
+        };
+        const auto unset = [&](uint32_t b, uint32_t t) {
+            bit = b, time = t, result = -1;
+            const bool taken = wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+            return std::make_pair(taken, bit);
+        };
+        const auto passes = [](std::pair<bool, uint32_t> call, uint32_t bits) { return !call.first && call.second == bits; };
+        Check(passes(set(0x20, 10000), 0x20) && set(0x2, 10100).first && passes(unset(0x20, 10200), 0x20) &&
+                  unset(0x2, 10300).first,
+              "a movement key let go while a button is held reaches the game");
+        Check(set(0x1, 11000).first && passes(set(0x20, 11100), 0x20) && unset(0x1, 11200).first &&
+                  passes(unset(0x20, 11300), 0x20),
+              "a movement key pressed while a button is held, let go after it, reaches the game both times");
+        Check(passes(set(0x20, 12000), 0x20) && passes(set(0x20, 12050), 0x20) && passes(unset(0x20, 12100), 0x20) &&
+                  passes(unset(0x20, 12150), 0x20),
+              "a movement key pressed again, or let go twice, is the game's each time");
+        Check(set(0x2, 13000).first && passes(unset(0xFFFFFFFFu, 13100), 0xFFFFFFFDu),
+              "the game's reset lets every bit go but the button the gate holds, which it lets go itself");
+        Check(passes(unset(0x2, 13200), 0x2), "and a later release of that button is the game's");
 
         in::ForgetMod(0);
         Check(api.mouse_look_blocked() == WXL_FALSE, "a mod's block goes with it");
