@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Pose domain of the client binding: a model's bones turned over its animation. Main thread
+// only, as the animation is.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including pose.def"
+#endif
+
+// Sets a key bone's flags under a mask: CM2Model::SetBoneFlags(bone, flags, mask). Flag 0x80
+// has the animation apply the bone's procedural transform.
+WXL_BINDING(model_bone_flags, void, (void* model, uint32_t bone, uint32_t flags, uint32_t mask), (model, bone, flags, mask), (void)0)
+
+// Sets a key bone's procedural transform, sixteen floats as a C44Matrix (rows a, b, c, d):
+// CM2Model::SetBoneProceduralTransform(bone, matrix), which the game uses to twist a turning
+// unit's torso and head.
+WXL_BINDING(model_bone_transform, void, (void* model, uint32_t bone, const float* matrix), (model, bone, matrix), (void)0)

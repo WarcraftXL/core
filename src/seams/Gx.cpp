@@ -12,6 +12,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/FootprintService.hpp"
+#include "services/ImGuiService.hpp"
 #include "services/InputService.hpp"
 
 #include "wxl/events.h"
@@ -53,6 +54,8 @@ namespace wxl::seam::Gx::ScenePresent
         wxl_frame_args args{};
         if (!wxl::core::frame::End(args)) return;
         if (!host) return;
+        // The mods' Dear ImGui windows, over the game's interface, while the device is in its scene.
+        wxl::core::services::imgui::Present(args);
         host->Raise(WXL_EV_FrameEnd, &args);
     }
 }
@@ -63,6 +66,9 @@ namespace wxl::seam::Gx::ReleaseD3dResources
     {
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !self) return;
+
+        // ImGui's device objects go with the game's, and come back at its next frame.
+        wxl::core::services::imgui::DeviceLost();
 
         // Read before the release: this is the size of what is about to go away.
         const wxl_swapchain_args args = Size();

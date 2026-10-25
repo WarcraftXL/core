@@ -5,6 +5,8 @@
 
 #include "wxl/seams/seams.h"
 
+#include "services/PoseService.hpp"
+
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
 #include "objects/Objects.hpp"
@@ -157,5 +159,14 @@ namespace wxl::seam::Unit::MountDisplayIDUpdateHandler
         args.unit      = wxl::core::objects::HandleOf(unit);
         args.unit_guid = guid;
         host->Raise(WXL_EV_UnitMountChanged, &args);
+    }
+}
+
+namespace wxl::seam::Unit::PreAnimate
+{
+    void WXL_CALL After(void* self, void*)
+    {
+        // The game has set its own twist on the unit's head bone; a mod's turn goes over it.
+        wxl::core::services::pose::PreAnimate(self);
     }
 }

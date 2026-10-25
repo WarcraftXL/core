@@ -1257,6 +1257,7 @@ type CGCamera WoW/Source/UIUtil/Camera.h CGCamera
 type CGInputControl WoW/Source/UIUtil/InputControl.h CGInputControl
   m_flags                                 -
   m_mouseModeFlags                        -
+  m_pendingDefaultAction                  -
 
 skip game/World:kWorldFrameStandInBytes :: the byte size reserved for a stand-in frame (an allocation choice, not a layout)
 

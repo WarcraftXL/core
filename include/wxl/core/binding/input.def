@@ -25,3 +25,19 @@ WXL_BINDING(input_cursor_restore, void, (void), (), (void)0)
 // Whether the pointer is over the 3D world: CSimpleTop's m_mouseFocus is the world frame
 // (CGWorldFrame::s_currentWorldFrame). False with no world frame.
 WXL_BINDING(input_pointer_over_world, wxl_bool, (void), (), WXL_FALSE)
+
+// The default action a mouse press noted, to be done at its release: CGInputControl's
+// m_pendingDefaultAction, 0 none, 1 select (the left button), 2 act (the right one).
+WXL_BINDING(input_pending_action, uint32_t, (const void* control), (control), 0)
+
+// Forgets the default action a press noted.
+WXL_BINDING(input_clear_pending_action, void, (void* control), (control), (void)0)
+
+// Does what a click does at its release: CGWorldFrame::PerformDefaultAction(button) on the world
+// frame, button 1 left (select), 4 right (act), on what the press noted under the pointer. False
+// with no world frame.
+WXL_BINDING(input_default_action, wxl_bool, (uint32_t button), (button), WXL_FALSE)
+
+// Ends the game's mouse look, with no click: the noted action forgotten, then
+// CGInputControl::UnsetControlBit of both look bits, as the game's MouselookStop does.
+WXL_BINDING(input_mouse_look_stop, void, (void), (), (void)0)

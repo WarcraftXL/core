@@ -137,6 +137,12 @@ list(FILTER WXL_SEAM_BODIES EXCLUDE REGEX "/AttachX86\.cpp$")
 list(FILTER WXL_SEAM_BODIES EXCLUDE REGEX "/RegparmX86\.cpp$")
 file(GLOB WXL_OBJECT_READS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/objects/*.cpp")
 
+# Dear ImGui's Win32 and Direct3D 9 backends, from the SDK's copy (deps/imgui/backends): the
+# runtime draws the mods' windows with the game's own device and feeds them the window's input.
+set(WXL_IMGUI_BACKENDS
+    "${WXL_IMGUI_DIR}/backends/imgui_impl_dx9.cpp"
+    "${WXL_IMGUI_DIR}/backends/imgui_impl_win32.cpp")
+
 # The commits the build comes from, read at every build into a header only Session.cpp includes:
 # core's, the SDK's, and the client's when core is built inside a client's tree.
 set(WXL_BUILD_IDS_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -184,6 +190,9 @@ add_library(wxl-core SHARED
     src/services/CameraService.cpp
     src/services/InputService.cpp
     src/services/WorldService.cpp
+    src/services/PoseService.cpp
+    src/services/ImGuiService.cpp
+    ${WXL_IMGUI_BACKENDS}
     ${WXL_SEAM_BODIES}
     ${WXL_OBJECT_READS})
 set_target_properties(wxl-core PROPERTIES OUTPUT_NAME "WarcraftXL" PREFIX "")
@@ -196,7 +205,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine bcrypt)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui bcrypt)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -230,13 +239,16 @@ add_executable(wxl-core-seam-harness
     src/services/CameraService.cpp
     src/services/InputService.cpp
     src/services/WorldService.cpp
+    src/services/PoseService.cpp
+    src/services/ImGuiService.cpp
+    ${WXL_IMGUI_BACKENDS}
     ${WXL_SEAM_BODIES}
     ${WXL_OBJECT_READS})
 # The same build as the DLL, so --bench measures what ships rather than something near it.
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine bcrypt)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui bcrypt)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 

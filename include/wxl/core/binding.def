@@ -91,6 +91,7 @@
 #include "wxl/core/binding/action.def"
 #include "wxl/core/binding/camera.def"
 #include "wxl/core/binding/input.def"
+#include "wxl/core/binding/pose.def"
 
 #include "wxl/core/binding/m2.def"
 

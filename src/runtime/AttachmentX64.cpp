@@ -17,6 +17,8 @@
 #include "services/CameraService.hpp"
 #include "services/InputService.hpp"
 #include "services/WorldService.hpp"
+#include "services/PoseService.hpp"
+#include "services/ImGuiService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/EngineService.hpp"
 #include "services/GxService.hpp"
@@ -81,6 +83,8 @@ namespace wxl::core::attachment
             { WXL_CAMERA_SERVICE, WXL_CAMERA_SERVICE_VERSION, &services::CameraApi() },
             { WXL_INPUT_SERVICE, WXL_INPUT_SERVICE_VERSION, &services::InputApi() },
             { WXL_WORLD_SERVICE, WXL_WORLD_SERVICE_VERSION, &services::WorldApi() },
+            { WXL_POSE_SERVICE, WXL_POSE_SERVICE_VERSION, &services::PoseApi() },
+            { WXL_IMGUI_SERVICE, WXL_IMGUI_SERVICE_VERSION, &services::ImGuiApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif

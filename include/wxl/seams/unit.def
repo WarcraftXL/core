@@ -54,3 +54,10 @@ WXL_SEAM_RAISES(Unit, SendMovementUpdate, PlayerMoveStop)
 WXL_SEAM_BEFORE(Unit, MountDisplayIDUpdateHandler, "MountDisplayIDUpdateHandler", int32_t, cdecl, (uint64_t guid, uint32_t field_offset, uint32_t field_size, const void* old_value, void* param))
 WXL_SEAM_RAISES(Unit, MountDisplayIDUpdateHandler, UnitMountChanged)
 WXL_SEAM_WITNESS(Unit, MountDisplayIDUpdateHandler, 0x004D5254)
+
+// Readies a unit's model for the frame's animation: its render facing, the twist of its torso and
+// head while it turns, its pitch. A virtual of CGObject_C, called for every object in view by
+// CGWorldFrame::UpdateObject (0x004F8D10) right before the object animates; the player's
+// override calls this one first. thiscall (frame), `ret 4` (0x0073E40D). After applies the head
+// turns of wxl.pose over what the game just set on the head bone.
+WXL_SEAM_AFTER(Unit, PreAnimate, "CGUnit_C::PreAnimate", void, thiscall, (void* self, void* frame))

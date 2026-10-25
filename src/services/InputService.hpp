@@ -28,10 +28,21 @@ namespace wxl::core::services
         /// window's focus say. Main thread.
         void Present();
 
-        /// A mod's capture goes: disabled or unloaded.
+        /// The game's CGInputControl::SetControlBit: while a mod blocks the mouse look, a look bit is
+        /// kept from the call and its press noted. True when the gate took the call (`result` set).
+        bool SetControlBit(int32_t* result, void* control, uint32_t* bit, uint32_t time);
+
+        /// The game's CGInputControl::UnsetControlBit: a look bit the gate kept is released here,
+        /// with the click's default action when it was short. True when the gate took the call.
+        bool UnsetControlBit(int32_t* result, void* control, uint32_t* bit, uint32_t time);
+
+        /// The game's window, once its procedure has seen a message; null before.
+        void* Window();
+
+        /// A mod's capture and its block of the mouse look go: disabled or unloaded.
         void ForgetMod(uint32_t mod);
 
-        /// Every capture goes and the pointer is free again: the client is shutting down.
+        /// Every capture and every block go and the pointer is free again: the client is shutting down.
         void Clear();
     }
 }

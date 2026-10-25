@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 135 types, 837 field offsets, 11 member sizes.
+// 135 types, 838 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -112,6 +112,7 @@ WXL_LAYOUT_TYPE(CGGameObject_C_Type_WorldObj, "CGGameObject_C_Type_WorldObj", 0x
 WXL_LAYOUT_FIELD(CGGameObject_C_Type_WorldObj, "m_worldObject", 0x10, "WoW/Source/Object/ObjectClient/GameObject_C.h", 154)
 WXL_LAYOUT_TYPE(CGInputControl, "CGInputControl", 0x70, "WoW/Source/UIUtil/InputControl.h", 26)
 WXL_LAYOUT_FIELD(CGInputControl, "m_flags", 0x4, "WoW/Source/UIUtil/InputControl.h", 26)
+WXL_LAYOUT_FIELD(CGInputControl, "m_pendingDefaultAction", 0x18, "WoW/Source/UIUtil/InputControl.h", 26)
 WXL_LAYOUT_FIELD(CGInputControl, "m_mouseModeFlags", 0x58, "WoW/Source/UIUtil/InputControl.h", 26)
 WXL_LAYOUT_TYPE(CGItemData, "CGItemData", 0xE8, "WoW/Source/Object/Item.h", 39)
 WXL_LAYOUT_FIELD(CGItemData, "m_itemFieldOwner", 0x0, "WoW/Source/Object/Item.h", 39)

@@ -158,6 +158,48 @@ namespace
         if (!OnGameThread("PointerOverWorld")) return WXL_FALSE;
         return binding::input_pointer_over_world();
     }
+
+    // --- the game's mouse look, kept out --------------------------------------------------------
+
+    /// The mods keeping the game out of its mouse look, one entry each.
+    std::vector<uint32_t> g_blockers;
+
+    // The game's look bits: the right button's INPUT_TURN_PLAYER, the left one's INPUT_TURN_CAMERA.
+    constexpr uint32_t kTurnPlayer = 0x1;
+    constexpr uint32_t kTurnCamera = 0x2;
+    constexpr uint32_t kLookBits   = kTurnPlayer | kTurnCamera;
+
+    // CGInputControl::IsMouseDrag: a press held 0.8 s or longer is no click.
+    constexpr uint32_t kClickMs = 800;
+
+    // CGInputControl::m_pendingDefaultAction, and the buttons PerformDefaultAction takes.
+    constexpr uint32_t kReleaseSelect = 1;
+    constexpr uint32_t kButtonLeft    = 1;
+    constexpr uint32_t kButtonRight   = 4;
+
+    /// The look bits the gate kept from the game, which the buttons still hold, and when each was
+    /// pressed (index 0 the right button, 1 the left).
+    uint32_t g_down        = 0;
+    uint32_t g_downTime[2] = {};
+
+    wxl_result WXL_CALL BlockMouseLook(wxl_bool blocked)
+    {
+        if (!OnGameThread("BlockMouseLook")) return WXL_E_INVALID;
+        const uint32_t mod  = Caller();
+        const auto     held = std::find(g_blockers.begin(), g_blockers.end(), mod);
+        if (blocked == WXL_TRUE)
+        {
+            if (held != g_blockers.end()) return WXL_OK;
+            // A look the game is in already ends, with no click.
+            if (g_blockers.empty()) binding::input_mouse_look_stop();
+            g_blockers.push_back(mod);
+        }
+        else if (held != g_blockers.end())
+            g_blockers.erase(held);
+        return WXL_OK;
+    }
+
+    wxl_bool WXL_CALL MouseLookBlocked() { return g_blockers.empty() ? WXL_FALSE : WXL_TRUE; }
 }
 
 namespace wxl::core::services
@@ -170,6 +212,8 @@ namespace wxl::core::services
             table.capture_cursor     = &CaptureCursor;
             table.cursor_captured    = &CursorCaptured;
             table.pointer_over_world = &PointerOverWorld;
+            table.block_mouse_look   = &BlockMouseLook;
+            table.mouse_look_blocked = &MouseLookBlocked;
             return table;
         }();
         return api;
@@ -217,8 +261,53 @@ namespace wxl::core::services
             g_held = true;
         }
 
+        bool SetControlBit(int32_t* result, void* control, uint32_t* bit, uint32_t time)
+        {
+            if (g_blockers.empty() || !(*bit & kLookBits)) return false;
+            const uint32_t look = *bit & kLookBits;
+            if (look & kTurnPlayer) g_downTime[0] = time;
+            if (look & kTurnCamera) g_downTime[1] = time;
+            g_down |= look;
+            // Both buttons held: the game makes no click of either, nor will this.
+            if ((g_down & kLookBits) == kLookBits) binding::input_clear_pending_action(control);
+            const uint32_t rest = *bit & ~kLookBits;
+            if (rest)
+            {
+                *bit = rest;
+                return false;
+            }
+            *result = 0; // the bit is not set: the caller does not update the player for it
+            return true;
+        }
+
+        bool UnsetControlBit(int32_t* result, void* control, uint32_t* bit, uint32_t time)
+        {
+            const uint32_t mine = *bit & g_down;
+            if (!mine) return false;
+            g_down &= ~mine;
+            if (!g_down)
+            {
+                // The last button the gate held is up: a click if it was short, as the game's own.
+                const uint32_t pressed  = (mine & kTurnCamera) ? g_downTime[1] : g_downTime[0];
+                const uint32_t pending  = binding::input_pending_action(control);
+                binding::input_clear_pending_action(control);
+                if (pending && time - pressed < kClickMs)
+                    binding::input_default_action(pending == kReleaseSelect ? kButtonLeft : kButtonRight);
+            }
+            const uint32_t rest = *bit & ~mine;
+            if (rest)
+            {
+                *bit = rest;
+                return false;
+            }
+            *result = 0;
+            return true;
+        }
+
         void ForgetMod(uint32_t mod)
         {
+            const auto blocked = std::find(g_blockers.begin(), g_blockers.end(), mod);
+            if (blocked != g_blockers.end()) g_blockers.erase(blocked);
             const auto held = std::find(g_holders.begin(), g_holders.end(), mod);
             if (held == g_holders.end()) return;
             g_holders.erase(held);
@@ -228,7 +317,10 @@ namespace wxl::core::services
         void Clear()
         {
             g_holders.clear();
+            g_blockers.clear();
             LetGo();
         }
+
+        void* Window() { return g_window; }
     }
 }

@@ -6,6 +6,7 @@
 #include "wxl/seams/seams.h"
 
 #include "runtime/Core.hpp"
+#include "services/ImGuiService.hpp"
 #include "services/InputService.hpp"
 
 #include "wxl/events.h"
@@ -60,6 +61,13 @@ namespace wxl::seam::Input::WindowProc
         args.handled = &handled;
 
         wxl::core::services::input::NoteWindow(*window);
+        // Dear ImGui sees every message first: what it wants for a window of a mod's, the game
+        // and the mods do not see.
+        if (wxl::core::services::imgui::WindowMessage(*window, *message, *wparam, *lparam))
+        {
+            *result = 0;
+            return true;
+        }
         host->Raise(WXL_EV_Input, &args);
         // A message an Input handler left to the client goes on to the mouse's own events: the
         // raw motion, and the wheel, which a handler may keep from the client too.

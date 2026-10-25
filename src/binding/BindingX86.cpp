@@ -1409,6 +1409,60 @@ namespace wxl::core::binding
         return Read<const void*>(top, WXL_FIELD("CSimpleTop", "m_mouseFocus")) == frame ? WXL_TRUE : WXL_FALSE;
     }
 
+    // --- The game's mouse look -------------------------------------------------------------
+
+    uint32_t input_pending_action(const void* control)
+    {
+        if (!IsClient() || !control) return 0;
+        return Read<uint32_t>(control, WXL_FIELD("CGInputControl", "m_pendingDefaultAction"));
+    }
+
+    void input_clear_pending_action(void* control)
+    {
+        if (!IsClient() || !control) return;
+        const uint32_t none = 0; // INPUT_RELEASE_NONE
+        std::memcpy(static_cast<char*>(control) + WXL_FIELD("CGInputControl", "m_pendingDefaultAction"), &none, sizeof none);
+    }
+
+    wxl_bool input_default_action(uint32_t button)
+    {
+        // CGWorldFrame::PerformDefaultAction(MOUSEBUTTON): __thiscall, `ret 4` (0x004F7A38).
+        if (!IsClient() || !OnMainThread()) return WXL_FALSE;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        if (!frame) return WXL_FALSE;
+        CallMember<void>(WXL_SITE("CGWorldFrame::PerformDefaultAction", 0), frame, button);
+        return WXL_TRUE;
+    }
+
+    void input_mouse_look_stop(void)
+    {
+        // CGInputControl::UnsetControlBit(bit, time, keepSmoothing): __thiscall, `ret 0xC`
+        // (0x005FA46C, 0x005FA6A6). Its gate lets bits it did not keep go through.
+        if (!IsClient() || !OnMainThread()) return;
+        void* control = *reinterpret_cast<void* const*>(WXL_STATIC("CGInputControl::s_inputControl"));
+        if (!control) return;
+        if (!(Read<uint32_t>(control, WXL_FIELD("CGInputControl", "m_flags")) & 0x3u)) return;
+        input_clear_pending_action(control);
+        CallMember<int32_t>(WXL_SITE("CGInputControl::UnsetControlBit", 0), control, 0x3u, os_time_ms(), int32_t(0));
+    }
+
+    // --- Pose -----------------------------------------------------------------------------
+
+    void model_bone_flags(void* model, uint32_t bone, uint32_t flags, uint32_t mask)
+    {
+        // CM2Model::SetBoneFlags(boneId, flags, mask): __thiscall, `ret 0xC` (0x00826642).
+        if (!IsClient() || !model) return;
+        CallMember<void>(WXL_SITE("CM2Model::SetBoneFlags", 0), model, bone, flags, mask);
+    }
+
+    void model_bone_transform(void* model, uint32_t bone, const float* matrix)
+    {
+        // CM2Model::SetBoneProceduralTransform(boneId, const C44Matrix&): __thiscall, `ret 8`
+        // (0x00827357); the matrix is copied.
+        if (!IsClient() || !model || !matrix) return;
+        CallMember<void>(WXL_SITE("CM2Model::SetBoneProceduralTransform", 0), model, bone, matrix);
+    }
+
     // --- Memory ---------------------------------------------------------------------------
 
     namespace
