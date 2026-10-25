@@ -22,6 +22,10 @@
 #include "services/CameraService.hpp"
 #include "services/InputService.hpp"
 #include "services/WorldService.hpp"
+#include "services/ImGuiService.hpp"
+#include "services/PoseService.hpp"
+#include <imgui.h>
+#include <implot.h>
 #include "services/DataService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/GxService.hpp"
@@ -1562,6 +1566,43 @@ namespace
     FakeCamera  g_camera;
     FakeCamera* g_worldCamera = nullptr; ///< null out of the world
 
+    // The game's input control as the mouse-look rows read it, and what they were asked.
+    struct FakeInputControl
+    {
+        uint32_t pending = 0;
+    };
+    FakeInputControl      g_inputControl;
+    std::vector<uint32_t> g_defaultActions;
+    int                   g_lookStops = 0;
+
+    uint32_t WXL_CALL FakePendingAction(const void* c) { return static_cast<const FakeInputControl*>(c)->pending; }
+    void WXL_CALL FakeClearPending(void* c) { static_cast<FakeInputControl*>(c)->pending = 0; }
+    wxl_bool WXL_CALL FakeDefaultAction(uint32_t button)
+    {
+        g_defaultActions.push_back(button);
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeLookStop() { ++g_lookStops; }
+
+    // A model's head bone as the pose rows set it.
+    struct FakeHeadBone
+    {
+        uint32_t flags = 0;
+        float    matrix[16]{};
+        int      writes = 0;
+    };
+    FakeHeadBone g_headBone;
+    void WXL_CALL FakeBoneFlags(void*, uint32_t bone, uint32_t flags, uint32_t mask)
+    {
+        if (bone == 6) g_headBone.flags = (g_headBone.flags & ~mask) | (flags & mask);
+    }
+    void WXL_CALL FakeBoneTransform(void*, uint32_t bone, const float* m)
+    {
+        if (bone != 6) return;
+        std::memcpy(g_headBone.matrix, m, sizeof g_headBone.matrix);
+        ++g_headBone.writes;
+    }
+
     void* WXL_CALL FakeCameraWorld() { return g_worldCamera; }
 
     wxl_bool WXL_CALL FakeCameraRead(const void* camera, wxl_core_camera* out)
@@ -1730,6 +1771,12 @@ namespace
         init.action_face            = &FakeActFace;
         init.unit_is_outdoors       = &FakeOutdoors;
         init.camera_world           = &FakeCameraWorld;
+        init.input_pending_action   = &FakePendingAction;
+        init.input_clear_pending_action = &FakeClearPending;
+        init.input_default_action   = &FakeDefaultAction;
+        init.input_mouse_look_stop  = &FakeLookStop;
+        init.model_bone_flags       = &FakeBoneFlags;
+        init.model_bone_transform   = &FakeBoneTransform;
         init.camera_read            = &FakeCameraRead;
         init.camera_write           = &FakeCameraWrite;
         init.world_trace            = &FakeTrace;
@@ -3636,6 +3683,160 @@ namespace
     }
 
     // --- wxl.world: the client's line test ----------------------------------------------------
+
+    // --- wxl.input's block of the game's mouse look ---------------------------------------------
+
+    void CheckMouseLookBlock()
+    {
+        namespace in = wxl::core::services::input;
+        const wxl_input_api& api = wxl::core::services::InputApi();
+        void*    control = &g_inputControl;
+        uint32_t bit     = 0x2;
+        uint32_t time    = 1000;
+        int32_t  result  = -1;
+
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time),
+              "with no block, the left button's look goes to the game");
+        g_lookStops = 0;
+        Check(api.block_mouse_look(WXL_TRUE) == WXL_OK && api.mouse_look_blocked() == WXL_TRUE && g_lookStops == 1,
+              "a block ends a look the game is in");
+        api.block_mouse_look(WXL_TRUE);
+        Check(g_lookStops == 1, "blocking twice is one block");
+
+        // A click of the left button: the press noted, the release within 0.8 s selects.
+        g_inputControl.pending = 1; // INPUT_RELEASE_SELECT, as CameraOrSelectOrMoveStart notes it
+        g_defaultActions.clear();
+        bit = 0x2, time = 1000, result = -1;
+        Check(wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time) && result == 0,
+              "the press sets no look bit: the gate takes the call, answering 0");
+        int32_t keep = 0;
+        bit = 0x2, time = 1200, result = -1;
+        Check(wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep) && result == 0,
+              "the release is the gate's too");
+        Check(g_defaultActions.size() == 1 && g_defaultActions[0] == 1 && g_inputControl.pending == 0,
+              "a short click does the left button's default action, once");
+
+        // A right button held a second: nothing.
+        g_inputControl.pending = 2; // INPUT_RELEASE_ACTION
+        g_defaultActions.clear();
+        bit = 0x1, time = 5000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1, time = 6000;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.empty() && g_inputControl.pending == 0, "a long hold acts on nothing, as in the game");
+
+        // A right click acts.
+        g_inputControl.pending = 2;
+        bit = 0x1, time = 7000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1, time = 7100;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.size() == 1 && g_defaultActions[0] == 4, "a short right click does the right button's action");
+
+        // Both buttons: no click, as the game makes none.
+        g_defaultActions.clear();
+        g_inputControl.pending = 1;
+        bit = 0x2, time = 8000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x3, time = 8100;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.empty(), "pressing both buttons makes no click");
+
+        // Other bits go on, the look bits kept out.
+        bit = 0x12, time = 9000, result = -1;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time) && bit == 0x10,
+              "a call with a movement bit and a look bit goes on with the movement bit alone");
+        bit = 0x12, time = 9100;
+        Check(!wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep) && bit == 0x10,
+              "and so does its release");
+        bit = 0x10, result = -1;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time), "a movement bit alone is the game's");
+
+        in::ForgetMod(0);
+        Check(api.mouse_look_blocked() == WXL_FALSE, "a mod's block goes with it");
+        bit = 0x2;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time), "and the game looks again");
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.block_mouse_look(WXL_TRUE); }).join();
+        Check(fromThread == WXL_E_INVALID && api.mouse_look_blocked() == WXL_FALSE, "off the main thread a block is refused");
+    }
+
+    // --- wxl.pose: a head turned over the animation ----------------------------------------------
+
+    void CheckPose()
+    {
+        const wxl_pose_api& api = wxl::core::services::PoseApi();
+        FakeObject          wolf;
+        wolf.guid   = 0x781;
+        wolf.typeId = WXL_OBJECT_UNIT;
+        FakeObject stone;
+        stone.guid   = 0x782;
+        stone.typeId = WXL_OBJECT_ITEM;
+        wxl::seam::ObjectMgr::InitObject::After(&wolf, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&stone, nullptr, 100u);
+        const wxl_handle unit = wxl::core::objects::HandleOf(&wolf);
+        const wxl_handle item = wxl::core::objects::HandleOf(&stone);
+
+        Check(api.head(item, 0, 0, 0) == WXL_E_INVALID && api.head(0xDEAD, 0, 0, 0) == WXL_E_NOT_FOUND &&
+                  api.head(unit, std::numeric_limits<double>::quiet_NaN(), 0, 0) == WXL_E_INVALID,
+              "a head is a unit's, its angles numbers");
+        g_headBone = FakeHeadBone{};
+        Check(api.head(unit, 0.5, 0.25, 0.0) == WXL_OK, "a unit's head is turned");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        // The turn about z by 0.5 after a nod by -0.25 about y: row a's y is sin(0.5) * cos(0.25).
+        Check(g_headBone.flags == 0x80 && g_headBone.writes == 1 &&
+                  std::fabs(g_headBone.matrix[1] - std::sin(0.5f) * std::cos(0.25f)) < 1e-4f,
+              "the game's animation is told to apply it, and the head bone is turned as asked");
+        Check(api.head(unit, 9.0, -9.0, 0.0) == WXL_OK, "angles past a neck's");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(std::fabs(g_headBone.matrix[0] - std::cos(100.0f * 3.14159265f / 180.0f) * std::cos(80.0f * 3.14159265f / 180.0f)) < 1e-3f,
+              "are held to 100 degrees of yaw and 80 of pitch");
+        FakeObject other;
+        g_headBone.writes = 0;
+        wxl::seam::Unit::PreAnimate::After(&other, nullptr);
+        Check(g_headBone.writes == 0, "another unit's animation leaves the head alone");
+
+        Check(api.release_head(unit) == WXL_OK && api.release_head(unit) == WXL_E_NOT_FOUND, "a head is released once");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.flags == 0, "released at once, the bone goes back to the animation");
+        g_headBone.writes = 0;
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.writes == 0, "and is left alone after");
+
+        api.head(unit, 0.5, 0.0, 10.0);
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.flags == 0x80 && std::fabs(g_headBone.matrix[1]) < std::sin(0.5f) * 0.5f,
+              "a slow turn starts from where the head is");
+        wxl::core::services::pose::ForgetMod(0);
+        api.head(unit, 0, 0, 0); // turned again by the harness, which is mod 0
+        wxl::core::services::pose::Clear();
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.head(unit, 0, 0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a head is refused");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
+    }
+
+    // --- wxl.imgui: the contexts, with no device --------------------------------------------------
+
+    void CheckImGuiService()
+    {
+        const wxl_imgui_api& api = wxl::core::services::ImGuiApi();
+        Check(wxl::View(api.version()) == IMGUI_VERSION ";" IMPLOT_VERSION, "the version is Dear ImGui's and ImPlot's");
+        Check(api.context() != nullptr && api.plot_context() != nullptr && api.context() == api.context(),
+              "the contexts are made once, on first use");
+        void* alloc = nullptr;
+        void* release = nullptr;
+        api.allocators(&alloc, &release, nullptr);
+        Check(alloc && release, "with the allocator they were made with");
+        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0),
+              "before a frame was drawn, no message is ImGui's");
+        const wxl_frame_args frame{1, 0.016f};
+        wxl::core::services::imgui::Present(frame); // nobody listens: nothing
+        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0), "nor with nobody listening");
+    }
 
     void CheckWorldTrace()
     {
@@ -10444,6 +10645,9 @@ int main(int argc, char** argv)
     CheckInputService();
     CheckCamera();
     CheckWorldTrace();
+    CheckMouseLookBlock();
+    CheckPose();
+    CheckImGuiService();
     CheckStorage();
     CheckSound();
     CheckStorageService();

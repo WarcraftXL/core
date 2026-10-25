@@ -864,6 +864,12 @@ GROUND_TRUTH = {
     # 0x004FA7BC, two dwords pushed and none cleaned there (the caller's frame pops them), a bare
     # `ret`.
     "Camera.UpdateCallback":           ("0x00607B00", "cdecl", [], 2),
+    # The control bits, read by hand: SetControlBit reads ECX into ESI and [ebp+8] (0x005FA177,
+    # 0x005FA17B) and ends `ret 8`; UnsetControlBit ends `ret 0xC` (0x005FA46C, 0x005FA6A6).
+    # CGUnit_C::PreAnimate, a virtual, reads ECX and its frame, one `ret 4` (0x0073E40D).
+    "InputControl.SetControlBit":      ("0x005FA170", "thiscall", ["ecx"], 2),
+    "InputControl.UnsetControlBit":    ("0x005FA450", "thiscall", ["ecx"], 3),
+    "Unit.PreAnimate":                 ("0x0073DAB0", "thiscall", ["ecx"], 1),
     "Point.CM2Cache_CreateShared":     ("0x0081C390", "thiscall", ["ecx"], 2),
     "Point.CGWorldFrame_RenderWorld":  ("0x004FAF90", "cdecl", [], 1),
     "Point.vFrameScript_SignalEvent":  ("0x0081AC90", "cdecl", [], 3),
