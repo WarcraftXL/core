@@ -142,17 +142,17 @@ namespace wxl::core::services
 
     namespace imgui
     {
-        void Present(const wxl_frame_args& args)
+        bool BeginFrame()
         {
             wxl::host::ModHost* host = Host();
             if (!host || !host->Listening(WXL_EV_ImGuiFrame))
             {
                 g_running = false;
-                return;
+                return false;
             }
             auto* device = static_cast<IDirect3DDevice9*>(binding::gx_d3d9_device());
             HWND  window = static_cast<HWND>(input::Window());
-            if (!device || !window || binding::gx_has_context() != WXL_TRUE) return;
+            if (!device || !window || binding::gx_has_context() != WXL_TRUE) return false;
 
             Ensure();
             MakeCurrent();
@@ -166,14 +166,18 @@ namespace wxl::core::services
                 if (g_device) ImGui_ImplDX9_Shutdown();
                 g_device = ImGui_ImplDX9_Init(device) ? device : nullptr;
             }
-            if (!g_window || !g_device) return;
+            if (!g_window || !g_device) return false;
 
             ImGui_ImplDX9_NewFrame();
             ImGui_ImplWin32_NewFrame();
             Scale(window);
             ImGui::NewFrame();
-            host->Raise(WXL_EV_ImGuiFrame, &args);
-            MakeCurrent();
+            return true;
+        }
+
+        void EndFrame()
+        {
+            MakeCurrent(); // a mod's handler may have left its own copy current
             ImGui::Render();
             ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
             binding::gx_invalidate_state();

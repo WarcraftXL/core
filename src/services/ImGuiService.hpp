@@ -18,10 +18,13 @@ namespace wxl::core::services
 
     namespace imgui
     {
-        /// The game is about to show the frame `args` closes: while a mod listens to ImGuiFrame,
-        /// a frame of ImGui is opened, the event raised, and what the mods added drawn with the
-        /// game's device. Main thread, in the device's scene.
-        void Present(const wxl_frame_args& args);
+        /// The game is about to show a frame: while a mod listens to ImGuiFrame and the device can
+        /// draw, a frame of ImGui is opened (true), for the caller to raise the event in. Main
+        /// thread, in the device's scene.
+        bool BeginFrame();
+
+        /// Draws what the mods added to the frame BeginFrame opened, with the game's device.
+        void EndFrame();
 
         /// A message reached the game's window procedure: ImGui is told, and true when it wants
         /// it for itself (a window under the pointer, a text field typed in): the game must not

@@ -55,7 +55,11 @@ namespace wxl::seam::Gx::ScenePresent
         if (!wxl::core::frame::End(args)) return;
         if (!host) return;
         // The mods' Dear ImGui windows, over the game's interface, while the device is in its scene.
-        wxl::core::services::imgui::Present(args);
+        if (wxl::core::services::imgui::BeginFrame())
+        {
+            host->Raise(WXL_EV_ImGuiFrame, &args);
+            wxl::core::services::imgui::EndFrame();
+        }
         host->Raise(WXL_EV_FrameEnd, &args);
     }
 }
