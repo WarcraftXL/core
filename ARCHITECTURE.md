@@ -288,6 +288,24 @@ reports of mods and a walk of the address space. `MemoryPressure` is looked for 
 `Gx.ScenePresent`, about once a second while a mod holds a threshold. Lua mods report through
 wxl.lua, which names each one's heap and reports at its own snapshot.
 
+### The camera and the pointer
+
+`wxl.camera` (`src/services/CameraService.cpp`) keeps the views mods set, newest first. The
+`Camera.UpdateCallback` seam is on the one function that places the world camera each frame,
+called from inside the world pass (`CGWorldFrame::RenderWorld`, then `OnWorldUpdate`), right
+before the projection and the sound listener are set from the camera: its After raises
+`CameraUpdate` and the service writes the first view over the client's (`binding/camera.def`:
+position, facing rows built as `CSimpleCamera::SetFacing` builds them and taken into a parent's
+frame on a vehicle or a transport, `m_fov`). The client's camera runs underneath; only its field
+of view outlives a frame, and the seam's Before puts it back before the client's own update.
+
+`wxl.input` (`src/services/InputService.cpp`) holds the pointer for the mods that capture it:
+at every present (`Gx.ScenePresent`) it is clipped to the pixel at the centre of the window and
+the device stops drawing it (`binding/input.def`), while the game's own pointer state stays on, so
+its picking and clicks act at the centre. The window procedure's gate raises `MouseMotion` from
+raw input, which the service registers for the window at the first capture or listener, and
+`MouseWheel`, which a handler keeps from the client.
+
 ### The profiler
 
 WarcraftXL.dll carries the process's one Tracy client (`deps/tracy`, v0.14.1), compiled with
@@ -402,7 +420,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.
