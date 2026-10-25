@@ -6,6 +6,7 @@
 #include "points/PointsX86.hpp"
 
 #include "common/Log.hpp"
+#include "deinlined/Deinlined.hpp"
 #include "hook/Engine.hpp"
 #include "hook/Safety.hpp"
 #include "points/DetourX86.hpp"
@@ -18,6 +19,11 @@
 #include <cstring>
 #include <utility>
 #include <vector>
+
+namespace wxl::core::deinlined
+{
+    volatile uint8_t g_armed[points::kCount > 0 ? points::kCount : 1] = {};
+}
 
 namespace wxl::core::points
 {
@@ -66,6 +72,46 @@ namespace wxl::core::points
             uint32_t    index;
             const char* why;
         };
+
+        // --- De-inlined points: a recompiled parent body in which they are functions ------------
+
+        /// After every seam and wxl.hook link and the parent's own point: the recompiled body
+        /// takes the place of Wow.exe's, and whatever ran in front of it still does.
+        constexpr int kBodyPriority = INT_MAX;
+
+        struct Deinlined
+        {
+            uint32_t index;
+            uint32_t parent;
+            void*  (*body)();
+        };
+
+        const Deinlined kDeinlined[] = {
+            {kCount, kCount, nullptr},
+#define WXL_POINT_X86(Ident, name, address, length, conv, ret, params)
+#define WXL_POINT_SITE(Ident, address, args)
+#define WXL_POINT_X86_ABSENT(Ident, why)
+#define WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params) {k##Ident, k##Parent, &deinlined::Body_##Parent},
+#include "wxl/points/x86.def"
+#undef WXL_POINT_X86_DEINLINED
+#undef WXL_POINT_X86_ABSENT
+#undef WXL_POINT_SITE
+#undef WXL_POINT_X86
+        };
+
+        const Deinlined* DeinlinedOf(uint32_t index)
+        {
+            for (const Deinlined& row : kDeinlined)
+                if (row.index == index && row.body) return &row;
+            return nullptr;
+        }
+
+        /// Per parent: the body in place (a link of its chain), how many armed points need it, and
+        /// the body the harness put in place of the generated one.
+        wxl::hook::Id g_bodyLinks[kCount > 0 ? kCount : 1] = {};
+        uint32_t      g_bodyUsers[kCount > 0 ? kCount : 1] = {};
+        void*         g_bodyNext[kCount > 0 ? kCount : 1]  = {};
+        void*         g_bodyPlaced[kCount > 0 ? kCount : 1] = {};
 
         const Absent kAbsent[] = {
             {kCount, ""},
@@ -246,6 +292,8 @@ namespace wxl::core::points
     {
         IndexRows();
         if (index >= kCount) return false;
+        if (const Deinlined* row = DeinlinedOf(index))
+            return Has(row->parent, why);
         if (!g_byIndex[index])
         {
             if (why)
@@ -267,6 +315,32 @@ namespace wxl::core::points
     bool Arm(uint32_t index, char* why, size_t capacity)
     {
         IndexRows();
+        if (const Deinlined* deinlined = DeinlinedOf(index))
+        {
+            const uint32_t parent = deinlined->parent;
+            Detoured*      host   = g_byIndex[parent];
+            if (!host)
+            {
+                snprintf(why, capacity, "its parent %s has no x86 detour", RowOf(parent).name);
+                return false;
+            }
+            if (g_bodyUsers[parent] == 0)
+            {
+                char name[160];
+                snprintf(name, sizeof name, "%s (recompiled)", RowOf(parent).name);
+                void* const body = g_bodyPlaced[parent] ? g_bodyPlaced[parent] : deinlined->body();
+                const wxl::hook::Id link =
+                    wxl::hook::Attach(name, reinterpret_cast<void*>(host->address), body, &g_bodyNext[parent],
+                                      kBodyPriority, wxl::hook::Backend::SafetyHook, host->length, why, capacity);
+                if (link == wxl::hook::kNone) return false;
+                g_bodyLinks[parent] = link;
+                WLOG_INFO(kTag, "%s runs its recompiled body: %s is a function of its own in it", RowOf(parent).name,
+                          RowOf(index).name);
+            }
+            ++g_bodyUsers[parent];
+            deinlined::g_armed[index] = 1;
+            return true;
+        }
         Detoured* row = index < kCount ? g_byIndex[index] : nullptr;
         if (!row)
         {
@@ -289,6 +363,19 @@ namespace wxl::core::points
 
     void Disarm(uint32_t index)
     {
+        if (const Deinlined* deinlined = DeinlinedOf(index))
+        {
+            const uint32_t parent = deinlined->parent;
+            if (!deinlined::g_armed[index]) return;
+            deinlined::g_armed[index] = 0;
+            if (g_bodyUsers[parent] && --g_bodyUsers[parent] == 0 && g_bodyLinks[parent] != wxl::hook::kNone)
+            {
+                wxl::hook::Detach(g_bodyLinks[parent]);
+                g_bodyLinks[parent] = wxl::hook::kNone;
+                WLOG_INFO(kTag, "%s runs Wow.exe's own body again", RowOf(parent).name);
+            }
+            return;
+        }
         if (index >= kCount || g_links[index] == wxl::hook::kNone) return;
         wxl::hook::Detach(g_links[index]);
         g_links[index] = wxl::hook::kNone;
@@ -318,5 +405,12 @@ namespace wxl::core::points
             IndexRows();
             return index < kCount && g_byIndex[index] ? g_byIndex[index]->detour : nullptr;
         }
+
+        void PlaceBody(uint32_t parent, void* body)
+        {
+            if (parent < kCount) g_bodyPlaced[parent] = body;
+        }
+
+        bool BodyInPlace(uint32_t parent) { return parent < kCount && g_bodyLinks[parent] != wxl::hook::kNone; }
     }
 }

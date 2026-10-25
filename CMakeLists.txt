@@ -175,6 +175,7 @@ add_library(wxl-core SHARED
     src/services/FootprintService.cpp
     src/services/ActionService.cpp
     src/services/GxService.cpp
+    src/services/EngineService.cpp
     src/services/M2Service.cpp
     src/services/M2FileService.cpp
     ${WXL_SEAM_BODIES}
@@ -189,7 +190,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -214,6 +215,7 @@ add_executable(wxl-core-seam-harness
     src/services/FootprintService.cpp
     src/services/ActionService.cpp
     src/services/GxService.cpp
+    src/services/EngineService.cpp
     src/services/M2Service.cpp
     src/services/M2FileService.cpp
     ${WXL_SEAM_BODIES}
@@ -222,7 +224,7 @@ add_executable(wxl-core-seam-harness
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -323,6 +325,7 @@ if(WXL_CORE_X86)
         src/hook/Engine.cpp
         src/hook/Points.cpp
         src/points/PointsX86.cpp
+        src/deinlined/CM2Shared_FinishLoading.gen.cpp
         src/services/HookService.cpp
         src/services/PatchService.cpp)
     target_link_libraries(wxl-core PRIVATE minhook wxl-safetyhook)
@@ -332,8 +335,31 @@ if(WXL_CORE_X86)
         src/seams/RegparmX86.cpp
         src/runtime/Image.cpp
         src/hook/Engine.cpp
-        src/points/PointsX86.cpp)
+        src/points/PointsX86.cpp
+        src/deinlined/CM2Shared_FinishLoading.gen.cpp)
     target_link_libraries(wxl-core-seam-harness PRIVATE minhook wxl-safetyhook)
+
+    # --- The recompiled bodies against Wow.exe ------------------------------------------------------
+    # src/deinlined/ run against a stock Wow.exe 12340's own code, laid at its own base in this
+    # executable's .bss: linked low and fixed, so that the reservation covers 0x00400000 and up.
+    # Given no Wow.exe (WXL_WOW_EXE, at configure or run time), it says so and passes.
+    add_executable(wxl-core-stock-tests
+        tests/stock_tests.cpp
+        src/points/Points.cpp
+        src/points/PointsX86.cpp
+        src/deinlined/CM2Shared_FinishLoading.gen.cpp
+        src/hook/Engine.cpp
+        src/runtime/Image.cpp
+        src/common/Log.cpp)
+    target_include_directories(wxl-core-stock-tests PRIVATE src include)
+    target_link_libraries(wxl-core-stock-tests PRIVATE wxl::host wxl::runtime wxl::engine minhook wxl-safetyhook)
+    target_compile_definitions(wxl-core-stock-tests PRIVATE ${WXL_CORE_DEFS} WXL_CORE_BUILD)
+    # Sections on 64 KB: the free memory after the image then starts where VirtualAlloc can reserve,
+    # which SafetyHook's search for a trampoline near Wow.exe's functions needs.
+    target_link_options(wxl-core-stock-tests PRIVATE /BASE:0x10000 /DYNAMICBASE:NO /FIXED /ALIGN:0x10000)
+    target_compile_options(wxl-core-stock-tests PRIVATE /W4 /permissive-)
+    set(WXL_WOW_EXE "$ENV{WXL_WOW_EXE}" CACHE FILEPATH "A stock Wow.exe 12340, for wxl-core-stock-tests")
+    add_test(NAME stock COMMAND wxl-core-stock-tests ${WXL_WOW_EXE})
 
     # --- wxl-core-patcher.exe ----------------------------------------------------------------------
     add_executable(wxl-core-patcher

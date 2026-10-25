@@ -26,7 +26,8 @@ import check_seams as cxx  # noqa: E402  (strip_cxx, split_top_level, balanced, 
 #
 # A point's signature is reduced to sizes and classes before anything else sees it, so a rename or
 # a retype upstream (int32_t to an enum of the same size) changes neither the contract nor a mod's
-# layout hash. Every pointer is `ptr`: the engine types reach mods in a later wave.
+# layout hash. Every pointer is `ptr`, and so is a reference: both pass an address in Microsoft's
+# two ABIs; a handler is handed the address and writes through it.
 
 SCALARS = {
     # spelled in the fork              lowered   C type of the contract
@@ -69,10 +70,10 @@ def lower(spelled, what):
     """(lowered kind, contract C type) of a type as the fork spells it."""
     t = re.sub(r"\s+", " ", spelled.replace("const ", " ").replace(" const", " ")).strip()
     t = t.replace("struct ", "").replace("class ", "").strip()
-    if "&" in t:
-        raise Problem("%s is a reference (%s); a point passes scalars and pointers only, so far"
+    if "&&" in t:
+        raise Problem("%s is an rvalue reference (%s); a point passes scalars, pointers and references"
                       % (what, spelled))
-    if "*" in t:
+    if "*" in t or "&" in t:
         return "ptr", "void*"
     if t in SCALARS:
         return SCALARS[t]
@@ -87,6 +88,30 @@ class Param:
         self.kind = None
         self.ctype = None
 
+    @property
+    def reference(self):
+        """Whether the fork passes it by reference: the point carries its address."""
+        return "&" in self.spelled
+
+
+def split_name(name):
+    """(qualified name, [parameter types] or None) of a points.txt name: `M2Init(uint8_t*,M2Data&)`
+    names one overload of M2Init by its parameter types, as the fork spells them."""
+    if "(" not in name:
+        return name, None
+    if not name.endswith(")"):
+        raise Problem("`%s`: a name with parameter types ends with `)`" % name)
+    base, inner = name[:-1].split("(", 1)
+    return base, [normal_type(t) for t in inner.split(",")] if inner.strip() else []
+
+
+def normal_type(spelled):
+    """A parameter type compared across spellings: no spaces, no top-level const on a value."""
+    t = re.sub(r"\s+", " ", spelled).strip()
+    t = re.sub(r"\s*([*&])\s*", r"\1", t)
+    t = t.replace("struct ", "").replace("class ", "")
+    return t.replace(" ", "")
+
 
 class Point:
     """One line of points.txt, completed."""
@@ -94,7 +119,10 @@ class Point:
     def __init__(self, index, address, name, policy, thread, stability, note, origin):
         self.index = index
         self.address = address        # int, or None for a function inlined on x86
-        self.name = name              # qualified, as the fork writes it
+        self.name = name              # qualified, as the fork writes it (with its parameter
+                                      # types when the fork overloads it)
+        self.base_name, self.overload = split_name(name)
+        self.deinlined_in = None      # the point whose recompiled x86 body holds this one's copy
         self.policy = policy
         self.thread = thread
         self.stability = stability
@@ -116,8 +144,13 @@ class Point:
 
     @property
     def ident(self):
-        """The C identifier of the point: CGCamera::UpdateCallback is CGCamera_UpdateCallback."""
-        return re.sub(r"\W", "_", self.name.replace("::", "_"))
+        """The C identifier of the point: CGCamera::UpdateCallback is CGCamera_UpdateCallback; an
+        overload adds the bare names of its parameter types: M2Init(uint8_t*,uint32_t,M2Data&) is
+        M2Init_uint8_t_uint32_t_M2Data."""
+        ident = re.sub(r"\W", "_", self.base_name.replace("::", "_"))
+        if self.overload is not None:
+            ident += "".join("_" + re.sub(r"\W", "", t) for t in self.overload) or "_void"
+        return ident
 
     @property
     def convention(self):
@@ -154,6 +187,7 @@ class Point:
 
 POINT_LINE = re.compile(r"^(0x[0-9A-Fa-f]{8}|-)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(?:#\s*(.*))?$")
 SITE_LINE = re.compile(r"^site\s+(\S+)\s+(0x[0-9A-Fa-f]{8})\s+(.+?)\s*(?:#.*)?$")
+DEINLINE_LINE = re.compile(r"^deinlined\s+(\S+)\s+(\S+)\s*(?:#.*)?$")
 SOURCE = re.compile(r"^(?:e?(?:ax|bx|cx|dx|si|di|bp)|\[(?:esp|ebp)\s*[+-]\s*(?:0x[0-9A-Fa-f]+|\d+)\])$")
 
 
@@ -165,6 +199,19 @@ def read_list(path):
         if not line or line.startswith("#"):
             continue
         origin = "%s:%d" % (path.name, number)
+        deinlined = DEINLINE_LINE.match(line)
+        if deinlined:
+            point, parent = by_name.get(deinlined.group(1)), by_name.get(deinlined.group(2))
+            if point is None or parent is None:
+                problems.append("%s: deinlined names %s, which no line above names"
+                                % (origin, deinlined.group(1) if point is None else deinlined.group(2)))
+                continue
+            if point.address is not None:
+                problems.append("%s: %s has an x86 address; deinlined is for a function the x86 compiler "
+                                "inlined (address `-`)" % (origin, point.name))
+                continue
+            point.deinlined_in = parent
+            continue
         site = SITE_LINE.match(line)
         if site:
             point = by_name.get(site.group(1))
@@ -248,8 +295,24 @@ def definition_at(text, name, near_line):
     return None
 
 
-def find_inlined(client, name):
-    """(file, line) of the `// INLINED` definition of a function the x86 compiler inlined."""
+def definition_params(text, name, near_line):
+    """[normalised parameter types] of the definition of `name` at or after `near_line`."""
+    found = definition_at(text, name, near_line)
+    if not found:
+        return None
+    inner = found[3]
+    decls = [] if inner.strip() in ("", "void") else cxx.split_top_level(inner)
+    out = []
+    for decl in decls:
+        decl = decl.split("=")[0].strip()
+        m = re.match(r"^(.*?[\s*&])([A-Za-z_]\w*)$", decl)
+        out.append(normal_type(m.group(1) if m else decl))
+    return out
+
+
+def find_inlined(client, name, overload=None):
+    """(file, line) of the `// INLINED` definition of a function the x86 compiler inlined; with
+    `overload`, of the one whose parameter types are those."""
     tail = name.split("::")[-1]
     hits = []
     for path in sorted(client.rglob("*.cpp")):
@@ -265,6 +328,10 @@ def find_inlined(client, name):
                 continue
             following = "\n".join(lines[i + 1:i + 4])
             if re.search(r"(?<![\w:])" + re.escape(name) + r"\s*\(", following):
+                if overload is not None:
+                    params = definition_params(cxx.strip_cxx(raw), name, i + 1)
+                    if params != overload:
+                        continue
                 hits.append((rel, i + 2))
     return hits
 
@@ -317,15 +384,15 @@ def complete(point, client, offsets, cache, problems):
             if not rows:
                 raise Problem("no OFFSET tag of the fork is at 0x%08X" % point.address)
             names = sorted({r[0] for r in rows})
-            if point.name not in names:
+            if point.base_name not in names:
                 raise Problem("the fork tags 0x%08X as %s, not %s" % (point.address, ", ".join(names),
-                                                                       point.name))
-            row = next(r for r in rows if r[0] == point.name)
+                                                                       point.base_name))
+            row = next(r for r in rows if r[0] == point.base_name)
             point.length = row[2]
             point.file, point.line = Path(row[3]), row[4]
             if len(names) > 1:
                 point.x86_why = ("its x86 body is shared with %d other function(s) the linker folded "
-                                 "into one (%s)" % (len(names) - 1, ", ".join(n for n in names if n != point.name)))
+                                 "into one (%s)" % (len(names) - 1, ", ".join(n for n in names if n != point.base_name)))
             elif 0 < point.length < 5:
                 point.x86_why = "its x86 body is %d byte(s), too short for a detour" % point.length
             elif point.length == 0:
@@ -333,16 +400,18 @@ def complete(point, client, offsets, cache, problems):
             else:
                 point.x86 = True
         else:
-            hits = find_inlined(client, point.name)
+            hits = find_inlined(client, point.base_name, point.overload)
             if len(hits) != 1:
                 raise Problem("no single `// INLINED` definition of %s in the fork (%d found); an "
-                              "address of `-` is for a function the fork tags so" % (point.name, len(hits)))
+                              "address of `-` is for a function the fork tags so%s"
+                              % (point.name, len(hits), "" if point.overload is not None or len(hits) < 2 else
+                                 "; name the overload by its parameter types, `%s(type,type)`" % point.name))
             point.file, point.line = hits[0]
             point.x86_why = "the x86 compiler inlined it into its callers: it has no address"
 
         raw = (client / point.file).read_text(encoding="utf-8", errors="replace")
         text = cxx.strip_cxx(raw)
-        found = definition_at(text, point.name, point.line - 2)
+        found = definition_at(text, point.base_name, point.line - 2)
         if not found:
             raise Problem("its definition was not found at %s:%d" % (point.file.as_posix(), point.line))
         _, brace, head, inner = found
@@ -365,9 +434,13 @@ def complete(point, client, offsets, cache, problems):
             param = Param(m.group(1).strip(), m.group(2))
             param.kind, param.ctype = lower(param.spelled, "parameter %d of %s" % (i + 1, point.name))
             point.params.append(param)
+        if point.overload is not None and [normal_type(p.spelled) for p in point.params] != point.overload:
+            raise Problem("its definition at %s:%d takes (%s), not the (%s) its name says"
+                          % (point.file.as_posix(), point.line, ", ".join(p.spelled for p in point.params),
+                             ", ".join(point.overload)))
         point.ret_kind  # checks the return lowers
 
-        parts = point.name.split("::")
+        parts = point.base_name.split("::")
         if len(parts) > 1:
             static = is_static_member(client, parts[-2], parts[-1], cache)
             if static is False:
@@ -390,6 +463,16 @@ def load(points_txt, client, generated):
     cache = {}
     for point in points:
         complete(point, client, offsets, cache, problems)
+    for point in points:
+        parent = point.deinlined_in
+        if parent is None:
+            continue
+        if not parent.x86:
+            problems.append("%s: %s is deinlined in %s, which has no x86 detour (%s)"
+                            % (point.origin, point.name, parent.name, parent.x86_why or "?"))
+            continue
+        point.x86 = True
+        point.x86_why = ""
         for address, args, origin in point.sites:
             if not point.x86 and point.address is not None:
                 problems.append("%s: a site of %s, which has no x86 detour" % (origin, point.name))

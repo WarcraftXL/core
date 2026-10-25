@@ -33,8 +33,8 @@ WXL_SEAM_RAISES(M2Shared, LoadSucceededCallback, ModelLoad)
 WXL_SEAM_BEFORE(M2Shared, FinishLoadingSkinProfile, "CM2Shared::FinishLoadingSkinProfile", int32_t, thiscall, (void* self, uint32_t size))
 WXL_SEAM_RAISES(M2Shared, FinishLoadingSkinProfile, SkinProfileLoad)
 
-// The model loader's stages after the read. CM2Shared::FinishLoading (inlined into
-// LoadSucceededCallback on x86) parses the file in place, then initializes it -- skin profile
+// The model loader's stages after the read. CM2Shared::FinishLoading (0x0083CF00, reached by
+// LoadSucceededCallback's tail jump) parses the file in place, then initializes it -- skin profile
 // chosen and requested, textures made -- and the skin profile, read in turn, is parsed and sized
 // for drawing. A mod that teaches the client a model format reshapes the file at these points,
 // with wxl.m2file.

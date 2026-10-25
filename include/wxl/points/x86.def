@@ -15,7 +15,16 @@
 //       point's Before handlers with each argument read where `args` says ("ecx,[esp+8]").
 //   WXL_POINT_X86_ABSENT(Ident, why)
 //       a point of wxl/points.def x86 cannot detour, and why: what find() and list() tell a mod.
+//   WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params)
+//       a point the 2008 compiler inlined into the function of point Parent: the runtime replaces
+//       Parent's x86 body with its recompilation (src/deinlined/), in which this function is a
+//       real one, entered through the point while it has handlers. Its signature as the contract
+//       carries it (a reference is its address).
 
+#ifndef WXL_POINT_X86_DEINLINED
+#define WXL_POINT_X86_DEINLINED(Ident, name, Parent, ret, params)
+#define WXL_POINT_X86_DEINLINED_DEFAULTED
+#endif
 #ifndef WXL_POINT_X86
 #error "define WXL_POINT_X86(Ident, name, address, length, conv, ret, params) before including x86.def"
 #endif
@@ -31,4 +40,10 @@ WXL_POINT_X86(CM2Cache_CreateShared, "CM2Cache::CreateShared", 0x0081C390, 837, 
 WXL_POINT_X86(CGWorldFrame_RenderWorld, "CGWorldFrame::RenderWorld", 0x004FAF90, 233, cdecl, void, (void* param))
 WXL_POINT_X86(vFrameScript_SignalEvent, "vFrameScript_SignalEvent", 0x0081AC90, 492, cdecl, void, (uint32_t index, void* format, void* args))
 WXL_POINT_X86(NetClient_ProcessMessage, "NetClient::ProcessMessage", 0x00631FE0, 104, thiscall, int32_t, (void* self, uint32_t timeReceived, void* msg, int32_t unused_a4))
-WXL_POINT_X86_ABSENT(CM2Shared_FinishLoading, "x64 only: the x86 compiler inlined it into its callers: it has no address")
+WXL_POINT_X86(CM2Shared_FinishLoading, "CM2Shared::FinishLoading", 0x0083CF00, 962, thiscall, int32_t, (void* self))
+WXL_POINT_X86_DEINLINED(M2Init_uint8_t_uint32_t_M2Data, "M2Init(uint8_t*,uint32_t,M2Data&)", CM2Shared_FinishLoading, int32_t, (void* base, uint32_t size, void* data))
+
+#ifdef WXL_POINT_X86_DEINLINED_DEFAULTED
+#undef WXL_POINT_X86_DEINLINED
+#undef WXL_POINT_X86_DEINLINED_DEFAULTED
+#endif
