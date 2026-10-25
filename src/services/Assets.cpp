@@ -14,7 +14,6 @@
 // reads a provider's file exactly as it reads a loose file, on whichever thread it reads it.
 
 #include "services/Assets.hpp"
-#include "services/StorageService.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -23,7 +22,6 @@
 #include "wxl/core/filestack.hpp"
 #include "wxl/host/guard.hpp"
 #include "wxl/host/mod_host.hpp"
-#include "wxl/scoped_name.hpp"
 
 #include <windows.h>
 
@@ -884,34 +882,12 @@ namespace wxl::core::services::assets
 
     const Resolution& LastResolution() { return t_resolution; }
 
-    bool AnySource(const char* name, Candidate* out, uint32_t* layer)
-    {
-        Candidate found{};
-        if (!BestSource(name, INT32_MIN, &found)) return false;
-        if (out) *out = found;
-        if (layer) *layer = SourceLayer(found.id, nullptr);
-        return true;
-    }
-
     uint32_t SourceLayer(uint32_t id, std::string* mod)
     {
         const SourcePtr source = ById(id);
         if (!source) return WXL_FILE_LAYER_NONE;
         if (mod) *mod = ModName(source->mod);
         return source->served ? WXL_FILE_LAYER_SERVED : WXL_FILE_LAYER_PROVIDER;
-    }
-
-    bool Unscoped(const char* name, char* out, size_t capacity)
-    {
-        if (!name || !out || !capacity || !std::strchr(name, '[')) return false;
-        wxl::ScopedParts parts;
-        if (!wxl::SplitScopedName(name, &parts) || parts.base.size() + 1 > capacity) return false;
-        // The scoped name itself first: a folder of the search path or a source that has it.
-        char folder[512];
-        if (wxl::core::services::storage::BestFolder(name, folder, sizeof folder, nullptr)) return false;
-        if (AnySource(name, nullptr, nullptr)) return false;
-        std::memcpy(out, parts.base.c_str(), parts.base.size() + 1);
-        return true;
     }
 
     void ClearPending() { t_pending = false; }

@@ -15,7 +15,6 @@
 
 #include "wxl/host/mod_host.hpp"
 #include "wxl/runtime/handles.hpp"
-#include "wxl/scoped_name.hpp"
 
 #include <windows.h>
 
@@ -679,16 +678,7 @@ namespace
         return DropOverrides(Asking(), &key) ? WXL_OK : WXL_E_NOT_FOUND;
     }
 
-    // --- scoped names, hashes, reloads -------------------------------------------------------
-
-    wxl_str WXL_CALL ScopedNameOf(wxl_str mod, wxl_str path)
-    {
-        thread_local std::string scoped;
-        const std::string_view   owner = mod.data && mod.size ? std::string_view(mod.data, mod.size)
-                                                              : std::string_view(ModId(Asking()));
-        scoped = wxl::ScopedName(owner, path.data ? std::string_view(path.data, path.size) : std::string_view());
-        return wxl_str{scoped.c_str(), static_cast<uint32_t>(scoped.size())};
-    }
+    // --- hashes, reloads -------------------------------------------------------------------
 
     wxl_result WXL_CALL HashFile(wxl_str path, uint32_t flags, wxl_file_hash* out)
     {
@@ -735,7 +725,6 @@ namespace
         &HashFileAsync,
         &OverrideFile,
         &RestoreFile,
-        &ScopedNameOf,
         &ReloadAsset,
     };
 }

@@ -21,7 +21,6 @@
 #include <cstring>
 #include <string>
 
-#include "wxl/scoped_name.hpp"
 
 namespace
 {
@@ -40,9 +39,6 @@ namespace
 
     /// The name an override puts in place of the one asked, held as long as g_redirect.
     thread_local char g_override[512];
-
-    /// The base name a scoped name nobody serves falls back to, held as long as g_redirect.
-    thread_local char g_unscoped[512];
 
     /// What an existence check looks up in place of the name asked, held as long as the check.
     thread_local char g_findName[512];
@@ -142,8 +138,6 @@ namespace wxl::seam::Storage::OpenFile
         const char* opened = g_redirect[0] ? g_redirect : asked;
         if (g_redirect[0]) WLOG_DEBUG(wxl::core::kTag, "file %s redirected to %s", asked, g_redirect);
 
-        // A name in a mod's scope that nothing serves: the client's own file of its base name.
-        if (assets::Unscoped(opened, g_unscoped, sizeof g_unscoped)) opened = g_unscoped;
 
         // The one thing only a gate can do: what the client opens is not what it asked for.
         NoteAsked(asked, opened);
@@ -164,14 +158,13 @@ namespace wxl::seam::Storage::FindFile
         assets::ClearPending();
 
         // An existence check -- no archive asked back, which only SFile::OpenEx asks -- has not
-        // been through the open's gate: an override and a scope are looked at here.
+        // been through the open's gate: an override is looked at here.
         const bool exists = !archive || !*archive;
         if (exists && mode == assets::Mode::Normal && !storage::Listing())
         {
             const char* asked   = *name;
             const char* current = asked;
             if (storage::Overridden(current, g_findName, sizeof g_findName)) current = g_findName;
-            if (assets::Unscoped(current, g_unscoped, sizeof g_unscoped)) current = g_unscoped;
             NoteAsked(asked, current);
             *name = current;
         }
@@ -284,15 +277,10 @@ namespace wxl::seam::Storage::FindFileResult
         if (mode != assets::Mode::Normal || assets::ModAsking() || !host || !host->Listening(WXL_EV_FileMissing)) return;
 
         const std::string asked = t_askedFor == name ? std::string(t_asked) : std::string(name);
-        wxl::ScopedParts  parts;
-        const bool        scoped = wxl::SplitScopedName(asked, &parts);
-        const std::string base   = scoped ? parts.base : asked;
 
         wxl_file_missing_args args{};
         args.path    = wxl_str{asked.c_str(), static_cast<uint32_t>(asked.size())};
-        args.base    = wxl_str{base.c_str(), static_cast<uint32_t>(base.size())};
-        args.scope   = wxl_str{parts.mod.c_str(), static_cast<uint32_t>(scoped ? parts.mod.size() : 0)};
-        args.kind    = KindOf(base);
+        args.kind    = KindOf(asked);
         args.open    = archive ? WXL_TRUE : WXL_FALSE;
         args.pending = assets::PendingSeen() ? WXL_TRUE : WXL_FALSE;
         args.loader  = host->OnMainThread() ? WXL_FALSE : WXL_TRUE;

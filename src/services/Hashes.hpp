@@ -16,7 +16,7 @@ namespace wxl::core::services::hashes
      * @brief Hashes a file, any thread: what wxl_storage_api::hash_file answers.
      *
      * The name is resolved as the client's open resolves it (a served database, an override, a
-     * redirect, a scope) and read in the asset pipeline's Inner mode: the layers answer, the
+     * redirect) and read in the asset pipeline's Inner mode: the layers answer, the
      * transforms and the events do not. @p out's source is valid until the thread's next call.
      */
     wxl_result Hash(const char* name, uint32_t flags, wxl_file_hash* out);

@@ -113,20 +113,9 @@ namespace wxl::core::services::assets
     /// The calling thread's last lookup since ClearResolution; layer NONE when none was noted.
     const Resolution& LastResolution();
 
-    /// Whether a source holds @p name whatever its priority -- a provider, bytes a mod serves --,
-    /// and which; the layer it is (PROVIDER or SERVED) through @p layer.
-    bool AnySource(const char* name, Candidate* out, uint32_t* layer);
-
     /// The layer a source id is (PROVIDER or SERVED), and the id of the mod that added it; NONE
     /// for an id no source has.
     uint32_t SourceLayer(uint32_t id, std::string* mod);
-
-    /**
-     * @brief The base name a scoped name falls back to: when @p name is in a mod's scope and no
-     *        folder of the search path, provider or served bytes has it, its name without the
-     *        scope, written to @p out. False, nothing written, otherwise.
-     */
-    bool Unscoped(const char* name, char* out, size_t capacity);
 
     // --- the members of wxl.storage -----------------------------------------------------------
 

@@ -165,7 +165,7 @@ namespace
     }
 
     /// The name an open of @p asked opens, as the client's open resolves it: a database a mod
-    /// serves, an override, a redirect, a scope.
+    /// serves, an override, a redirect.
     std::string Resolve(const char* asked)
     {
         char        buffer[512];
@@ -173,7 +173,6 @@ namespace
         if (wxl::core::services::data::ServedPath(name.c_str(), name.size(), buffer, sizeof buffer)) return buffer;
         if (wxl::core::services::storage::Overridden(name.c_str(), buffer, sizeof buffer)) name = buffer;
         if (wxl::core::services::storage::Redirected(name.c_str(), buffer, sizeof buffer)) name = buffer;
-        if (assets::Unscoped(name.c_str(), buffer, sizeof buffer)) name = buffer;
         return name;
     }
 

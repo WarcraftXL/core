@@ -44,7 +44,6 @@
 #include "wxl/objects/map.hpp"
 #include "wxl/runtime/handles.hpp"
 #include "wxl/core/filestack.hpp"
-#include "wxl/scoped_name.hpp"
 #include "wxl/services/script.h"
 #include "wxl/services/storage.h"
 
@@ -4571,12 +4570,12 @@ namespace
         g_files.clear();
     }
 
-    // --- the asset bricks: names nobody has, content hashes, overrides, scopes, reloads, relay ---
+    // --- the asset bricks: names nobody has, content hashes, overrides, reloads, the relay ------
 
     /// A FileMissing as a handler saw it, its strings copied while they were valid.
     struct Missing
     {
-        std::string path, base, scope;
+        std::string path;
         uint32_t    kind    = 0;
         bool        open    = false;
         bool        pending = false;
@@ -4589,8 +4588,6 @@ namespace
         const auto& args = *static_cast<const wxl_file_missing_args*>(data);
         Missing     seen;
         seen.path    = std::string(args.path.data, args.path.size);
-        seen.base    = std::string(args.base.data, args.base.size);
-        seen.scope   = args.scope.size ? std::string(args.scope.data, args.scope.size) : std::string();
         seen.kind    = args.kind;
         seen.open    = args.open == WXL_TRUE;
         seen.pending = args.pending == WXL_TRUE;
@@ -4700,7 +4697,7 @@ namespace
         namespace assets = wxl::core::services::assets;
         const wxl_storage_api& api = wxl::core::services::StorageApi();
         Check(api.struct_size >= offsetof(wxl_storage_api, reload_asset) + sizeof(void*),
-              "wxl.storage carries hashes, overrides, scoped names and reloads");
+              "wxl.storage carries hashes, overrides and reloads");
 
         BuildFakeStack();
         g_files.clear();
@@ -4713,8 +4710,7 @@ namespace
         g_missing.clear();
         void* none = FakeFileOpen("Creature\\Nowhere\\Nowhere.m2");
         Check(!none && g_missing.size() == 1 && g_missing[0].path == "Creature\\Nowhere\\Nowhere.m2" &&
-                  g_missing[0].kind == WXL_ASSET_MODEL && g_missing[0].open && !g_missing[0].pending &&
-                  g_missing[0].scope.empty() && g_missing[0].base == g_missing[0].path,
+                  g_missing[0].kind == WXL_ASSET_MODEL && g_missing[0].open && !g_missing[0].pending,
               "an open no layer answers raises FileMissing: the name, a model, an open");
         g_missing.clear();
         Check(FakeFileExists("Interface\\None.toc") == WXL_FALSE && g_missing.size() == 1 && !g_missing[0].open &&
@@ -4736,37 +4732,14 @@ namespace
                   "a name a provider answers \"not yet\" for is missing and pending");
             api.remove_provider(id);
         }
-        g_missing.clear();
-        Check(!FakeFileOpen("Creature\\X\\X[my.mod].m2") && g_missing.size() == 1 &&
-                  g_missing[0].path == "Creature\\X\\X[my.mod].m2" && g_missing[0].scope == "my.mod" &&
-                  g_missing[0].base == "Creature\\X\\X.m2",
-              "a scoped name neither it nor its base has: the name asked, its scope and its base");
-
-        // --- scoped names ---
-        const auto scoped = [&](const char* mod, const char* path) {
-            const wxl_str name = api.scoped_name(Str(mod), Str(path));
-            return std::string(name.data ? name.data : "", name.size);
-        };
-        Check(scoped("my.mod", "Creature\\Foo\\Foo.m2") == "Creature\\Foo\\Foo[my.mod].m2" &&
-                  scoped("my.mod", "Interface\\Readme") == "Interface\\Readme[my.mod]" &&
-                  scoped("my.mod", "Dir.v2\\File") == "Dir.v2\\File[my.mod]",
-              "a scope is the mod's id in brackets before the file name's extension");
-        Check(scoped("a]b", "X.m2").empty() && scoped("my.mod", "X[my.mod].m2").empty() && scoped("my.mod", "").empty(),
-              "no scope for a mod id it cannot hold, a name already in one, or no name");
-        {
-            wxl::ScopedParts parts;
-            Check(wxl::SplitScopedName("Creature\\Foo\\Foo[my.mod]00.skin", &parts) && parts.mod == "my.mod" &&
-                      parts.base == "Creature\\Foo\\Foo00.skin" && !wxl::SplitScopedName("World\\[x]\\a.txt"),
-                  "what the client derives from a scoped model stays in its scope; a bracket of a folder is none");
-        }
-        Check(ReadAll(api, "World\\Base[my.mod].txt") == "the client's" && api.exists(Str("World\\Base[my.mod].txt")),
-              "a scoped name nothing serves is the client's own file");
-        Check(api.serve(Str("World\\Base[my.mod].txt"), "mine", 4, 0) == WXL_OK &&
-                  ReadAll(api, "World\\Base[my.mod].txt") == "mine" && ReadAll(api, "World\\Base.txt") == "the client's",
-              "served at 0, the scoped name is the mod's copy and the client's file stays its own");
+        // --- a path of the mod's own, beside the client's ---
+        Check(api.exists(Str("World\\Mine\\Base.txt")) == WXL_FALSE &&
+                  api.serve(Str("World\\Mine\\Base.txt"), "mine", 4, 0) == WXL_OK &&
+                  ReadAll(api, "World\\Mine\\Base.txt") == "mine" && ReadAll(api, "World\\Base.txt") == "the client's",
+              "served at 0 under a new path, the mod's copy lives beside the client's file");
 
         // --- overrides ---
-        Check(api.override_file(Str("World\\Base.txt"), Str("World\\Base[my.mod].txt")) == WXL_OK &&
+        Check(api.override_file(Str("World\\Base.txt"), Str("World\\Mine\\Base.txt")) == WXL_OK &&
                   ReadAll(api, "World\\Base.txt") == "mine",
               "an override puts the mod's copy in place of the client's file");
         Check(FakeFileExists("World\\Ghost.txt") == WXL_FALSE &&
@@ -4776,8 +4749,8 @@ namespace
         {
             constexpr uint32_t kOther = 9;
             const uint32_t previous = g_host->SwapCurrentMod(kOther);
-            api.serve(Str("World\\Base[other].txt"), "theirs", 6, 0);
-            api.override_file(Str("World\\Base.txt"), Str("World\\Base[other].txt"));
+            api.serve(Str("World\\Theirs\\Base.txt"), "theirs", 6, 0);
+            api.override_file(Str("World\\Base.txt"), Str("World\\Theirs\\Base.txt"));
             const std::string latest = ReadAll(api, "World\\Base.txt");
             wxl::core::services::storage::RemoveOverridesOf(kOther);
             assets::ReleaseOf(kOther);
@@ -4785,9 +4758,10 @@ namespace
             Check(latest == "theirs" && ReadAll(api, "World\\Base.txt") == "mine",
                   "the latest of two mods' overrides wins, and its mod going uncovers the earlier");
         }
-        api.unserve(Str("World\\Base[my.mod].txt"));
-        Check(ReadAll(api, "World\\Base.txt") == "the client's",
-              "an override whose scoped copy is gone falls back to the client's own file");
+        api.unserve(Str("World\\Mine\\Base.txt"));
+        g_missing.clear();
+        Check(!FakeFileOpen("World\\Base.txt") && g_missing.size() == 1 && g_missing[0].path == "World\\Base.txt",
+              "an override whose copy is gone leaves nothing to read, and FileMissing names the file asked for");
         Check(api.restore_file(Str("World\\Base.txt")) == WXL_OK && api.restore_file(Str("World\\Base.txt")) == WXL_E_NOT_FOUND &&
                   api.restore_file(Str("World\\Ghost.txt")) == WXL_OK && FakeFileExists("World\\Ghost.txt") == WXL_FALSE,
               "restored once; again is not found; the client's answers come back");
@@ -4809,15 +4783,15 @@ namespace
         Check(api.hash_file(Str("World\\Base.txt"), WXL_HASH_FRESH, &hash) == WXL_OK &&
                   Hex(hash.md5) == "06489070e9742e6455e883d71adf48a8",
               "WXL_HASH_FRESH reads it again");
-        api.serve(Str("World\\Base[my.mod].txt"), "mine", 4, 0);
-        Check(api.hash_file(Str("World\\Base[my.mod].txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "918b81db5e91d031548b963c93845e5b" &&
+        api.serve(Str("World\\Mine\\Base.txt"), "mine", 4, 0);
+        Check(api.hash_file(Str("World\\Mine\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "918b81db5e91d031548b963c93845e5b" &&
                   hash.layer == WXL_FILE_LAYER_SERVED,
               "served bytes hash as they are served");
-        api.override_file(Str("World\\Base.txt"), Str("World\\Base[my.mod].txt"));
+        api.override_file(Str("World\\Base.txt"), Str("World\\Mine\\Base.txt"));
         Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && hash.layer == WXL_FILE_LAYER_SERVED,
               "an overridden name hashes as what the client would read");
         api.restore_file(Str("World\\Base.txt"));
-        api.unserve(Str("World\\Base[my.mod].txt"));
+        api.unserve(Str("World\\Mine\\Base.txt"));
         g_missing.clear();
         Check(api.hash_file(Str("World\\Nothing.txt"), 0, &hash) == WXL_E_NOT_FOUND && g_missing.empty(),
               "a name no layer has is not found, and raises nothing");
