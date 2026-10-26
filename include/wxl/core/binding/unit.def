@@ -94,6 +94,15 @@ WXL_BINDING(unit_aura_at, const void*, (const void* object, uint32_t index), (ob
 // entity, which the indoor flag of the WMO group it stands in decides.
 WXL_BINDING(unit_is_outdoors, wxl_bool, (const void* object), (object), WXL_FALSE)
 
+// Whether `unit` may attack `target`: CGUnit_C::CanAttack(const CGUnit_C*), the client's own test
+// of factions, duels, PvP flags and sanctuaries behind its attack cursor and its target filters.
+WXL_BINDING(unit_can_attack, wxl_bool, (const void* unit, const void* target), (unit, target), WXL_FALSE)
+
+// Whether `unit` can interact with `target` now: CGUnit_C::CanInteractNow(const CGUnit_C*), alive,
+// out of combat, not charmed, of a reaction that lets it (CGPlayer_C::CanInteract). The speech
+// cursor also wants NPC flags, which the read adds.
+WXL_BINDING(unit_can_interact, wxl_bool, (const void* unit, const void* target), (unit, target), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

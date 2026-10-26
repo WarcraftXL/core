@@ -21,6 +21,12 @@ WXL_BINDING_FIELD_VIA(gameobject_state, int8_t, CGGameObject_C, m_gameObject, CG
 WXL_BINDING_FIELD_VIA(gameobject_type_id, int8_t, CGGameObject_C, m_gameObject, CGGameObjectData, m_typeID, 0)
 WXL_BINDING_FIELD_VIA(gameobject_art_kit, int8_t, CGGameObject_C, m_gameObject, CGGameObjectData, m_artKit, 0)
 
+// Whether the active player can use the game object now, as CGGameObject_C_TypeBase::
+// CanChangeCursor decides the cursor over it: CGGameObject_C::CanHighlight (its kind can be
+// highlighted, its quest is in the player's log) and its type helper's CanUseNow(error,
+// distance, text) (virtual slot 7), where ERR_USE_TOO_FAR (240) alone still counts as usable.
+WXL_BINDING(gameobject_can_use, wxl_bool, (const void* object), (object), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

@@ -1400,6 +1400,38 @@ namespace wxl::core::binding
         return CallMember<int32_t>(WXL_SITE("CGUnit_C::IsOutdoors", 0), object) ? WXL_TRUE : WXL_FALSE;
     }
 
+    wxl_bool unit_can_attack(const void* unit, const void* target)
+    {
+        // CGUnit_C::CanAttack(const CGUnit_C*): __thiscall, `ret 4`; the answer is AL alone.
+        if (!IsClient() || !OnMainThread() || !unit || !target) return WXL_FALSE;
+        return CallMember<bool>(WXL_SITE("CGUnit_C::CanAttack", 0), unit, target) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool unit_can_interact(const void* unit, const void* target)
+    {
+        // CGUnit_C::CanInteractNow(const CGUnit_C*): __thiscall, `ret 4`; the answer is AL alone.
+        if (!IsClient() || !OnMainThread() || !unit || !target) return WXL_FALSE;
+        return CallMember<bool>(WXL_SITE("CGUnit_C::CanInteractNow", 0), unit, target) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool gameobject_can_use(const void* object)
+    {
+        // CGGameObject_C::CanHighlight: __thiscall, no argument (a virtual of the object, called
+        // here at its address); its type helper's CanUseNow(error, distance, text): __thiscall,
+        // `ret 0xC`, virtual slot 7 (`call [eax + 0x1C]` in CanChangeCursor, 0x0070F9BE); both
+        // answer AL alone.
+        if (!IsClient() || !OnMainThread() || !object) return WXL_FALSE;
+        if (!CallMember<bool>(WXL_SITE("CGGameObject_C::CanHighlight", 0), object)) return WXL_FALSE;
+        const void* helper = Read<const void*>(object, WXL_FIELD("CGGameObject_C", "m_typeData"));
+        if (!helper) return WXL_FALSE;
+        const uintptr_t canUseNow = (*reinterpret_cast<const uintptr_t* const*>(helper))[7];
+        uint32_t        error     = 0;
+        float           distance  = 0.0f;
+        const char*     text      = nullptr;
+        if (CallMember<bool>(canUseNow, helper, &error, &distance, &text)) return WXL_TRUE;
+        return error == 240 ? WXL_TRUE : WXL_FALSE; // ERR_USE_TOO_FAR: usable once in reach
+    }
+
     const void* item_stats(const void* object)
     {
         // __thiscall, no argument: g_itemDBCache.GetRecord(entry, no guid, no callback).
@@ -1726,6 +1758,42 @@ namespace wxl::core::binding
         if (!(Read<uint32_t>(control, WXL_FIELD("CGInputControl", "m_flags")) & 0x3u)) return;
         input_clear_pending_action(control);
         CallMember<int32_t>(WXL_SITE("CGInputControl::UnsetControlBit", 0), control, 0x3u, os_time_ms(), int32_t(0));
+    }
+
+    uint32_t input_click_hit(const void* frame, uint64_t* guid, wxl_vec3* point)
+    {
+        // As CGWorldFrame::PerformDefaultAction reads it (0x004F7880): the active player, not
+        // charmed; a name plate under the pointer (CGUnit_C::GetNamePlateFocus reads the static);
+        // then m_defaultActionHitKind (0 none, 1 ground, 2 a model, 3 a map object).
+        if (guid) *guid = 0;
+        if (point) *point = wxl_vec3{0.0f, 0.0f, 0.0f};
+        if (!IsClient() || !frame) return 0;
+        const void* player = local_player_object();
+        if (!player || unit_charmed_by(player)) return 0;
+        const void* plate = *reinterpret_cast<const void* const*>(WXL_STATIC("CGUnit_C::s_namePlateFocus"));
+        if (plate)
+        {
+            if (guid) *guid = Read<uint64_t>(plate, WXL_FIELD("CGNamePlateFrame", "m_guid"));
+            return 4;
+        }
+        const uint32_t kind = Read<uint32_t>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHitKind"));
+        if (kind > 3) return 0;
+        if (guid) *guid = Read<uint64_t>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHit.m_guid"));
+        if (point) *point = Read<wxl_vec3>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHit.m_point"));
+        // A ground or map-object hit passes its guid on only when it names a game object.
+        if (guid && (kind == 1 || kind == 3))
+        {
+            const uint32_t high = static_cast<uint32_t>(*guid >> 32);
+            if ((high & 0xF0000000u) != 0x10000000u || (high & 0x0FF00000u) != 0x0FC00000u) *guid = 0;
+        }
+        return kind;
+    }
+
+    wxl_bool input_spell_targeting(void)
+    {
+        // Spell_C_IsTargeting (0x007FD620) answers s_targetingSpell != nullptr.
+        if (!IsClient()) return WXL_FALSE;
+        return *reinterpret_cast<const void* const*>(WXL_STATIC("s_targetingSpell")) ? WXL_TRUE : WXL_FALSE;
     }
 
     // --- Pose -----------------------------------------------------------------------------

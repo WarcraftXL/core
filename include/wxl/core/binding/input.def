@@ -42,6 +42,17 @@ WXL_BINDING(input_default_action, wxl_bool, (uint32_t button), (button), WXL_FAL
 // CGInputControl::UnsetControlBit of both look bits, as the game's MouselookStop does.
 WXL_BINDING(input_mouse_look_stop, void, (void), (), (void)0)
 
+// What the world frame's default action will act on, as CGWorldFrame::PerformDefaultAction reads
+// it: a wxl_world_hit. 4 (a name plate) when CGUnit_C::s_namePlateFocus holds one, with its
+// unit's guid; else m_defaultActionHitKind with m_defaultActionHit's guid and point (the guid of
+// a ground hit only when it names a game object, as the function passes it on). 0 with no active
+// player, or one charmed. guid and point are written for every answer (0 for none).
+WXL_BINDING(input_click_hit, uint32_t, (const void* frame, uint64_t* guid, wxl_vec3* point), (frame, guid, point), 0)
+
+// Whether a spell waits for its target, the cursor the spell's: Spell_C_IsTargeting
+// (s_targetingSpell set).
+WXL_BINDING(input_spell_targeting, wxl_bool, (void), (), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

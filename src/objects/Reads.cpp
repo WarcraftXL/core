@@ -307,6 +307,32 @@ namespace wxl::core::objects
         return true;
     }
 
+    // --- what the active player can do with it -----------------------------------------------
+
+    bool ClientObjects::UnitCanAttack(void* object, wxl_bool& out) const
+    {
+        const void* player = binding::local_player_object();
+        if (!player) return false;
+        out = binding::unit_can_attack(player, object);
+        return true;
+    }
+
+    bool ClientObjects::UnitCanInteract(void* object, wxl_bool& out) const
+    {
+        // As the speech cursor: the client's CanInteractNow, and something the NPC offers.
+        const void* player = binding::local_player_object();
+        if (!player) return false;
+        out = binding::unit_npc_flags(object) != 0 && binding::unit_can_interact(player, object) ? WXL_TRUE : WXL_FALSE;
+        return true;
+    }
+
+    bool ClientObjects::GameObjectCanUse(void* object, wxl_bool& out) const
+    {
+        if (!binding::local_player_object()) return false;
+        out = binding::gameobject_can_use(object);
+        return true;
+    }
+
     // --- the active player's group -----------------------------------------------------------
 
     bool ClientObjects::PlayerPartySize(void*, uint32_t& out) const

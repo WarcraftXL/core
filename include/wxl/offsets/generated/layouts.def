@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 136 types, 840 field offsets, 11 member sizes.
+// 137 types, 844 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -125,6 +125,8 @@ WXL_LAYOUT_FIELD(CGItemData, "m_itemFieldDurability", 0xD8, "WoW/Source/Object/I
 WXL_LAYOUT_FIELD(CGItemData, "m_itemFieldMaxdurability", 0xDC, "WoW/Source/Object/Item.h", 39)
 WXL_LAYOUT_TYPE(CGItem_C, "CGItem_C", 0x3E0, "WoW/Source/Object/ObjectClient/Item_C.h", 29)
 WXL_LAYOUT_FIELD(CGItem_C, "m_item", 0xD4, "WoW/Source/Object/ObjectClient/Item_C.h", 29)
+WXL_LAYOUT_TYPE(CGNamePlateFrame, "CGNamePlateFrame", 0x300, "WoW/Source/Ui/NamePlateFrame.h", 19)
+WXL_LAYOUT_FIELD(CGNamePlateFrame, "m_guid", 0x2A8, "WoW/Source/Ui/NamePlateFrame.h", 19)
 WXL_LAYOUT_TYPE(CGObjectData, "CGObjectData", 0x18, "WoW/Source/Object/Object.h", 29)
 WXL_LAYOUT_FIELD(CGObjectData, "m_guid", 0x0, "WoW/Source/Object/Object.h", 29)
 WXL_LAYOUT_FIELD(CGObjectData, "m_type", 0x8, "WoW/Source/Object/Object.h", 29)
@@ -191,6 +193,9 @@ WXL_LAYOUT_FIELD(CGUnit_C, "m_auras.m_dynamic.m_data", 0xC58, "WoW/Source/Object
 WXL_LAYOUT_FIELD(CGUnit_C, "m_auras.m_count", 0xDD0, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_TYPE(CGWorldFrame, "CGWorldFrame", 0x7E28, "WoW/Source/Ui/WorldFrame.h", 106)
 WXL_LAYOUT_FIELD(CGWorldFrame, "m_simpleTop", 0xA0, "WoW/Source/Ui/WorldFrame.h", 106)
+WXL_LAYOUT_FIELD(CGWorldFrame, "m_defaultActionHitKind", 0x2D8, "WoW/Source/Ui/WorldFrame.h", 106)
+WXL_LAYOUT_FIELD(CGWorldFrame, "m_defaultActionHit.m_guid", 0x2E0, "WoW/Source/Ui/WorldFrame.h", 106)
+WXL_LAYOUT_FIELD(CGWorldFrame, "m_defaultActionHit.m_point", 0x2E8, "WoW/Source/Ui/WorldFrame.h", 106)
 WXL_LAYOUT_FIELD(CGWorldFrame, "m_defaultActionPointDDC.x", 0x310, "WoW/Source/Ui/WorldFrame.h", 106)
 WXL_LAYOUT_FIELD(CGWorldFrame, "m_defaultActionPointDDC.y", 0x314, "WoW/Source/Ui/WorldFrame.h", 106)
 WXL_LAYOUT_FIELD(CGWorldFrame, "m_camera", 0x7E20, "WoW/Source/Ui/WorldFrame.h", 106)

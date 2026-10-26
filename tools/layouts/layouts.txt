@@ -1232,6 +1232,13 @@ type CGWorldFrame WoW/Source/Ui/WorldFrame.h CGWorldFrame
   m_defaultActionPointDDC.x               game/World:kWorldFrameCursorDdcX
   m_defaultActionPointDDC.y               game/World:kWorldFrameCursorDdcY
   m_camera                                game/World:kWorldFrameCamera
+  m_defaultActionHitKind                  -                                            # binding input_click_hit: the hit the default action acts on
+  m_defaultActionHit.m_guid               -                                            # binding input_click_hit
+  m_defaultActionHit.m_point              -                                            # binding input_click_hit
+
+type CGNamePlateFrame WoW/Source/Ui/NamePlateFrame.h CGNamePlateFrame
+  sizeof                                  -
+  m_guid                                  -                                            # binding input_click_hit: the name plate's unit
 
 type CSimpleTop Engine/Source/Frame/CSimpleTop.h CSimpleTop
   sizeof                                  -
