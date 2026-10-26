@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.25-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.26-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -345,6 +345,7 @@ source. Everything else observes.
 | `Unit.PreAnimate` | `CGUnit_C::PreAnimate(void* frame)` | After applies the head turns of `wxl.pose` |
 | `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
 | `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world |
+| `WorldFrame.PerformDefaultAction` (gated) | `CGWorldFrame::PerformDefaultAction(MOUSEBUTTON button)` | `WorldClickRequest` with what the click met (a name plate, a model, the ground, a map object, nothing) and whether a spell waits for its target; a mod that refuses it keeps the game from acting on the click |
 | `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
 | `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound. The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens |

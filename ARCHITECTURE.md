@@ -322,6 +322,9 @@ The game's mouse look starts when a key binding's Lua action sets a look bit wit
 blocks it (`wxl.input`), the two gates of `seams/inputcontrol.def` keep the look bits from the
 game, note when each button went down, and at the release do the default action the press noted
 (`CGWorldFrame::PerformDefaultAction`) when it came within 0.8 s: the game never holds a button.
+Whatever path the click comes by, `PerformDefaultAction` is where the game acts on it; its gate
+(`seams/worldframe.def`) raises `WorldClickRequest` with what the press noted under the pointer,
+and a mod that refuses it keeps the game from selecting, talking, looting or walking.
 
 `wxl.pose` (`src/services/PoseService.cpp`) keeps the heads mods turned; after each
 `CGUnit_C::PreAnimate` (`Unit.PreAnimate`), where the game sets its own twist, the head moves on
