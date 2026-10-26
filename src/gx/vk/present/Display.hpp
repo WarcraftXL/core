@@ -2,9 +2,12 @@
 // Copyright (c) 2026 WarcraftXL
 //
 // A frame from its first command to the image shown. The engine's back buffer is the scene, an
-// image of the renderer's own (its colour and its depth) at the size the engine renders at; the
-// frame clears it and draws into it, then the present pass draws it onto the swapchain's image and
-// the frame is submitted and presented. The window's states (resized, minimised, its surface lost,
+// image of the renderer's own (its colour and its depth) at the size the engine renders at, with
+// as many samples per pixel as the engine's format asks (gxMultisample, D3D9's multisampled back
+// buffer); the frame clears it and draws into it, then the present pass draws it (resolved, when
+// multisampled) onto the swapchain's image and the frame is submitted and presented. A copy or a
+// readback of the scene reads it resolved, as D3D9's StretchRect from a multisampled back buffer
+// does; a readback submits the frame so far and waits for it, then the frame goes on. The window's states (resized, minimised, its surface lost,
 // out of date) are absorbed here as rebuilds; only a lost device reaches the caller as a loss.
 //
 // Without a surface the frame is drawn and submitted but not shown; with an offscreen target (the
@@ -54,6 +57,10 @@ namespace wxl::vk::present
         /// A rendering of the frame is about to end (its queries end inside it), then has ended.
         virtual void RenderingEnding(VkCommandBuffer cmd) { (void)cmd; }
         virtual void RenderingEnded(VkCommandBuffer cmd) { (void)cmd; }
+        /// The frame so far is about to be submitted in the middle of the frame (a readback): what
+        /// the upload pass holds open is closed, as before the frame's own submission; the frame
+        /// goes on after, in the same slot, its upload pass empty again.
+        virtual void FrameFlushing(VkCommandBuffer upload) { (void)upload; }
 
     protected:
         ~FrameHook() = default;
@@ -97,6 +104,9 @@ namespace wxl::vk::present
             uint64_t surfaces_lost = 0;
             uint64_t acquire_timeouts = 0;
             uint64_t scenes = 0; ///< scene images made (the first, and each resize)
+            uint64_t resolves = 0; ///< multisampled scenes resolved (for a copy, a readback, the image shown)
+            uint64_t flushes = 0;  ///< frames submitted and waited for in their middle (readbacks)
+            uint64_t readbacks = 0; ///< rectangles of the scene read back to the CPU
         };
 
         Display() = default;
@@ -123,6 +133,13 @@ namespace wxl::vk::present
         void SetWindowExtent(VkExtent2D extent);
         /// The engine's back buffer size: the scene is made again at the next use when it changes.
         void SetSceneExtent(VkExtent2D extent);
+        /// The engine's samples per pixel (its format's multisample count): the scene is made again at
+        /// the next use with the most the device draws colour and depth with, at most @p count.
+        void SetSamples(uint32_t count);
+        /// The scene's samples per pixel (1 when not multisampled).
+        uint32_t Samples() const { return static_cast<uint32_t>(samples_); }
+        /// The sample counts the device draws the scene's colour and depth with (VkSampleCountFlags).
+        uint32_t SampleCounts() const;
         void SetSync(Sync sync);
         /// Frames shown at least @p interval_ns apart (0: no limit).
         void SetInterval(uint64_t interval_ns) { limiter_.SetInterval(interval_ns); }
@@ -179,9 +196,33 @@ namespace wxl::vk::present
         /// The size of the open rendering's images (the scene's when none is open).
         VkExtent2D      RenderingExtent() const { return rendering_ == Rendering::Target ? target_extent_ : scene_extent_; }
         /// The scene made (at the size wanted) and in COLOR_ATTACHMENT_OPTIMAL for this frame,
-        /// outside any rendering: what a copy from it starts from. False outside a frame.
+        /// outside any rendering. False outside a frame.
         bool            PrepareScene();
+        /**
+         * @brief The scene's colour with one sample per pixel, outside any rendering and in
+         *        COLOR_ATTACHMENT_OPTIMAL: the scene itself, or its resolved copy when it is
+         *        multisampled (resolved now if drawn into since). What a copy or a readback reads.
+         *        Null outside a frame.
+         */
+        const resources::Image* ResolveScene();
+        /// The scene's images: its colour (multisampled or not), and the image shown and copied from.
         const resources::Image& SceneImage() const { return scene_; }
+        const resources::Image& Shown() const { return samples_ > VK_SAMPLE_COUNT_1_BIT ? resolve_ : scene_; }
+
+        /**
+         * @brief Submits what the open frame recorded so far and waits for it (bounded), then opens
+         *        the same frame again: what D3D9's synchronous readbacks imply. False when the device
+         *        did not complete it (a timeout marks it lost).
+         */
+        bool Flush();
+
+        /**
+         * @brief D3D9's readback of the back buffer (GetRenderTargetData, or a StretchRect into a
+         *        lockable surface when multisampled): @p rect of the scene, resolved, as B8G8R8A8
+         *        rows into @p bgra (rect.extent.width x rect.extent.height pixels), the frame
+         *        submitted so far and waited for. False outside a frame or when it could not be read.
+         */
+        bool ReadScene(VkRect2D rect, uint32_t* bgra);
         /// Grows at each rendering begun: what a recorder bound inside the previous one (its
         /// pipeline, its descriptor set, its dynamic states) is to be set again.
         uint64_t        RenderingEpoch() const { return epoch_; }
@@ -245,8 +286,13 @@ namespace wxl::vk::present
         Sync         sync_ = Sync::On;
         VkExtent2D   window_{0, 0};
 
-        resources::Image  scene_;
+        resources::Image  scene_;   ///< the colour drawn into (multisampled when samples_ > 1)
+        resources::Image  resolve_; ///< its one-sample copy, when multisampled
         resources::Image  depth_;
+        VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
+        uint32_t          samples_wanted_ = 1;
+        bool              msaa_dirty_ = false; ///< drawn into since the last resolve
+        resources::Buffer pixels_; ///< what ReadScene copies into
         VkFormat          depth_format_ = VK_FORMAT_UNDEFINED;
         VkExtent2D        scene_extent_{0, 0};
         VkExtent2D        scene_wanted_{0, 0};

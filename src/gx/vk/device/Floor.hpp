@@ -31,6 +31,7 @@ namespace wxl::vk::device
     X(shaderSampledImageArrayDynamicIndexing, "1.0", true, core10)                                  \
     X(dynamicRendering, "1.3", true, v13)                                                           \
     X(synchronization2, "1.3", true, v13)                                                           \
+    X(shaderDemoteToHelperInvocation, "1.3", true, v13)                                             \
     X(samplerAnisotropy, "1.0", false, core10)                                                      \
     X(textureCompressionBC, "1.0", false, core10)                                                   \
     X(largePoints, "1.0", false, core10)                                                            \
@@ -48,8 +49,8 @@ namespace wxl::vk::device
 #define WXL_VK_EXTENSIONS(X)                                                                        \
     X(swapchain, VK_KHR_SWAPCHAIN_EXTENSION_NAME, false)                                            \
     X(memory_budget, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, true)                                     \
-    X(graphics_pipeline_library, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME, false)            \
-    X(pipeline_library, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, false)                              \
+    X(graphics_pipeline_library, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME, true)             \
+    X(pipeline_library, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, true)                               \
     X(extended_dynamic_state3, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false)               \
     X(vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, false)          \
     X(unified_image_layouts, VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false)                    \
@@ -60,6 +61,9 @@ namespace wxl::vk::device
 #define WXL_VK_FEATURE_MEMBER(member, version, required, where) bool member = false;
         WXL_VK_FEATURES(WXL_VK_FEATURE_MEMBER)
 #undef WXL_VK_FEATURE_MEMBER
+        /// VK_EXT_graphics_pipeline_library's feature: pipelines linked from parts (read only where
+        /// the extension is, enabled with it).
+        bool graphicsPipelineLibrary = false;
     };
 
     struct Extensions

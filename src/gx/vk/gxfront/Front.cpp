@@ -120,13 +120,16 @@ namespace wxl::vk::gxfront
         {
             paths.pipeline_cache = options_.cache_dir + "pipelines.bin";
             paths.shader_pack    = options_.cache_dir + "shaders.pack";
+            paths.pipeline_keys  = options_.cache_dir + "pipelines.keys";
         }
+        paths.async_pipelines = options_.async_pipelines;
         if (!display_.Create(context_, allocator_, timeline_, display, why, why_size) ||
             !renderer_.Create(context_, allocator_, display_, paths, why, why_size))
             return false;
         const VkExtent2D extent = ClientExtent(window_);
         display_.SetWindowExtent(extent);
         display_.SetSceneExtent(extent);
+        if (device_) display_.SetSamples(Engine(device_)->m_format.m_multisampleCount);
         if (window_ && !display_.SetSurface(&MakeSurface, this, why, why_size)) return false;
 
         // A first frame, waited for within the bound: the queue answers, and with a window the
@@ -222,6 +225,8 @@ namespace wxl::vk::gxfront
         const VkExtent2D extent = ClientExtent(window);
         display_.SetWindowExtent(extent);
         display_.SetSceneExtent(extent);
+        // A new format (DeviceSetFormat makes the window again): its multisample count too.
+        display_.SetSamples(Engine(device_)->m_format.m_multisampleCount);
         ReadRefresh();
         GammaChanged();
         return display_.SetSurface(&MakeSurface, this, why, why_size);
@@ -675,6 +680,12 @@ namespace wxl::vk::gxfront
         return renderer_.CopyScene(target, level, face, from, to, linear);
     }
 
+    bool Front::ReadPixels(int32_t x, int32_t y, uint32_t width, uint32_t height, uint32_t* bgra)
+    {
+        if (!renderer_.Ready() || !display_.InFrame() || !bgra) return false;
+        return display_.ReadScene(VkRect2D{{x, y}, {width, height}}, bgra);
+    }
+
     uint32_t Front::QueryCreate() { return renderer_.Ready() ? renderer_.CreateQuery() : 0; }
     void     Front::QueryDestroy(uint32_t query) { renderer_.DestroyQuery(query); }
     bool     Front::QueryBegin(uint32_t query) { return renderer_.BeginQuery(query); }
@@ -703,18 +714,30 @@ namespace wxl::vk::gxfront
         const present::Display::Stats& s = display_.Counters();
         const draw::Renderer::Stats&   r = renderer_.Counters();
         auto n = [](uint64_t v) { return static_cast<unsigned long long>(v); };
-        const shaders::Cache::Stats c = const_cast<draw::Renderer&>(renderer_).ShaderCache().Counters();
+        draw::Renderer&                 renderer = const_cast<draw::Renderer&>(renderer_);
+        const shaders::Cache::Stats     c        = renderer.ShaderCache().Counters();
+        const pipelines::Pipelines::Stats p      = renderer.PipelineCache().Counters();
         std::snprintf(out, size,
-                      "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %llu draws (%llu drawn, %llu in the "
-                      "world's pass; left out: %llu untranslated programs, %llu into a depth texture alone, %llu not ready, %llu refused "
-                      "by the renderer), %llu pipelines, %llu programs translated (%llu refused; %llu translated in %.0f ms, %llu from "
-                      "the cache, %llu ahead), %llu target renderings, %llu copies, %llu queries, %llu pass breaks, %llu textures, "
-                      "%llu losses%s",
-                      context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), n(stats_.draws), n(r.draws),
-                      n(stats_.world), n(stats_.left_out[static_cast<int>(Verdict::Program)]),
+                      "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %u sample(s) per pixel, %llu draws "
+                      "(%llu drawn, %llu in the world's pass; left out: %llu untranslated programs, %llu into a depth texture alone, "
+                      "%llu not ready, %llu while their pipeline compiled, %llu refused by the renderer), %llu pipelines (%s; %llu linked "
+                      "from parts in %.0f ms, %llu compiled on workers in %.0f ms with %llu parts, %llu of %llu drawn before prewarmed, "
+                      "%llu linked ones replaced by their whole compile, %llu compiled on the main thread in %.0f ms and %llu parts in "
+                      "%.0f ms; %llu hitches of %.0f ms or more, the longest %.1f ms; %llu failed), %llu programs translated (%llu "
+                      "refused; %llu translated in %.0f ms, %llu from the cache, %llu ahead), %llu target renderings, %llu copies, %llu "
+                      "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures, %llu losses%s",
+                      context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), display_.Samples(), n(stats_.draws),
+                      n(r.draws), n(stats_.world), n(stats_.left_out[static_cast<int>(Verdict::Program)]),
                       n(stats_.left_out[static_cast<int>(Verdict::Target)]), n(stats_.left_out[static_cast<int>(Verdict::Unready)]),
-                      n(r.refused), n(r.pipelines), n(r.programs), n(r.programs_refused), n(c.translated), c.milliseconds, n(c.from_disk),
-                      n(c.prewarmed), n(r.target_renderings), n(r.copies), n(r.queries), n(r.pass_breaks), n(r.textures), n(stats_.losses),
+                      n(r.skipped), n(r.refused), n(r.pipelines),
+                      renderer.PipelineCache().Libraries() ? "linked from parts"
+                      : renderer.PipelineCache().Async()   ? "compiled on workers, draws into the scene left out meanwhile"
+                                                           : "compiled when first drawn",
+                      n(p.linked), p.linked_ms, n(p.background), p.background_ms, n(p.parts_background), n(p.prewarmed),
+                      n(p.prewarm_known), n(p.optimized), n(p.compiled_main), p.compiled_main_ms, n(p.parts_main), p.parts_main_ms,
+                      n(p.hitches), pipelines::Pipelines::kHitchMs, p.longest_ms, n(p.failed), n(r.programs), n(r.programs_refused),
+                      n(c.translated), c.milliseconds, n(c.from_disk), n(c.prewarmed), n(r.target_renderings), n(r.copies), n(s.resolves),
+                      n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(stats_.losses),
                       context_.Lost() ? ", the device is lost" : "");
     }
 }

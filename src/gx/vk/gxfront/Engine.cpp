@@ -271,6 +271,11 @@ namespace wxl::vk::gxfront
         // Points: their size (D3D9's POINTSIZE where a vertex program writes none), as sprites.
         out.point_size = std::max(F(kPointScale), 1.0f);
         if (!std::isfinite(out.point_size)) out.point_size = 1.0f;
+        // D3D9 clamps every point's size to POINTSIZE_MIN..POINTSIZE_MAX (the engine's 0..1 by
+        // default; the weather's sprites set 24 at most), the device's own limit applied after.
+        const float low = F(kPointScaleMin), high = F(kPointScaleMax);
+        out.point_range[0] = std::isfinite(low) ? std::max(low, 0.0f) : 0.0f;
+        out.point_range[1] = std::isfinite(high) ? std::max(high, out.point_range[0]) : out.point_range[0];
         if (I(kPointSprite) && batch.primitive == draw::kPoints) out.flags |= shaders::kFlagPointSprite;
 
         draw::DrawData& data = out.data;

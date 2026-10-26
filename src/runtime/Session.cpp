@@ -276,8 +276,10 @@ namespace
             return;
         }
         Line("graphics: [gx] api = vulkan: Vulkan is tried when the client makes its device, D3D9 if this machine "
-             "cannot; validation %s, gpu %s",
-             g_settings.gx_validation ? "on" : "off", g_settings.gx_gpu[0] ? g_settings.gx_gpu : "the best one");
+             "cannot; validation %s, gpu %s, pipelines %s",
+             g_settings.gx_validation ? "on" : "off", g_settings.gx_gpu[0] ? g_settings.gx_gpu : "the best one",
+             g_settings.gx_async ? "compiled on workers, a draw into the scene left out until its pipeline is ready"
+                                 : "compiled when first drawn, the frame waiting");
     }
 
     void Settings(const wxl::log::SessionFiles& files)

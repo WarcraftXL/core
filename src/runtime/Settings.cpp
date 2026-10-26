@@ -133,9 +133,14 @@ namespace wxl::core::settings
                     else if (SameWord(value, "nearest")) out.gx_nearest = true;
                     else Problem(out, number, "not linear or nearest:", value);
                 }
+                else if (SameWord(key, "async_pipelines"))
+                {
+                    if (value == "0" || value == "1") out.gx_async = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
                 else
                 {
-                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter):", key);
+                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter, async_pipelines):", key);
                 }
                 continue;
             }

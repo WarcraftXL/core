@@ -37,7 +37,7 @@
 namespace wxl::vk::shaders
 {
     /// Bumped whenever the translator's output changes: a cache keyed with it drops older modules.
-    constexpr uint32_t kTranslatorVersion = 1;
+    constexpr uint32_t kTranslatorVersion = 2;
 
     struct Options
     {

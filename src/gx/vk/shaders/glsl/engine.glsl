@@ -58,7 +58,7 @@ layout(push_constant) uniform Push
     vec4  clipPlane; ///< against D3D9's clip-space position
     uint  fogColor;  ///< 0xAARRGGBB
     float pointSize;
-    uvec2 reserved;
+    vec2  pointRange; ///< D3D9's POINTSIZE_MIN and POINTSIZE_MAX
     uint  stages[16]; ///< a stage's texture slot (low 16 bits) and sampler (high 16)
 } pc;
 

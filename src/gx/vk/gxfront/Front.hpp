@@ -40,6 +40,7 @@ namespace wxl::vk::gxfront
         uint32_t        frames = 2;                       ///< [gx] frames_in_flight
         present::Filter filter = present::Filter::Linear; ///< [gx] present_filter
         std::string     cache_dir;                        ///< where the shader pack and the pipeline cache live (empty: none)
+        bool            async_pipelines = true;           ///< [gx] async_pipelines: a draw into the scene whose pipeline compiles is left out
     };
 
     class Front
@@ -121,6 +122,10 @@ namespace wxl::vk::gxfront
         bool     QueryBegin(uint32_t query);
         bool     QueryEnd(uint32_t query);
         bool     QueryResult(uint32_t query, uint32_t& samples);
+        /// D3D9's DeviceReadPixels: the back buffer's pixels as the frame has drawn them so far.
+        bool     ReadPixels(int32_t x, int32_t y, uint32_t width, uint32_t height, uint32_t* bgra);
+        /// The samples per pixel the device draws the back buffer with (VkSampleCountFlags).
+        uint32_t SampleCounts() const { return display_.SampleCounts(); }
 
         /// Waits (bounded) for the frames submitted; a GPU that does not finish them is marked lost.
         void WaitIdle();

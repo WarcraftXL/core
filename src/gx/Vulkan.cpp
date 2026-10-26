@@ -78,7 +78,7 @@ namespace
             {c.features.independentBlend, "independent blend"},
             {c.features.depthBiasClamp, "depth bias clamp"},
             {c.extensions.memory_budget, "memory budget"},
-            {c.extensions.graphics_pipeline_library && c.extensions.pipeline_library, "pipeline libraries"},
+            {c.features.graphicsPipelineLibrary, "pipeline libraries"},
             {c.extensions.extended_dynamic_state3, "extended dynamic state 3"},
             {c.extensions.vertex_input_dynamic_state, "dynamic vertex input"},
             {c.extensions.unified_image_layouts, "unified image layouts"},
@@ -151,6 +151,7 @@ namespace
         options.frames     = settings.gx_frames;
         options.filter     = settings.gx_nearest ? vk::present::Filter::Nearest : vk::present::Filter::Linear;
         options.cache_dir  = CacheDirectory();
+        options.async_pipelines = settings.gx_async;
         return options;
     }
 
@@ -285,7 +286,7 @@ namespace
     void WXL_CALL DeviceDestroyRow(void* device)
     {
         if (!g_front || g_front->Owner() != device) return;
-        char line[320];
+        char line[2048];
         g_front->Describe(line, sizeof line);
         WLOG_INFO(kTag, "%s; released", line);
         Stop(true);
@@ -515,6 +516,13 @@ namespace
         return known ? 1 : 0;
     }
 
+    int32_t WXL_CALL ReadPixelsRow(void* device, int32_t x, int32_t y, uint32_t width, uint32_t height, void* bgra)
+    {
+        return Mine(device) && g_front->ReadPixels(x, y, width, height, static_cast<uint32_t*>(bgra)) ? 1 : 0;
+    }
+
+    uint32_t WXL_CALL SampleCountsRow(void* device) { return Mine(device) ? g_front->SampleCounts() : 1u; }
+
     const wxl_gx_vk_backend kBackend = {
         sizeof(wxl_gx_vk_backend),
         0,
@@ -556,6 +564,8 @@ namespace
         QueryBeginRow,
         QueryEndRow,
         QueryResultRow,
+        ReadPixelsRow,
+        SampleCountsRow,
     };
 }
 

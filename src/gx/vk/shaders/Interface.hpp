@@ -91,7 +91,7 @@ namespace wxl::vk::shaders
         float    clip_plane[4]; ///< the user clip plane, against D3D9's clip-space position
         uint32_t fog_color;   ///< 0xAARRGGBB: D3D9's fog colour, for the fog applied after a pixel program below ps_3_0
         float    point_size;  ///< D3D9's point size, where a vertex program writes none
-        uint32_t reserved[2];
+        float    point_range[2]; ///< D3D9's POINTSIZE_MIN and POINTSIZE_MAX, every point's size clamped to them
         uint32_t stages[kStages];
     };
     static_assert(sizeof(Push) == 128, "the guaranteed push constant size");

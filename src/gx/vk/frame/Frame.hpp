@@ -166,6 +166,14 @@ namespace wxl::vk::frame
         /// Ends the open slot without submitting it (the frame is dropped).
         void Abandon();
 
+        /**
+         * @brief Opens the slot just submitted again, to go on with the same frame: waits
+         *        (bounded) for its submission, resets its pool and begins its two command buffers.
+         *        What a readback in the middle of a frame does (D3D9's synchronous GetRenderTargetData).
+         * @return false with @p wait saying why.
+         */
+        bool Resume(Wait& wait, uint64_t timeout_ns = kDefaultWaitNs);
+
     private:
         struct Slot
         {

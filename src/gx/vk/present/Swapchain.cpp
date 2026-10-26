@@ -235,7 +235,9 @@ namespace wxl::vk::present
         const VkSwapchainKHR     swapchain = swapchain_;
         std::vector<VkImageView> views     = std::move(views_);
         std::vector<VkSemaphore> rendered  = std::move(rendered_);
-        graveyard.Bury(serial, [dev, swapchain, views = std::move(views), rendered = std::move(rendered)] {
+        // A present waits on its semaphore after the frame's submission completed: what a later
+        // submission completing guarantees, so they go one serial later.
+        graveyard.Bury(serial + 1, [dev, swapchain, views = std::move(views), rendered = std::move(rendered)] {
             for (VkImageView v : views)
                 if (v) vkDestroyImageView(dev, v, nullptr);
             for (VkSemaphore s : rendered)

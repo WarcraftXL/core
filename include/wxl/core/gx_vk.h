@@ -211,6 +211,20 @@ typedef struct wxl_gx_vk_backend
     /// 1 with @p samples when the query's count is known (a query never issued is, with 0), 0 while
     /// the GPU has not finished it: never waits.
     int32_t(WXL_CALL* query_result)(void* device, uint32_t query, uint32_t* samples);
+
+    /**
+     * @brief D3D9's readback of the back buffer (DeviceReadPixels: screenshots, the portraits'
+     *        check of the target's alpha): @p width x @p height pixels at (@p x, @p y) of the frame
+     *        drawn so far, resolved when multisampled, as CImVector rows (B, G, R, A bytes) into
+     *        @p bgra; what lies outside the back buffer reads as zero. The frame recorded so far is
+     *        submitted and waited for (bounded), then goes on. 1 when read.
+     */
+    int32_t(WXL_CALL* read_pixels)(void* device, int32_t x, int32_t y, uint32_t width, uint32_t height, void* bgra);
+
+    /// The samples per pixel the device draws the back buffer with: bit n set when it draws 2^n
+    /// (bit 0, one sample, always), for the formats the client offers (gxMultisample). A format
+    /// asking for a count the device lacks gets the most it has below it.
+    uint32_t(WXL_CALL* sample_counts)(void* device);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

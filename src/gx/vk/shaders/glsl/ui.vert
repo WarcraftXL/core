@@ -28,5 +28,5 @@ void main()
     vTex0  = (d.inputs.w & kHasTex0) != 0 ? vec4(inTex0.xy, 0.0, 0.0) : vec4(0.0);
     vTex1  = vec4(0.0);
     vFog   = vec4(1.0, 0.0, 0.0, 0.0);
-    gl_PointSize = pc.pointSize;
+    gl_PointSize = clamp(pc.pointSize, pc.pointRange.x, pc.pointRange.y);
 }

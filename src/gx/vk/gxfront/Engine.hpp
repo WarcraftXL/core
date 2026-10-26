@@ -98,6 +98,8 @@ namespace wxl::vk::gxfront
         kPixelShader      = 78,
         kPointScale       = 79,
         kPointScaleAttenuation = 80,
+        kPointScaleMin    = 81,
+        kPointScaleMax    = 82,
         kPointSprite      = 83,
         kBlendFactor      = 84,
         kColorMaterial    = 85,

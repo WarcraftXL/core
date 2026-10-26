@@ -51,6 +51,7 @@ namespace wxl::core::settings
         char     gx_gpu[64]    = {};     ///< [gx] gpu: the device's index, or a part of its name
         unsigned gx_frames     = 2;      ///< [gx] frames_in_flight: 1 to 3
         bool     gx_nearest    = false;  ///< [gx] present_filter = nearest: the scene stretched without blending
+        bool     gx_async      = true;   ///< [gx] async_pipelines: a draw into the scene whose pipeline compiles is left out rather than waited for
 
         /// Lines of the file that were not understood, as messages for the log, at most 8.
         char     problems[8][160] = {};

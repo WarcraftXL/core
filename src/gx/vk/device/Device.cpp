@@ -53,14 +53,18 @@ namespace
         VkPhysicalDeviceFeatures2        features2{};
         VkPhysicalDeviceVulkan12Features v12{};
         VkPhysicalDeviceVulkan13Features v13{};
+        VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl{};
 
-        FeatureChain()
+        /// @p libraries: the device has VK_EXT_graphics_pipeline_library, whose structure is chained.
+        explicit FeatureChain(bool libraries = false)
         {
             features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
             v12.sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
             v13.sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            gpl.sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
             features2.pNext = &v12;
             v12.pNext       = &v13;
+            if (libraries) v13.pNext = &gpl;
         }
         FeatureChain(const FeatureChain&)            = delete;
         FeatureChain& operator=(const FeatureChain&) = delete;
@@ -118,8 +122,9 @@ namespace wxl::vk::device
         // The 1.2 and 1.3 structures may only be chained for a device of that version; below the
         // floor the device is refused on its version anyway.
         if (out.api < kFloorApi) return;
-        FeatureChain chain;
+        FeatureChain chain(out.extensions.graphics_pipeline_library && out.extensions.pipeline_library);
         vkGetPhysicalDeviceFeatures2(physical, &chain.features2);
+        out.features.graphicsPipelineLibrary = chain.gpl.graphicsPipelineLibrary == VK_TRUE;
         const VkPhysicalDeviceFeatures&        core10 = chain.features2.features;
         const VkPhysicalDeviceVulkan12Features& v12   = chain.v12;
         const VkPhysicalDeviceVulkan13Features& v13   = chain.v13;
@@ -319,7 +324,8 @@ namespace wxl::vk::device
     {
         // The features enabled are those read, required and optional alike: the chain is the one
         // Describe filled, so a feature is on exactly when the device has it.
-        FeatureChain                     chain;
+        FeatureChain                     chain(chosen_.features.graphicsPipelineLibrary);
+        chain.gpl.graphicsPipelineLibrary = chosen_.features.graphicsPipelineLibrary ? VK_TRUE : VK_FALSE;
         VkPhysicalDeviceFeatures&        core10 = chain.features2.features;
         VkPhysicalDeviceVulkan12Features& v12   = chain.v12;
         VkPhysicalDeviceVulkan13Features& v13   = chain.v13;

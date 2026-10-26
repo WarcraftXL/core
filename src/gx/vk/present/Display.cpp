@@ -131,9 +131,11 @@ namespace wxl::vk::present
             swapchain_.Destroy();
             if (surface_) vkDestroySurfaceKHR(context_->Instance(), surface_, nullptr);
             allocator_->Destroy(scene_);
+            allocator_->Destroy(resolve_);
             allocator_->Destroy(depth_);
             allocator_->Destroy(target_);
             allocator_->Destroy(readback_);
+            allocator_->Destroy(pixels_);
             if (queries_) vkDestroyQueryPool(context_->Device(), queries_, nullptr);
             pass_.Destroy();
             frames_.Destroy();
@@ -144,6 +146,8 @@ namespace wxl::vk::present
         sink_         = nullptr;
         offscreen_    = false;
         scene_extent_ = {0, 0};
+        samples_      = VK_SAMPLE_COUNT_1_BIT;
+        msaa_dirty_   = false;
         touched_      = false;
         rendering_    = Rendering::None;
         context_      = nullptr;
@@ -196,6 +200,15 @@ namespace wxl::vk::present
     }
 
     void Display::SetSceneExtent(VkExtent2D extent) { scene_wanted_ = extent; }
+
+    void Display::SetSamples(uint32_t count) { samples_wanted_ = count ? count : 1; }
+
+    uint32_t Display::SampleCounts() const
+    {
+        if (!context_ || !context_->Ready()) return VK_SAMPLE_COUNT_1_BIT;
+        const VkPhysicalDeviceLimits& limits = context_->Properties().limits;
+        return (limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts) | VK_SAMPLE_COUNT_1_BIT;
+    }
 
     void Display::SetSync(Sync sync)
     {
@@ -319,39 +332,58 @@ namespace wxl::vk::present
     {
         const VkExtent2D want = scene_wanted_.width && scene_wanted_.height ? scene_wanted_ : window_;
         if (!want.width || !want.height) return scene_.image != VK_NULL_HANDLE;
-        if (scene_.image && want.width == scene_extent_.width && want.height == scene_extent_.height) return true;
+        // The most samples the device draws both colour and depth with, at most what the engine asks.
+        const uint32_t        counts  = SampleCounts();
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+        for (uint32_t n = 64; n > 1; n >>= 1)
+            if (n <= samples_wanted_ && (counts & n))
+            {
+                samples = static_cast<VkSampleCountFlagBits>(n);
+                break;
+            }
+        if (scene_.image && want.width == scene_extent_.width && want.height == scene_extent_.height && samples == samples_) return true;
 
         EndRendering();
         // The old images may be named by this frame already: they go when it completes.
-        if (scene_.image || depth_.image)
+        if (scene_.image || depth_.image || resolve_.image)
         {
-            resources::Image     oldScene = scene_, oldDepth = depth_;
+            resources::Image     oldScene = scene_, oldDepth = depth_, oldResolve = resolve_;
             resources::Allocator* allocator = allocator_;
-            AfterFrame([allocator, oldScene, oldDepth]() mutable {
+            AfterFrame([allocator, oldScene, oldDepth, oldResolve]() mutable {
                 allocator->Destroy(oldScene);
                 allocator->Destroy(oldDepth);
+                allocator->Destroy(oldResolve);
             });
-            scene_ = resources::Image{};
-            depth_ = resources::Image{};
+            scene_   = resources::Image{};
+            depth_   = resources::Image{};
+            resolve_ = resources::Image{};
         }
-        const bool made =
-            allocator_->CreateImage(want.width, want.height, kSceneFormat,
-                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                                    scene_) &&
-            allocator_->CreateImage(want.width, want.height, depth_format_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, depth_,
-                                    DepthAspect(depth_format_));
+        // Multisampled, the scene is drawn into and resolved into a one-sample image, which is shown,
+        // copied from and read back; otherwise the scene is all of these.
+        const bool              multi = samples > VK_SAMPLE_COUNT_1_BIT;
+        const VkImageUsageFlags shown = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        bool made = allocator_->CreateImage(want.width, want.height, kSceneFormat,
+                                            multi ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : shown, scene_,
+                                            VK_IMAGE_ASPECT_COLOR_BIT, samples) &&
+                    allocator_->CreateImage(want.width, want.height, depth_format_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, depth_,
+                                            DepthAspect(depth_format_), samples);
+        if (made && multi) made = allocator_->CreateImage(want.width, want.height, kSceneFormat, shown, resolve_);
         if (!made)
         {
             allocator_->Destroy(scene_);
             allocator_->Destroy(depth_);
+            allocator_->Destroy(resolve_);
             scene_extent_ = {0, 0};
+            samples_      = VK_SAMPLE_COUNT_1_BIT;
             return false;
         }
         scene_extent_ = want;
+        samples_      = samples;
+        msaa_dirty_   = false;
         touched_      = false;
         ++stats_.scenes;
-        Log(LogLevel::Debug, "scene %ux%u", want.width, want.height);
+        Log(LogLevel::Debug, "scene %ux%u, %u sample(s) per pixel", want.width, want.height, static_cast<unsigned>(samples));
         return true;
     }
 
@@ -364,16 +396,24 @@ namespace wxl::vk::present
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_NONE, kColorStage, kColorWrite);
         Barrier(cmd, depth_.image, DepthAspect(depth_format_), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 kDepthStage, VK_ACCESS_2_NONE, kDepthStage, kDepthWrite);
-        touched_ = true;
+        if (resolve_.image)
+            Barrier(cmd, resolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_NONE, kColorStage, kColorWrite);
+        msaa_dirty_ = false;
+        touched_    = true;
     }
 
     void Display::Begin(Rendering kind)
     {
         if (rendering_ == kind) return;
         EndRendering();
+        const bool multi = samples_ > VK_SAMPLE_COUNT_1_BIT;
+        // An overlay (Dear ImGui) goes over the image shown: a multisampled scene is resolved first.
+        if (kind == Rendering::Color && multi) ResolveScene();
+        if (kind == Rendering::Full && multi) msaa_dirty_ = true;
         VkRenderingAttachmentInfo color{};
         color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color.imageView   = scene_.view;
+        color.imageView   = kind == Rendering::Color && multi ? resolve_.view : scene_.view;
         color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
@@ -451,6 +491,115 @@ namespace wxl::vk::present
         if (!frames_.Open() || !EnsureScene()) return false;
         EndRendering();
         Touch();
+        return true;
+    }
+
+    const resources::Image* Display::ResolveScene()
+    {
+        if (!PrepareScene()) return nullptr;
+        if (samples_ == VK_SAMPLE_COUNT_1_BIT) return &scene_;
+        if (!msaa_dirty_) return &resolve_;
+        // D3D9's resolve of a multisampled back buffer: each pixel the mean of its samples.
+        const VkCommandBuffer cmd = frames_.Current();
+        Barrier(cmd, scene_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_RESOLVE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        Barrier(cmd, resolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                kColorStage | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_RESOLVE_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkImageResolve region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent         = {scene_extent_.width, scene_extent_.height, 1};
+        vkCmdResolveImage(cmd, scene_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resolve_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                          &region);
+        Barrier(cmd, resolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_RESOLVE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, kColorStage | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                kColorWrite | VK_ACCESS_2_TRANSFER_READ_BIT);
+        Barrier(cmd, scene_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_RESOLVE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, kColorStage, kColorWrite);
+        msaa_dirty_ = false;
+        ++stats_.resolves;
+        return &resolve_;
+    }
+
+    bool Display::Flush()
+    {
+        if (!frames_.Open()) return false;
+        EndRendering();
+        if (hook_) hook_->FrameFlushing(frames_.Upload());
+        const uint64_t serial = frames_.Submit();
+        frame::Wait    wait   = frame::Wait::Failed;
+        if (!serial || !frames_.Resume(wait))
+        {
+            if (wait == frame::Wait::Timeout) context_->MarkLost("a readback's submission did not complete within the bound");
+            // The frame cannot go on: what it named goes once the last submission completes.
+            submitted_.push_back(Submitted{stats_.frames, timeline_->Last()});
+            for (auto& release : after_) graveyard_.Bury(timeline_->Last(), std::move(release));
+            after_.clear();
+            return false;
+        }
+        last_serial_ = serial;
+        graveyard_.Collect(timeline_->Completed());
+        ++stats_.flushes;
+        // A new command buffer: whatever a recorder bound is to be bound again.
+        ++epoch_;
+        return true;
+    }
+
+    bool Display::ReadScene(VkRect2D rect, uint32_t* bgra)
+    {
+        if (!bgra || !rect.extent.width || !rect.extent.height) return false;
+        const resources::Image* image = ResolveScene();
+        if (!image) return false;
+        // Inside the scene only: what lies outside reads as nothing written (zero).
+        const int32_t x0 = std::clamp<int32_t>(rect.offset.x, 0, static_cast<int32_t>(scene_extent_.width));
+        const int32_t y0 = std::clamp<int32_t>(rect.offset.y, 0, static_cast<int32_t>(scene_extent_.height));
+        const int32_t x1 = std::clamp<int32_t>(rect.offset.x + static_cast<int32_t>(rect.extent.width), 0, static_cast<int32_t>(scene_extent_.width));
+        const int32_t y1 = std::clamp<int32_t>(rect.offset.y + static_cast<int32_t>(rect.extent.height), 0, static_cast<int32_t>(scene_extent_.height));
+        std::memset(bgra, 0, static_cast<size_t>(rect.extent.width) * rect.extent.height * 4);
+        if (x1 <= x0 || y1 <= y0) return true;
+        const uint32_t     w = static_cast<uint32_t>(x1 - x0), h = static_cast<uint32_t>(y1 - y0);
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4;
+        if (pixels_.size < bytes)
+        {
+            // The previous buffer is not read by anything in flight: readbacks wait for their copy.
+            allocator_->Destroy(pixels_);
+            if (!allocator_->CreateBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, resources::Access::Readback, pixels_) || !pixels_.mapped)
+            {
+                allocator_->Destroy(pixels_);
+                return false;
+            }
+        }
+        const VkCommandBuffer cmd = frames_.Current();
+        Barrier(cmd, image->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                kColorStage | VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset      = {x0, y0, 0};
+        region.imageExtent      = {w, h, 1};
+        vkCmdCopyImageToBuffer(cmd, image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixels_.buffer, 1, &region);
+        Barrier(cmd, image->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, kColorStage, kColorWrite);
+        VkMemoryBarrier2 host{};
+        host.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        host.srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
+        host.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        host.dstStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT;
+        host.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo dependency{};
+        dependency.sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers    = &host;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        if (!Flush()) return false;
+        allocator_->Invalidate(pixels_);
+        const uint8_t* from = static_cast<const uint8_t*>(pixels_.mapped);
+        for (uint32_t row = 0; row < h; ++row)
+            std::memcpy(bgra + static_cast<size_t>(y0 - rect.offset.y + static_cast<int32_t>(row)) * rect.extent.width + (x0 - rect.offset.x),
+                        from + static_cast<size_t>(row) * w * 4, static_cast<size_t>(w) * 4);
+        ++stats_.readbacks;
         return true;
     }
 
@@ -588,7 +737,9 @@ namespace wxl::vk::present
             Submit(nullptr, 0, nullptr, 0);
             return context_->Lost() ? FrameEnd::Lost : FrameEnd::Drawn;
         }
-        Barrier(cmd, scene_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        // A multisampled scene is shown resolved, as D3D9's Present resolves its back buffer.
+        if (samples_ > VK_SAMPLE_COUNT_1_BIT) ResolveScene();
+        Barrier(cmd, Shown().image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         pass_.Prepare(cmd, frames_.Index());
@@ -600,7 +751,7 @@ namespace wxl::vk::present
         {
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_NONE, kColorStage, kColorWrite);
-            pass_.Record(cmd, frames_.Index(), scene_.view, target_.view, kSceneFormat, {target_.width, target_.height}, &cursor_);
+            pass_.Record(cmd, frames_.Index(), Shown().view, target_.view, kSceneFormat, {target_.width, target_.height}, &cursor_);
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -663,7 +814,7 @@ namespace wxl::vk::present
         const VkImage image = swapchain_.Image(index);
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kColorStage,
                 VK_ACCESS_2_NONE, kColorStage, kColorWrite);
-        pass_.Record(cmd, frames_.Index(), scene_.view, swapchain_.View(index), swapchain_.Format(), swapchain_.Extent(), &cursor_);
+        pass_.Record(cmd, frames_.Index(), Shown().view, swapchain_.View(index), swapchain_.Format(), swapchain_.Extent(), &cursor_);
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
         EndTimestamp();

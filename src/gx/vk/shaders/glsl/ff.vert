@@ -135,5 +135,5 @@ void main()
     vTex1     = StageCoord(d, 1, d.inputs.y == 1 ? set1 : set0, e.xyz);
 
     vFog = vec4(d.fog.z > 0.5 ? clamp(e.z * d.fog.x + d.fog.y, 0.0, 1.0) : 1.0, 0.0, 0.0, 0.0);
-    gl_PointSize = pc.pointSize;
+    gl_PointSize = clamp(pc.pointSize, pc.pointRange.x, pc.pointRange.y);
 }

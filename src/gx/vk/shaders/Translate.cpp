@@ -35,7 +35,7 @@ namespace wxl::vk::shaders
             kPushClipPlane,
             kPushFogColor,
             kPushPointSize,
-            kPushReserved,
+            kPushPointRange,
             kPushStages,
         };
 
@@ -1065,7 +1065,9 @@ namespace wxl::vk::shaders
 
             const Id size = Variable(f32_, SpvStorageClassOutput);
             m_.Decorate(size, SpvDecorationBuiltIn, {SpvBuiltInPointSize});
-            Store(size, point ? point : PushMember(kPushPointSize, f32_));
+            // D3D9 clamps a point's size, the program's or POINTSIZE, to POINTSIZE_MIN..POINTSIZE_MAX.
+            const Id range = PushMember(kPushPointRange, vec2_);
+            Store(size, m_.Ext(f32_, GLSLstd450FClamp, {point ? point : PushMember(kPushPointSize, f32_), Comp(range, 0), Comp(range, 1)}));
 
             if (o_.clip_distance)
             {
@@ -1101,7 +1103,7 @@ namespace wxl::vk::shaders
 
             // The push constants (shaders::Push).
             const Id stages = m_.Array(u32_, kStages, 4);
-            const Id block  = m_.Struct({uvec2_, uvec2_, uvec2_, f32_, u32_, vec4_, u32_, f32_, uvec2_, stages});
+            const Id block  = m_.Struct({uvec2_, uvec2_, uvec2_, f32_, u32_, vec4_, u32_, f32_, vec2_, stages});
             static const uint32_t kOffsets[] = {0, 8, 16, 24, 28, 32, 48, 52, 56, 64};
             for (uint32_t i = 0; i < 10; ++i) m_.MemberDecorate(block, i, SpvDecorationOffset, {kOffsets[i]});
             m_.Decorate(block, SpvDecorationBlock);

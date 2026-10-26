@@ -191,14 +191,14 @@ namespace wxl::vk::draw
         if (!bindless_.Create(context, 1u << 16, black_.view, why, why_size) ||
             !staging_.Create(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, kStagingChunk, slots) ||
             !data_.Create(allocator, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kDataChunk, slots) ||
-            !pipelines_.Create(context, bindless_.Layout(), paths.pipeline_cache, why, why_size))
+            !pipelines_.Create(context, bindless_.Layout(), paths.pipeline_cache,
+                               pipelines::Settings{paths.async_pipelines, paths.pipeline_libraries, 0, paths.pipeline_keys}, why, why_size))
         {
             if (why[0] == '\0') std::snprintf(why, why_size, "the renderer's rings could not be made");
             Destroy();
             return false;
         }
         black_cube_slot_ = bindless_.AddImage(black_cube_.view);
-        scene_target_id_ = pipelines_.TargetId(present::Display::kSceneFormat, display.DepthFormat());
 
         // Occlusion queries count samples only where the device counts them precisely.
         queries_supported_ = context.Chosen().features.occlusionQueryPrecise;
@@ -325,7 +325,7 @@ namespace wxl::vk::draw
             reason = pixel ? "a vertex program where a pixel one is wanted" : "a pixel program where a vertex one is wanted";
         else
         {
-            id = pipelines_.AddProgram(translation->words, translation->info);
+            id = pipelines_.AddProgram(translation->words, translation->info, key);
             if (id < 0) reason = "its module could not be made";
         }
         if (id < 0)
@@ -374,6 +374,8 @@ namespace wxl::vk::draw
     void Renderer::FrameBegun(uint32_t slot, VkCommandBuffer upload)
     {
         Collect(false);
+        // What the pipeline workers finished comes in between frames; what it replaced goes once done.
+        pipelines_.BeginFrame(display_->FrameNumber(), display_->FramesCompleted());
         staging_.Begin(slot);
         data_.Begin(slot);
         epoch_        = 0;
@@ -411,6 +413,16 @@ namespace wxl::vk::draw
 
     void Renderer::FrameEnding(VkCommandBuffer upload)
     {
+        CloseUploads(upload);
+        // A query begun and never drawn into is not issued.
+        for (Query& q : queries_)
+            if (q.alive && q.state == Query::Pending) q.state = Query::Idle;
+    }
+
+    void Renderer::FrameFlushing(VkCommandBuffer upload) { CloseUploads(upload); }
+
+    void Renderer::CloseUploads(VkCommandBuffer upload)
+    {
         for (Texture* t : opened_)
         {
             if (t->desc.generate_mips && t->image.levels > 1) GenerateMips(t, upload);
@@ -424,9 +436,6 @@ namespace wxl::vk::draw
         MemoryBarrier(upload, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, kReadStages, kReads);
         staging_.Flush();
         data_.Flush();
-        // A query begun and never drawn into is not issued.
-        for (Query& q : queries_)
-            if (q.alive && q.state == Query::Pending) q.state = Query::Idle;
     }
 
     void Renderer::RenderingEnding(VkCommandBuffer cmd) { EndQueries(cmd); }
@@ -540,6 +549,9 @@ namespace wxl::vk::draw
                 const VkClearColorValue zero{};
                 vkCmdClearColorImage(upload, t->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
             }
+            // The copies of the engine's texels come after the clear, not alongside it.
+            ImageBarrier(upload, *t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kTransfer,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         }
         t->opened = frame;
         opened_.push_back(t);
@@ -831,8 +843,10 @@ namespace wxl::vk::draw
         if (!target_.color)
         {
             if (target_.depth) return VK_NULL_HANDLE; // a depth target alone: not drawn
-            target_id = scene_target_id_;
-            return display_->BeginSceneRendering();
+            const VkCommandBuffer cmd = display_->BeginSceneRendering();
+            // The scene's samples are known once it is made (a new format may change them).
+            target_id = pipelines_.TargetId(present::Display::kSceneFormat, display_->DepthFormat(), display_->Samples());
+            return cmd;
         }
         Texture*       color = target_.color;
         Texture*       depth = target_.depth && target_.depth->info.depth ? target_.depth : nullptr;
@@ -929,8 +943,10 @@ namespace wxl::vk::draw
     bool Renderer::CopyScene(Texture* dest, uint32_t level, uint32_t face, VkRect2D from, VkRect2D to, bool linear)
     {
         if (!dest || !display_->InFrame() || level >= dest->image.levels || face >= dest->image.layers || dest->info.depth) return false;
-        if (!display_->PrepareScene()) return false;
-        const resources::Image& scene = display_->SceneImage();
+        // The back buffer as D3D9's StretchRect reads it: resolved when multisampled.
+        const resources::Image* resolved = display_->ResolveScene();
+        if (!resolved) return false;
+        const resources::Image& scene = *resolved;
         // Both rectangles kept inside their images.
         const int32_t sw = static_cast<int32_t>(scene.width), sh = static_cast<int32_t>(scene.height);
         const int32_t dw = static_cast<int32_t>(std::max(dest->desc.width >> level, 1u)), dh = static_cast<int32_t>(std::max(dest->desc.height >> level, 1u));
@@ -947,7 +963,8 @@ namespace wxl::vk::draw
         if (!dest->defined && dest->opened != display_->FrameNumber()) OpenInUpload(dest);
         const VkCommandBuffer cmd = display_->Cmd();
         ImageBarrier(cmd, scene.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+                     kColorStage | kTransfer, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
         ImageBarrier(cmd, dest->image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                      kReadStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, level, 1, face, 1);
         vkCmdBlitImage(cmd, scene.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
@@ -1188,11 +1205,14 @@ namespace wxl::vk::draw
             ++stats_.refused;
             return false;
         }
-        key.target                = target_id;
-        const VkPipeline pipeline = pipelines_.Get(key);
+        key.target = target_id;
+        // A draw into the scene may be left out while its pipeline compiles (the next frames have
+        // it); one into a texture may not: the engine keeps what it drew there (a portrait, the map).
+        pipelines::Got   got      = pipelines::Got::Ready;
+        const VkPipeline pipeline = pipelines_.Get(key, !TargetIsScene(), &got);
         if (!pipeline)
         {
-            ++stats_.refused;
+            ++(got == pipelines::Got::Pending ? stats_.skipped : stats_.refused);
             return false;
         }
         stats_.pipelines = pipelines_.Count();
@@ -1329,6 +1349,11 @@ namespace wxl::vk::draw
         std::memcpy(push.clip_plane, packet.clip_plane, sizeof push.clip_plane);
         push.fog_color  = packet.fog_color;
         push.point_size = packet.point_size;
+        // The device's own range bounds D3D9's (its MaxPointSize, the caps' point scale maximum).
+        const float* limit   = context_->Properties().limits.pointSizeRange;
+        const float  ceiling = context_->Chosen().features.largePoints ? limit[1] : 1.0f;
+        push.point_range[0]  = std::clamp(packet.point_range[0], limit[0], ceiling);
+        push.point_range[1]  = std::clamp(packet.point_range[1], push.point_range[0], ceiling);
         for (uint32_t s = 0; s < kStages; ++s)
         {
             const Texture* t     = packet.textures[s];

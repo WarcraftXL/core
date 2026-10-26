@@ -342,4 +342,26 @@ namespace wxl::vk::frame
         vkEndCommandBuffer(slots_[index_].upload);
         vkEndCommandBuffer(slots_[index_].buffer);
     }
+
+    bool Frames::Resume(Wait& wait, uint64_t timeout_ns)
+    {
+        wait = Wait::Failed;
+        if (!count_ || open_ || !started_) return false;
+        device::Context& c    = timeline_->Context();
+        Slot&            slot = slots_[index_];
+        wait                  = timeline_->WaitFor(slot.serial, timeout_ns);
+        if (wait != Wait::Done) return false;
+        vkResetCommandPool(c.Device(), slot.pool, 0);
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (!c.Check(vkBeginCommandBuffer(slot.upload, &begin), "vkBeginCommandBuffer") ||
+            !c.Check(vkBeginCommandBuffer(slot.buffer, &begin), "vkBeginCommandBuffer"))
+        {
+            wait = c.Lost() ? Wait::Lost : Wait::Failed;
+            return false;
+        }
+        open_ = true;
+        return true;
+    }
 }

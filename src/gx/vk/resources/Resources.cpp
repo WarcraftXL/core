@@ -92,7 +92,7 @@ namespace wxl::vk::resources
     }
 
     bool Allocator::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
-                                VkImageAspectFlags aspect)
+                                VkImageAspectFlags aspect, VkSampleCountFlagBits samples)
     {
         out = Image{};
         VkImageCreateInfo info{};
@@ -102,7 +102,7 @@ namespace wxl::vk::resources
         info.extent        = {width, height, 1};
         info.mipLevels     = 1;
         info.arrayLayers   = 1;
-        info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        info.samples       = samples;
         info.tiling        = VK_IMAGE_TILING_OPTIMAL;
         info.usage         = usage;
         info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
@@ -128,9 +128,10 @@ namespace wxl::vk::resources
             Destroy(out);
             return false;
         }
-        out.format = format;
-        out.width  = width;
-        out.height = height;
+        out.format  = format;
+        out.width   = width;
+        out.height  = height;
+        out.samples = samples;
         return true;
     }
 

@@ -46,6 +46,7 @@ namespace wxl::vk::resources
         uint32_t         height = 0;
         uint32_t         levels = 1;
         uint32_t         layers = 1;
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     };
 
     /// What an image is made with beyond its size and format.
@@ -82,9 +83,10 @@ namespace wxl::vk::resources
         bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out);
         void Destroy(Buffer& buffer);
 
-        /// A 2D image with one mip and one layer, and its view of @p aspect (colour unless said).
+        /// A 2D image with one mip and one layer, and its view of @p aspect (colour unless said),
+        /// of @p samples samples per pixel (a multisampled attachment when more than one).
         bool CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
-                         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+                         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
         void Destroy(Image& image);
 
         /// An image of @p info, its levels and layers, and its view (a cube's is a cube view).

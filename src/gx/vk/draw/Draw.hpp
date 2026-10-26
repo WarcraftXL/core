@@ -217,6 +217,7 @@ namespace wxl::vk::draw
         float    clip_plane[4] = {}; ///< against D3D9's clip-space position
         uint32_t fog_color = 0;      ///< 0xAARRGGBB
         float    point_size = 1.0f;
+        float    point_range[2] = {0.0f, 64.0f}; ///< D3D9's POINTSIZE_MIN and POINTSIZE_MAX
 
         DrawData data = {};
     };
@@ -245,13 +246,18 @@ namespace wxl::vk::draw
             uint64_t target_renderings = 0; ///< renderings begun into a texture
             uint64_t copies = 0;       ///< copies from the scene into a texture
             uint64_t queries = 0;      ///< occlusion queries issued
+            uint64_t skipped = 0;      ///< draws left out while their pipeline compiled on a worker
         };
 
-        /// Where the renderer keeps what outlives a launch (empty: nothing is kept).
+        /// Where the renderer keeps what outlives a launch (empty: nothing is kept), and how it makes
+        /// its pipelines.
         struct Paths
         {
-            std::string pipeline_cache; ///< the VkPipelineCache's file
-            std::string shader_pack;    ///< the translated programs' pack (shaders::Cache)
+            std::string pipeline_cache;  ///< the VkPipelineCache's file
+            std::string shader_pack;     ///< the translated programs' pack (shaders::Cache)
+            std::string pipeline_keys;   ///< the pipelines drawn, compiled ahead at the next launch
+            bool        async_pipelines = false; ///< a missing pipeline is compiled on a worker, its draws into the scene left out meanwhile
+            bool        pipeline_libraries = true; ///< linked from parts where the device has them
         };
 
         Renderer() = default;
@@ -356,6 +362,7 @@ namespace wxl::vk::draw
         // present::FrameHook
         void FrameBegun(uint32_t slot, VkCommandBuffer upload) override;
         void FrameEnding(VkCommandBuffer upload) override;
+        void FrameFlushing(VkCommandBuffer upload) override;
         void RenderingEnding(VkCommandBuffer cmd) override;
         void RenderingEnded(VkCommandBuffer cmd) override;
 
@@ -401,6 +408,8 @@ namespace wxl::vk::draw
         VkCommandBuffer Inline();
         uint16_t LayoutOf(const Packet& packet, uint32_t needed, uint32_t& carried);
         void Collect(bool all);
+        /// What the frame's upload pass holds open goes to SHADER_READ_ONLY; the rings' writes reach the GPU.
+        void CloseUploads(VkCommandBuffer upload);
         VkDeviceAddress Snapshot(RegisterFile& file, uint32_t rows);
         /// The rendering draws go into now, begun when it is not open; its pipeline target id.
         VkCommandBuffer Rendering(uint8_t& target_id);
@@ -443,7 +452,6 @@ namespace wxl::vk::draw
         Target                open_;         ///< what the open target rendering draws into (color null: none)
         resources::Image      target_depth_; ///< the depth of a colour target without one
         bool                  target_depth_ready_ = false;
-        uint8_t               scene_target_id_ = 0;
 
         bool                  queries_supported_ = false;
         VkQueryPool           query_pool_ = VK_NULL_HANDLE;
