@@ -384,9 +384,19 @@ Its programs are HLSL (`src/gx/d3d9/shaders/highlight.hlsl`), compiled when the 
 by `wxl-core-d3d9-shaders` (`tools/shaders/compile_d3d9.cpp`, the system's d3dcompiler_47: under
 Wine from Linux) and held to `shaders.txt`: the profile's version, the constant registers each may
 read (above the game's, so the game's are never touched), the samplers; the device's caps are
-checked against the composite's length before anything is drawn. The recompiled client has no
-renderer for it yet: `supported` answers false with the reason, and its Vulkan renderer's render
-points are where it will be drawn.
+checked against the composite's length before anything is drawn.
+
+On the recompiled client's Vulkan renderer the same passes are `src/gx/vk/render/Highlight.cpp`,
+made of `wxl.render`'s own pieces (below): at `M2.DrawBatch` the renderer's record of the batch's
+draw (`draw::Batch`: its vertex program, layout, buffers, viewport and push constants) is kept, a
+batch drawn by the fixed function left out as on D3D9; after the world the batches are drawn again
+with a batch program (`highlight_mask.frag`: the game's alpha test on its first texture, the
+colour and the glow into two masks) against the scene's depth, the masks of the scene's samples
+resolved when the pass ends, blurred across then down at half size (`highlight_blur.frag`) and
+composed onto the scene (`highlight_composite.frag`, blended ONE, ONE_MINUS_SRC_ALPHA), each program
+the HLSL one line for line; nothing of the engine's state is touched, so nothing is put back. The
+native tests hold the picture to the Direct3D 9 algorithm computed on the CPU. On the recompiled
+client under D3D9, `supported` answers false with the reason.
 
 ### The game's selection circles
 
@@ -512,6 +522,7 @@ x64. Its modules are static libraries of `cmake/wxl_vk.cmake`, each seeing only 
 | `draw` | the engine's draws in Vulkan (`draw/Draw.hpp`): its texture formats (`draw/Formats.hpp`, D3D9's bytes read through a format and a swizzle, nothing converted), its textures (an image, bindless slots for its 2D and cube views, uploads by lock and unlock, views as a render target), its pools (a stream pool's mapped buffers renamed when the engine discards it; a static or dynamic pool's CPU copy, copied to the device before the first draw that reads what changed), and `Renderer`: the client's programs (translated once per record), the engine's vertex and pixel registers (copied into the frame when they change, as many rows as the bound programs read), the render target (the scene, or a texture with its own depth or the renderer's), clears, copies from the scene (TexCopy, TexStretch), occlusion queries (counted precisely, read without a wait), and a draw packet recorded into the target, the uploads in the frame's upload pass when nothing drew with the resource yet this frame, between the draws otherwise |
 | `engine` | `gxfront/Engine.cpp`: one draw of the engine read out of its `CGxDevice` (the SDK's engine layouts, and the small records of `include/wxl/core/gx_state.h`) into a packet, as the D3D9 device's `IStateSync` reads the same state (sixteen texture stages, the lights, the fog, the user clip plane, a texture target's viewport the right way up); what a pointer of the engine names asked of a resolver (the live client's, or a capture's); the draws it leaves out, by reason |
 | `imgui` | Dear ImGui's Vulkan backend (the SDK's `deps/imgui/backends/imgui_impl_vulkan`) over the renderer's device, dynamic rendering into the scene at its sample count (as into D3D9's back buffer, under the cursor), the font atlas uploaded in the frame |
+| `render` | `wxl.render` beside the engine's draws (`render/Render.hpp`): images (screen-sized ones made again with the scene, a multisampled one resolved into its one-sample image when a pass ends, a bindless slot each), buffers (device memory read by address and as 32-bit indices, written through the frame's upload pass after the frames before it are done reading), pipelines of a mod's SPIR-V on the engine's layout (graphics with no vertex input, full-screen behind the runtime's triangle, batch behind an engine vertex program and its layout, a variant per target and engine program), passes (a rendering of their own between the engine's: `Display::BeginOwnRendering`), the engine's draws kept as batches (`Renderer::KeepBatches`) and drawn again, the scene's colour and depth copied for sampling, GPU zones by timestamps; and `wxl.highlight`'s passes made of them (`render/Highlight.cpp`) |
 | `capture` | the reader of a frame capture (`include/wxl/core/gx_capture.h`), which the client records under D3D9 (`gxCapture`), and its replay through the renderer (`capture/Replay.cpp`) compared with the D3D9 picture it holds |
 
 None knows the runtime or the log: they hand their lines to a sink (`gx/vk/Log.hpp`) and build
@@ -567,7 +578,24 @@ limiter in fullscreen. The gamma ramp applies in fullscreen, as D3D9's. A loss (
 command `gxVkSimulateLoss`) goes through the engine's own lost-device path: `m_context` 0, the
 device made again at the next scene, `SwapchainLost` before and the engine's restore callbacks
 (`SwapchainRestored`) after; three losses within a minute close the client with a message. With
-the profiler on, each frame is a GPU zone of a "Vulkan" context. Without `[gx] api = vulkan` (or
+the profiler on, each frame is a GPU zone of a "Vulkan" context, each `RenderPoint` and each mod's
+`gpu_zone_begin` another.
+
+The platform contract under Vulkan (`src/services/RenderService.cpp`): `wxl.gx` answers the API the
+device runs on; `M2.DrawBatch` hands `ModelBatchDrawn` the renderer's record of the batch (`batch`)
+and the viewport it drew with, the client's `CGxDeviceVk::Draw` keeping the draw's numbers in
+D3D9's terms as the D3D9 device does; `RenderPoint` is raised after the opaque world
+(`WorldScene.RenderDetailDoodads`), the liquids (`WorldScene.RenderLiquidPass`), the world
+(`WorldFrame.RenderWorld` After, after the highlights) and the interface (`Gx.ScenePresent`
+Before), on every device, inside a frame; `wxl.render` takes passes and draws only inside one, and
+closes what a mod left open; its images, buffers and pipelines are handles owned by the mod that
+made them, given back at its unload, kept across a device loss (`Render::Release`, made again at
+their next use) and forgotten with the renderer; a mod's replacement of the client's shaders is a
+program of its SPIR-V in the place of the matching records' own (`Front::ReplaceShader`), with what
+the record's program reads; `wxl.vk` hands the device's objects and, inside a point, the frame's
+command buffer with the runtime's rendering ended. On the stock client, which the renderer does not
+draw yet, `wxl.render` and `wxl.vk` answer that they do not drive its device, and the points are
+raised for a mod drawing with the D3D9 device. Without `[gx] api = vulkan` (or
 `gxApi Vulkan`) nothing of Vulkan is loaded.
 
 ### The log and the crash report
@@ -643,7 +671,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its looks of the selection circles, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.
