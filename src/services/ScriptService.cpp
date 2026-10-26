@@ -287,10 +287,13 @@ namespace
         const int32_t index = EventIndex(name);
         if (index < 0) return WXL_E_NOT_FOUND;
 
+        // As the client's own signal does, the event's name goes first: a frame's OnEvent receives
+        // (self, event, ...) and the legacy `event` global is set from it.
+        binding::script_push_string(g_state, name, static_cast<uint32_t>(std::strlen(name)));
         for (uint32_t i = 0; i < count; ++i) Push(g_state, args[i]);
         binding::script_signal_event(static_cast<uint32_t>(index), g_state,
-                                     static_cast<int32_t>(count));
-        binding::script_pop(g_state, static_cast<int32_t>(count));
+                                     static_cast<int32_t>(count + 1));
+        binding::script_pop(g_state, static_cast<int32_t>(count + 1));
         return WXL_OK;
     }
 

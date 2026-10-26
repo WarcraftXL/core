@@ -3577,10 +3577,11 @@ namespace
         text.as.string             = Str("x");
         const wxl_value args[2]    = {payload[0], text};
         Check(api.fire_event("WXL_HARNESS_LATE", args, 2) == WXL_OK && g_vm.signals.size() == 1 &&
-                  g_vm.signals[0].index == 3 && g_vm.signals[0].args.size() == 2 &&
-                  g_vm.signals[0].args[0].number == 7.0 && g_vm.signals[0].args[1].string == "x" &&
-                  g_vm.stack.empty(),
-              "fire_event signals the event at its index with the values pushed, and leaves the stack as it found it");
+                  g_vm.signals[0].index == 3 && g_vm.signals[0].args.size() == 3 &&
+                  g_vm.signals[0].args[0].string == "WXL_HARNESS_LATE" && g_vm.signals[0].args[1].number == 7.0 &&
+                  g_vm.signals[0].args[2].string == "x" && g_vm.stack.empty(),
+              "fire_event signals the event at its index with its name then the values pushed, as the client does, and "
+              "leaves the stack as it found it");
         Check(api.fire_event("WXL_HARNESS_NOT_DECLARED", nullptr, 0) == WXL_E_NOT_FOUND,
               "firing an event nobody declared is not found");
 
