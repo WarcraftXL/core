@@ -12,6 +12,10 @@
 
 namespace wxl::vk
 {
+    namespace gxfront
+    {
+        class Front;
+    }
     namespace device
     {
         class Context;
@@ -64,4 +68,11 @@ namespace wxl::core::gx
 
     /// The device and its frame, when a frame is open; false otherwise.
     bool VulkanOpenFrame(VulkanFrame& out);
+
+    /// The renderer behind the client's device, while the client renders through it; null otherwise.
+    wxl::vk::gxfront::Front* VulkanFront();
+
+    /// Whether the renderer keeps each draw as a batch a mod may draw again (wxl.render's batches,
+    /// wxl.highlight's): asked again at each scene and when what wants them changes.
+    void UpdateBatchKeeping();
 }

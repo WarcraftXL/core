@@ -45,6 +45,9 @@ namespace wxl::vk::present
         constexpr VkAccessFlags2 kDepthWrite =
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
+        /// The scene's depth: drawn into, and copied from (wxl.render's copy of it for sampling).
+        constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
         bool HasStencil(VkFormat format)
         {
             return format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D16_UNORM_S8_UINT;
@@ -370,7 +373,7 @@ namespace wxl::vk::present
         {
             VkImageFormatProperties properties{};
             centre_samples_ = vkGetPhysicalDeviceImageFormatProperties(context_->Physical(), depth_format_, VK_IMAGE_TYPE_2D,
-                                                                       VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                                                       VK_IMAGE_TILING_OPTIMAL, kDepthUsage,
                                                                        VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT,
                                                                        &properties) == VK_SUCCESS &&
                               (properties.sampleCounts & samples);
@@ -378,7 +381,7 @@ namespace wxl::vk::present
         bool made = allocator_->CreateImage(want.width, want.height, kSceneFormat,
                                             multi ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : shown, scene_,
                                             VK_IMAGE_ASPECT_COLOR_BIT, samples) &&
-                    allocator_->CreateImage(want.width, want.height, depth_format_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, depth_,
+                    allocator_->CreateImage(want.width, want.height, depth_format_, kDepthUsage, depth_,
                                             DepthAspect(depth_format_), samples,
                                             centre_samples_ ? VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT : 0);
         if (made && multi) made = allocator_->CreateImage(want.width, want.height, kSceneFormat, shown, resolve_);
@@ -496,6 +499,18 @@ namespace wxl::vk::present
         rendering_     = Rendering::Target;
         target_key_    = target.key;
         target_extent_ = target.extent;
+        ++epoch_;
+        return frames_.Current();
+    }
+
+    VkCommandBuffer Display::BeginOwnRendering(const VkRenderingInfo& info, uint64_t key)
+    {
+        if (!frames_.Open() || !key) return VK_NULL_HANDLE;
+        EndRendering();
+        vkCmdBeginRendering(frames_.Current(), &info);
+        rendering_     = Rendering::Target;
+        target_key_    = key;
+        target_extent_ = info.renderArea.extent;
         ++epoch_;
         return frames_.Current();
     }

@@ -1,7 +1,8 @@
 # The Vulkan renderer's modules (src/gx/vk/, namespace wxl::vk), one static library each, in the
 # order they may depend on each other: device; resources; shaders; pipelines; frame; present; draw
 # (the engine's draws in Vulkan); engine (the engine's device read through the SDK's engine
-# layouts, into draws); imgui. None knows the runtime or Windows: they build for Windows inside
+# layouts, into draws); render (wxl.render beside the engine's draws, wxl.highlight); imgui. None
+# knows the runtime or Windows: they build for Windows inside
 # WarcraftXL.dll (x86 and x64) and natively for Linux in the test tree of tests/vk/, from these
 # same rules. The libraries they stand on are vendored in deps/, each with its licence and VERSION:
 # Vulkan-Headers, volk (the loader, found at run time), VMA (memory), SPIRV-Headers (what the
@@ -121,9 +122,25 @@ target_include_directories(wxl-vk-engine SYSTEM PUBLIC "${WXL_VK_ENGINE_INCLUDE}
 target_link_libraries(wxl-vk-engine PUBLIC wxl-vk-draw)
 _wxl_vk_warnings(wxl-vk-engine)
 
+# --- render: wxl.render's images, buffers, pipelines and passes beside the engine's draws, and
+# wxl.highlight's passes made of them ----------------------------------------------------------------
+set(WXL_VK_RENDER_SPIRV_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/vk_render_spirv")
+wxl_vk_glsl(wxl-vk-render-programs "${WXL_VK_RENDER_SPIRV_DIR}"
+    fullscreen_vert=fullscreen.vert
+    highlight_mask_frag=highlight_mask.frag
+    highlight_blur_frag=highlight_blur.frag
+    highlight_composite_frag=highlight_composite.frag)
+add_library(wxl-vk-render STATIC
+    "${WXL_VK_ROOT}/src/gx/vk/render/Render.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/render/Highlight.cpp")
+target_include_directories(wxl-vk-render PRIVATE "${WXL_VK_RENDER_SPIRV_DIR}")
+target_link_libraries(wxl-vk-render PUBLIC wxl-vk-draw)
+add_dependencies(wxl-vk-render wxl-vk-render-programs)
+_wxl_vk_warnings(wxl-vk-render)
+
 add_library(wxl-vk INTERFACE)
 target_link_libraries(wxl-vk INTERFACE wxl-vk-device wxl-vk-resources wxl-vk-shaders wxl-vk-pipelines wxl-vk-frame wxl-vk-present
-    wxl-vk-draw wxl-vk-engine)
+    wxl-vk-draw wxl-vk-engine wxl-vk-render)
 
 # --- capture: a frame of the D3D9 device recorded by the client (wxl/core/gx_capture.h), read back
 # and drawn again through the renderer -------------------------------------------------------------

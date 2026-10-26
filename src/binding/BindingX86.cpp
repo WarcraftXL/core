@@ -681,6 +681,12 @@ namespace wxl::core::binding
     // Both D3D9 devices keep a copy of what they last set (m_deviceStates, the current
     // declaration and streams); spoiling it makes the next state sync send everything again.
 
+    int32_t gx_device_api()
+    {
+        const void* device = IsClient() ? GxDevice() : nullptr;
+        return device ? static_cast<int32_t>(Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"))) : -1;
+    }
+
     void* gx_d3d9_device()
     {
         const void* device = IsClient() ? GxDevice() : nullptr;

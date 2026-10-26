@@ -15,6 +15,7 @@
 #include "services/FootprintService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/ImGuiService.hpp"
+#include "services/RenderService.hpp"
 #include "services/InputService.hpp"
 
 #include "wxl/events.h"
@@ -52,6 +53,15 @@ namespace wxl::seam::Gx::ScenePresent
         wxl_memory_pressure_args pressure{};
         if (host && wxl::core::services::footprint::PressureDue(&pressure))
             host->Raise(WXL_EV_MemoryPressure, &pressure);
+
+        // The interface is drawn: the mods' passes over the whole frame, under their Dear ImGui
+        // windows, while the frame is still open.
+        wxl_render_point_args point{};
+        if (host && wxl::core::services::render::PointBegin(WXL_RENDER_POINT_AFTER_UI, point))
+        {
+            host->Raise(WXL_EV_RenderPoint, &point);
+            wxl::core::services::render::PointEnd();
+        }
 
         wxl_frame_args args{};
         if (!wxl::core::frame::End(args)) return;

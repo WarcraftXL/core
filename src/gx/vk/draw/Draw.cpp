@@ -17,7 +17,7 @@ namespace wxl::vk::draw
     {
         constexpr VkDeviceSize kStagingChunk = 8u << 20;
         constexpr VkDeviceSize kDataChunk    = 4u << 20;
-        constexpr uint32_t     kZeroBinding  = 15; ///< the binding of the zeros an absent input reads
+        constexpr uint32_t     kZeroBinding  = Renderer::kZeroBinding; ///< the binding of the zeros an absent input reads
 
         VkImageAspectFlags AspectOf(const Texture& t)
         {
@@ -340,6 +340,20 @@ namespace wxl::vk::draw
         return id;
     }
 
+    int Renderer::Replacement(bool pixel, int base, const std::vector<uint32_t>& words, uint64_t identity)
+    {
+        if (!Ready() || base < 0 || static_cast<size_t>(base) >= pipelines_.Programs(pixel)) return -1;
+        const uint64_t key = (identity * 0x9E3779B97F4A7C15ull) ^ static_cast<uint64_t>(base) ^ 0x4000000000000000ull ^
+                             (pixel ? 0x8000000000000000ull : 0);
+        const auto found = programs_.find(key);
+        if (found != programs_.end()) return found->second;
+        const shaders::ProgramInfo info = pipelines_.Info(pixel, static_cast<uint16_t>(base)); // a copy: the table grows
+        const int id = pipelines_.AddProgram(words, info, key);
+        if (id < 0) Log(LogLevel::Warn, "a %s program replacing a client's could not be made", pixel ? "pixel" : "vertex");
+        programs_.emplace(key, id);
+        return id;
+    }
+
     void Renderer::Prewarm(std::vector<std::vector<uint8_t>> records) { cache_.Prewarm(std::move(records)); }
 
     void Renderer::Constants(bool pixel, uint32_t first, uint32_t rows, const float* values)
@@ -349,6 +363,16 @@ namespace wxl::vk::draw
         RegisterFile& file = pixel ? pixel_regs_ : vertex_regs_;
         std::memcpy(file.rows + first * 4, values, rows * 4 * sizeof(float));
         file.dirty = true;
+    }
+
+    bool Renderer::FrameData(const void* bytes, uint32_t size, VkDeviceAddress& address)
+    {
+        if (!display_ || !display_->InFrame()) return false;
+        resources::Ring::Span span;
+        if (!data_.Allocate(size ? size : 16u, 16, span)) return false;
+        if (size) std::memcpy(span.data, bytes, size);
+        address = span.address;
+        return true;
     }
 
     VkDeviceAddress Renderer::Snapshot(RegisterFile& file, uint32_t rows)
@@ -1211,6 +1235,63 @@ namespace wxl::vk::draw
         // there, else the draw stays antialiased.
         const bool off = packet.multisample_off && display_->Samples() > 1 && TargetIsScene();
         key.centre     = off && display_->CentreSamples() && pipelines_.CentreSamples(target_id);
+        shaders::Push push{};
+        push.data[0]   = static_cast<uint32_t>(own ? last_address_ : 0);
+        push.data[1]   = static_cast<uint32_t>(own ? last_address_ >> 32 : 0);
+        push.vertex[0] = static_cast<uint32_t>(vregs);
+        push.vertex[1] = static_cast<uint32_t>(vregs >> 32);
+        push.pixel[0]  = static_cast<uint32_t>(pregs);
+        push.pixel[1]  = static_cast<uint32_t>(pregs >> 32);
+        push.alpha_ref = packet.alpha_ref;
+        push.flags     = packet.flags | (carried & ~0xFFFFu);
+        if (!pinfo.fixed_fog) push.flags &= ~shaders::kFlagFog;
+        std::memcpy(push.clip_plane, packet.clip_plane, sizeof push.clip_plane);
+        push.fog_color  = packet.fog_color;
+        push.point_size = packet.point_size;
+        // The device's own range bounds D3D9's (its MaxPointSize, the caps' point scale maximum).
+        const float* limit   = context_->Properties().limits.pointSizeRange;
+        const float  ceiling = context_->Chosen().features.largePoints ? limit[1] : 1.0f;
+        push.point_range[0]  = std::clamp(packet.point_range[0], limit[0], ceiling);
+        push.point_range[1]  = std::clamp(packet.point_range[1], push.point_range[0], ceiling);
+        for (uint32_t s = 0; s < kStages; ++s)
+        {
+            const Texture* t     = packet.textures[s];
+            const bool     cube  = (pinfo.cube >> s) & 1;
+            uint32_t       image = cube ? black_cube_slot_ : 0;
+            // A texture drawn into by this rendering reads as the default (D3D9 leaves it undefined).
+            if (t && t != open_.color && t != open_.depth) image = cube ? (t->desc.cube ? t->cube_slot : black_cube_slot_) : t->slot;
+            push.stages[s] = shaders::StageWord(image, t ? bindless_.Sampler(packet.samplers[s]) : 0);
+        }
+
+        if (keep_batches_)
+        {
+            // Kept before the pipeline is asked for: a draw left out while its pipeline compiles
+            // is still the batch a mod draws again with its own.
+            last_              = Batch{};
+            last_.frame        = frame;
+            last_.vertex       = packet.vertex;
+            last_.layout       = key.layout;
+            last_.primitive    = packet.primitive;
+            last_.indexed      = packet.indexed;
+            last_.scene        = TargetIsScene();
+            last_.first_index  = packet.first_index;
+            last_.count        = packet.count;
+            last_.index        = packet.indexed ? (packet.indices->usage == kStream ? packet.indices->current.buffer : packet.indices->device.buffer)
+                                                : VK_NULL_HANDLE;
+            last_.stream_count = packet.stream_count;
+            std::copy(buffers, buffers + packet.stream_count, last_.buffers);
+            std::copy(offsets, offsets + packet.stream_count, last_.offsets);
+            std::memcpy(last_.viewport, packet.viewport, sizeof last_.viewport);
+            last_.cull       = packet.cull;
+            last_.depth_bias = packet.depth_bias;
+            last_.push       = push;
+            last_valid_      = true;
+            // What it reads stays alive until this frame completes, drawn now or not.
+            for (uint32_t i = 0; i < packet.stream_count; ++i) packet.streams[i].pool->used = frame;
+            if (packet.indexed) packet.indices->used = frame;
+            for (Texture* t : packet.textures)
+                if (t) t->used = frame;
+        }
         // A draw into the scene may be left out while its pipeline compiles (the next frames have
         // it); one into a texture may not: the engine keeps what it drew there (a portrait, the map).
         pipelines::Got   got      = pipelines::Got::Ready;
@@ -1342,33 +1423,6 @@ namespace wxl::vk::draw
         }
         std::memcpy(dynamic_, states, sizeof states);
 
-        shaders::Push push{};
-        push.data[0]   = static_cast<uint32_t>(own ? last_address_ : 0);
-        push.data[1]   = static_cast<uint32_t>(own ? last_address_ >> 32 : 0);
-        push.vertex[0] = static_cast<uint32_t>(vregs);
-        push.vertex[1] = static_cast<uint32_t>(vregs >> 32);
-        push.pixel[0]  = static_cast<uint32_t>(pregs);
-        push.pixel[1]  = static_cast<uint32_t>(pregs >> 32);
-        push.alpha_ref = packet.alpha_ref;
-        push.flags     = packet.flags | (carried & ~0xFFFFu);
-        if (!pinfo.fixed_fog) push.flags &= ~shaders::kFlagFog;
-        std::memcpy(push.clip_plane, packet.clip_plane, sizeof push.clip_plane);
-        push.fog_color  = packet.fog_color;
-        push.point_size = packet.point_size;
-        // The device's own range bounds D3D9's (its MaxPointSize, the caps' point scale maximum).
-        const float* limit   = context_->Properties().limits.pointSizeRange;
-        const float  ceiling = context_->Chosen().features.largePoints ? limit[1] : 1.0f;
-        push.point_range[0]  = std::clamp(packet.point_range[0], limit[0], ceiling);
-        push.point_range[1]  = std::clamp(packet.point_range[1], push.point_range[0], ceiling);
-        for (uint32_t s = 0; s < kStages; ++s)
-        {
-            const Texture* t     = packet.textures[s];
-            const bool     cube  = (pinfo.cube >> s) & 1;
-            uint32_t       image = cube ? black_cube_slot_ : 0;
-            // A texture drawn into by this rendering reads as the default (D3D9 leaves it undefined).
-            if (t && t != open_.color && t != open_.depth) image = cube ? (t->desc.cube ? t->cube_slot : black_cube_slot_) : t->slot;
-            push.stages[s] = shaders::StageWord(image, t ? bindless_.Sampler(packet.samplers[s]) : 0);
-        }
         vkCmdPushConstants(cmd, pipelines_.Layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
 
         if (packet.indexed) vkCmdDrawIndexed(cmd, packet.count, 1, packet.first_index, 0, 0);

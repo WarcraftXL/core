@@ -418,6 +418,12 @@ namespace wxl::vk::pipelines
         return static_cast<uint64_t>(part) << 56 | fields;
     }
 
+    VkShaderModule Pipelines::ProgramModule(bool pixel, uint16_t id) const
+    {
+        const std::vector<Program>& table = pixel ? pixel_ : vertex_;
+        return id < table.size() ? table[id].module : VK_NULL_HANDLE;
+    }
+
     VkPipeline Pipelines::Make(Part part, const Recipe& recipe) const
     {
         const Target& target = recipe.target;

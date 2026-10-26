@@ -239,6 +239,7 @@ add_library(wxl-core SHARED
     src/services/WorldService.cpp
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
+    src/services/RenderService.cpp
     src/services/SelectionCircleService.cpp
     src/services/TextureService.cpp
     src/services/CVarService.cpp
@@ -293,6 +294,7 @@ add_executable(wxl-core-seam-harness
     src/services/WorldService.cpp
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
+    src/services/RenderService.cpp
     src/services/SelectionCircleService.cpp
     src/services/TextureService.cpp
     src/services/CVarService.cpp

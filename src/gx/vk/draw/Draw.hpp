@@ -225,6 +225,32 @@ namespace wxl::vk::draw
         DrawData data = {};
     };
 
+    /**
+     * One draw as the renderer recorded it: what a mod draws again with a fragment program of its
+     * own behind the draw's vertex program (wxl.render's batches). Everything it names lives until
+     * the frame it was drawn in has completed: the buffers (a stream pool renamed since is retired
+     * by frame), the registers and the draw's data (the frame's ring), the textures' slots.
+     */
+    struct Batch
+    {
+        uint64_t        frame = 0;      ///< the frame it was drawn in
+        uint16_t        vertex = 0;     ///< its vertex program's id
+        uint16_t        layout = 0;     ///< its vertex layout's id (pipelines::Pipelines::LayoutId)
+        uint32_t        primitive = kTriangles;
+        bool            indexed = false;
+        bool            scene = false;  ///< drawn into the scene (not a texture)
+        uint32_t        first_index = 0;
+        uint32_t        count = 0;
+        VkBuffer        index = VK_NULL_HANDLE; ///< 16-bit indices
+        uint32_t        stream_count = 0;
+        VkBuffer        buffers[14] = {};
+        VkDeviceSize    offsets[14] = {};
+        float           viewport[6] = {}; ///< D3D9's: x, y, width, height in the scene's pixels, min and max depth
+        VkCullModeFlags cull = VK_CULL_MODE_NONE;
+        float           depth_bias = 0.0f;
+        shaders::Push   push = {};      ///< as the draw pushed it
+    };
+
     /// The renderer's own program for a client shader, by the name its record has ("UI:0", "UI:1",
     /// "UI", "Desaturate"); false for the others, which are translated.
     bool ProgramByName(bool vertex, const char* name, uint16_t& program);
@@ -285,6 +311,12 @@ namespace wxl::vk::draw
          * @return its id, or -1 with @p why when the record cannot be translated.
          */
         int  Program(bool pixel, const char* name, const void* code, size_t size, std::string* why = nullptr);
+        /**
+         * @brief A program of the caller's SPIR-V (@p words) in the place of program @p base of the
+         *        same stage: it reads what @p base reads (its inputs, its registers, its stages).
+         *        One per (@p base, @p identity), made once; -1 when its module cannot be made.
+         */
+        int  Replacement(bool pixel, int base, const std::vector<uint32_t>& words, uint64_t identity);
         /// The records of a shader's permutations, translated ahead on the cache's worker.
         void Prewarm(std::vector<std::vector<uint8_t>> records);
         shaders::Cache& ShaderCache() { return cache_; }
@@ -357,6 +389,28 @@ namespace wxl::vk::draw
         // --- Draws ------------------------------------------------------------------------------
         /// Records @p packet into the open frame; false when it was not (no frame, no memory, no pipeline).
         bool Draw(const Packet& packet);
+
+        // --- What draws beside the engine's ------------------------------------------------------
+        /// Each draw recorded from now on is kept as LastBatch() (a copy per draw: only while asked).
+        void KeepBatches(bool on) { keep_batches_ = on; }
+        bool KeepingBatches() const { return keep_batches_; }
+        /// The last draw kept, or null when the last draw asked for was not drawn (or none is kept).
+        const Batch* LastBatch() const { return last_valid_ ? &last_ : nullptr; }
+        /// The next draw is a new one: until it is kept, LastBatch() answers null.
+        void ForgetLastBatch() { last_valid_ = false; }
+        /// @p size bytes in the frame's ring, aligned to 16, read by the GPU through @p address
+        /// until the frame completes; false without memory or outside a frame.
+        bool FrameData(const void* bytes, uint32_t size, VkDeviceAddress& address);
+        /// @p size bytes of the frame's staging ring (copied from by the frame's upload pass or
+        /// later commands of the frame); false without memory.
+        bool Stage(VkDeviceSize size, resources::Ring::Span& span) { return staging_.Allocate(size, 16, span); }
+        /// What the renderer bound in the open rendering is bound again before its next draw (a
+        /// recorder in between changed it).
+        void Invalidate() { epoch_ = ~0ull; }
+        /// The buffer of zeros the vertex layouts read an input the vertex lacks from, bound at
+        /// kZeroBinding by any recorder that draws with them.
+        VkBuffer ZeroBuffer() const { return zeros_.buffer; }
+        static constexpr uint32_t kZeroBinding = 15;
 
         const Stats&            Counters() const { return stats_; }
         pipelines::Pipelines&   PipelineCache() { return pipelines_; }
@@ -485,5 +539,8 @@ namespace wxl::vk::draw
         uint16_t   last_layout_ = 0;
         uint32_t   last_carried_ = 0;
         Stats      stats_;
+        bool       keep_batches_ = false;
+        bool       last_valid_ = false;
+        Batch      last_;
     };
 }

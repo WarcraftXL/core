@@ -7,6 +7,7 @@
 
 #include <cstdint>
 
+#include "wxl/events.h"
 #include "wxl/services/highlight.h"
 
 namespace wxl::core::services
@@ -20,15 +21,24 @@ namespace wxl::core::services
         /// highlighted objects are found, those gone dropped, and their models' batches kept.
         void WorldBegin();
 
-        /// The game drew a model batch (M2.DrawBatch After, a CM2SceneRender*). Two flags read
-        /// while nothing is highlighted.
-        void Batch(const void* render);
+        /// Whether a model batch drawn now is wanted (Batch is to be called with its numbers).
+        bool WantsBatch();
+
+        /// Whether the renderer is to keep each draw (the Vulkan renderer's batches).
+        bool Capturing();
+
+        /// The game drew a model batch (M2.DrawBatch After, a CM2SceneRender*), its numbers @p args
+        /// read already.
+        void Batch(const void* render, const wxl_model_batch_args& args);
 
         /// The world is drawn (WorldFrame.RenderWorld After): the highlights go onto it.
         void WorldEnd();
 
         /// The device's resources are about to go.
         void DeviceLost();
+
+        /// The Vulkan device's renderer goes with everything made on it (its wxl.render records).
+        void DeviceGone();
 
         /// A mod's highlights are taken off: disabled or unloaded.
         void ForgetMod(uint32_t mod);

@@ -213,6 +213,14 @@ namespace wxl::vk::pipelines
         /// linked ones), and what was replaced in frames up to @p completed is released.
         void BeginFrame(uint64_t frame, uint64_t completed);
 
+        /// A program's module (null for an id the table lacks), for pipelines made beside these
+        /// (wxl.render's batch programs behind an engine vertex program).
+        VkShaderModule ProgramModule(bool pixel, uint16_t id) const;
+        /// The vertex layout of @p id; null for an id never given.
+        const VertexLayout* LayoutOf(uint16_t id) const { return id < layouts_.size() ? &layouts_[id] : nullptr; }
+        /// The pipeline cache every pipeline here is made through (it persists between launches).
+        VkPipelineCache CacheHandle() const { return cache_; }
+
         size_t Count() const { return pipelines_.size(); }
         size_t Layouts() const { return layouts_.size(); }
         /// Jobs queued or under way on the workers.

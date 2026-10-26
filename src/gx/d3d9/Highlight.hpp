@@ -21,6 +21,8 @@
 
 #include <cstdint>
 
+#include "wxl/events.h"
+
 namespace wxl::core::gx::d3d9
 {
     class Device;
@@ -56,8 +58,9 @@ namespace wxl::core::gx::d3d9::highlight
     /// Nothing is kept for an empty list.
     void Begin(const void* const* roots, const uint32_t* styles, uint32_t count);
 
-    /// The game drew a batch (CM2SceneRender*): kept when its model hangs on a highlighted top.
-    void Batch(const void* render);
+    /// The game drew a batch (CM2SceneRender*, its numbers @p args): kept when its model hangs on
+    /// a highlighted top.
+    void Batch(const void* render, const wxl_model_batch_args& args);
 
     /// After the world: the kept batches drawn again and the highlights onto the scene. Answers
     /// how many batches were drawn again.

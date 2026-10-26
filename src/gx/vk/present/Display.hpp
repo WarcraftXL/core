@@ -189,6 +189,14 @@ namespace wxl::vk::present
         /// A rendering into @p target (its images in their attachment layouts already, contents
         /// kept); the one already open when it has the same key. Null outside a frame.
         VkCommandBuffer BeginTargetRendering(const TargetRendering& target);
+        /**
+         * @brief A rendering of the caller's own (@p info: its attachments, already in their
+         *        attachment layouts), named by @p key (never 0, never a texture target's), whatever
+         *        was open ended first. Null outside a frame. Ended by EndRendering, as any other.
+         */
+        VkCommandBuffer BeginOwnRendering(const VkRenderingInfo& info, uint64_t key);
+        /// The scene's colour was drawn into by a rendering of the caller's own: its resolve is due.
+        void SceneDrawn() { if (samples_ > VK_SAMPLE_COUNT_1_BIT) msaa_dirty_ = true; }
         void            EndRendering();
         /// Whether a rendering is open in the frame's command buffer.
         bool            InRendering() const { return rendering_ != Rendering::None; }
@@ -208,6 +216,8 @@ namespace wxl::vk::present
         const resources::Image* ResolveScene();
         /// The scene's images: its colour (multisampled or not), and the image shown and copied from.
         const resources::Image& SceneImage() const { return scene_; }
+        /// The scene's depth (multisampled as its colour), in DEPTH_STENCIL_ATTACHMENT_OPTIMAL during the frame.
+        const resources::Image& DepthImage() const { return depth_; }
         const resources::Image& Shown() const { return samples_ > VK_SAMPLE_COUNT_1_BIT ? resolve_ : scene_; }
 
         /**
@@ -239,6 +249,8 @@ namespace wxl::vk::present
 
         // --- What it is ---------------------------------------------------------------------------
         VkExtent2D SceneExtent() const { return scene_extent_; }
+        /// The size the scene is drawn at from its next use (SetSceneExtent's), the made one's until set.
+        VkExtent2D WantedSceneExtent() const { return scene_wanted_.width && scene_wanted_.height ? scene_wanted_ : scene_extent_; }
         VkFormat   SceneFormat() const { return kSceneFormat; }
         VkFormat   DepthFormat() const { return depth_format_; }
         const Swapchain& Chain() const { return swapchain_; }

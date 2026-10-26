@@ -26,6 +26,10 @@ WXL_BINDING(gx_window_size, wxl_bool, (uint32_t* width, uint32_t* height), (widt
 // device of another API.
 WXL_BINDING(gx_d3d9_device, void*, (void), (), 0)
 
+// The API of the client's device: its EGxApi (0 OpenGL, 1 Direct3D 9, 2 Direct3D 9Ex, 6 Vulkan on
+// the recompiled client), -1 with no device. What wxl.gx's api answers from.
+WXL_BINDING(gx_device_api, int32_t, (void), (), -1)
+
 // Makes the client send all of its device state again before its next draw: what a mod calls
 // after it set state on the device behind the client's copy of it. Nothing without a D3D9 device.
 WXL_BINDING(gx_invalidate_state, void, (void), (), (void)0)

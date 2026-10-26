@@ -23,6 +23,7 @@
 #include "services/InputService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
+#include "services/RenderService.hpp"
 #include "services/SelectionCircleService.hpp"
 #include "services/CVarService.hpp"
 #include "services/StorageService.hpp"
@@ -132,6 +133,7 @@ namespace
         // get back the look it changed.
         wxl::core::services::pose::ForgetMod(token);
         wxl::core::services::highlight::ForgetMod(token);
+        wxl::core::services::render::ForgetMod(token);
         wxl::core::services::selectioncircle::ForgetMod(token);
         // Its console variables are released; they stay, with their values.
         wxl::core::services::cvar::ForgetMod(token);

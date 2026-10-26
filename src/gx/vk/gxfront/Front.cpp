@@ -126,6 +126,11 @@ namespace wxl::vk::gxfront
         if (!display_.Create(context_, allocator_, timeline_, display, why, why_size) ||
             !renderer_.Create(context_, allocator_, display_, paths, why, why_size))
             return false;
+        if (!render_.Create(context_, allocator_, timeline_, display_, renderer_))
+        {
+            std::snprintf(why, why_size, "wxl.render's own programs could not be made");
+            return false;
+        }
         const VkExtent2D extent = ClientExtent(window_);
         display_.SetWindowExtent(extent);
         display_.SetSceneExtent(extent);
@@ -174,6 +179,7 @@ namespace wxl::vk::gxfront
             }
             for (void* pool : pools_) renderer_.Forget(static_cast<draw::Pool*>(static_cast<engine::CGxPool*>(pool)->m_apiSpecific));
         }
+        render_.Release();
         renderer_.Destroy();
         display_.Destroy();
         timeline_.Destroy();
@@ -184,6 +190,8 @@ namespace wxl::vk::gxfront
     void Front::Destroy()
     {
         ReleaseDevice();
+        render_.Destroy();
+        replacements_.clear();
         ReleaseCursor();
         for (void* pool : pools_)
         {
@@ -328,7 +336,11 @@ namespace wxl::vk::gxfront
         if (!context_.Ready()) return false;
         if (display_.InFrame()) return true;
         frame::Wait wait{};
-        if (display_.BeginFrame(wait)) return true;
+        if (display_.BeginFrame(wait))
+        {
+            render_.FrameBegun();
+            return true;
+        }
         if (!context_.Lost()) context_.MarkLost("a frame could not begin");
         return false;
     }
@@ -369,6 +381,8 @@ namespace wxl::vk::gxfront
             ++stats_.left_out[static_cast<int>(Verdict::Target)];
             return;
         }
+        // The batch a mod may draw again is this draw's, or none.
+        renderer_.ForgetLastBatch();
         if (verdict == Verdict::Draw && renderer_.Draw(packet) && world) ++stats_.world;
     }
 
@@ -480,7 +494,7 @@ namespace wxl::vk::gxfront
             record.program    = front_.renderer_.Program(!vertex, record.name.c_str(), record.code.data(), record.code.size());
             record.generation = front_.generation_;
         }
-        return record.program;
+        return front_.replacements_.empty() ? record.program : front_.ProgramOf(record, vertex);
     }
 
     char* Front::PoolMemory(void* pool)
@@ -587,6 +601,58 @@ namespace wxl::vk::gxfront
         const bool made   = record.program >= 0;
         shaders_[vertex ? 1 : 0][shader] = std::move(record);
         return made;
+    }
+
+    int Front::ProgramOf(const ShaderRecord& record, bool vertex)
+    {
+        if (record.program < 0) return record.program;
+        // The newest replacement whose prefix the shader's name starts with.
+        for (auto it = replacements_.rbegin(); it != replacements_.rend(); ++it)
+            if (it->vertex == vertex && record.name.compare(0, it->prefix.size(), it->prefix) == 0)
+            {
+                const int id = renderer_.Replacement(!vertex, record.program, it->words, it->identity);
+                return id >= 0 ? id : record.program;
+            }
+        return record.program;
+    }
+
+    bool Front::ReplaceShader(const std::string& prefix, bool vertex, std::vector<uint32_t> words, std::string& why)
+    {
+        if (!renderer_.Ready())
+        {
+            why = "no Vulkan device";
+            return false;
+        }
+        if (words.size() < 5 || words[0] != 0x07230203u)
+        {
+            why = "the program is no SPIR-V module";
+            return false;
+        }
+        VkShaderModuleCreateInfo info{};
+        info.sType          = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        info.codeSize       = words.size() * sizeof(uint32_t);
+        info.pCode          = words.data();
+        VkShaderModule test = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(context_.Device(), &info, nullptr, &test) != VK_SUCCESS)
+        {
+            why = "the device refused the SPIR-V";
+            return false;
+        }
+        vkDestroyShaderModule(context_.Device(), test, nullptr);
+        uint64_t identity = 0xCBF29CE484222325ull; // FNV-1a over the words
+        for (uint32_t w : words) identity = (identity ^ w) * 0x100000001B3ull;
+        RestoreShader(prefix, vertex);
+        replacements_.push_back(Replacement{prefix, vertex, std::move(words), identity});
+        return true;
+    }
+
+    bool Front::RestoreShader(const std::string& prefix, bool vertex)
+    {
+        const auto at = std::find_if(replacements_.begin(), replacements_.end(),
+                                     [&](const Replacement& r) { return r.vertex == vertex && r.prefix == prefix; });
+        if (at == replacements_.end()) return false;
+        replacements_.erase(at);
+        return true;
     }
 
     void Front::ShaderDestroy(void* shader)

@@ -23,6 +23,7 @@
 #include "gx/vk/frame/Frame.hpp"
 #include "gx/vk/gxfront/Engine.hpp"
 #include "gx/vk/present/Display.hpp"
+#include "gx/vk/render/Render.hpp"
 #include "gx/vk/resources/Resources.hpp"
 
 #include <cstdint>
@@ -127,6 +128,16 @@ namespace wxl::vk::gxfront
         /// The samples per pixel the device draws the back buffer with (VkSampleCountFlags).
         uint32_t SampleCounts() const { return display_.SampleCounts(); }
 
+        /**
+         * @brief The client's shaders of @p vertex's stage whose name starts with @p prefix draw with
+         *        @p words (SPIR-V of the engine's interface) instead of their own program, from their
+         *        next draw; a replacement of the same prefix and stage is replaced. False with @p why
+         *        when the device refuses the module.
+         */
+        bool ReplaceShader(const std::string& prefix, bool vertex, std::vector<uint32_t> words, std::string& why);
+        /// Takes the replacement of @p prefix and @p vertex's stage back; false when there is none.
+        bool RestoreShader(const std::string& prefix, bool vertex);
+
         /// Waits (bounded) for the frames submitted; a GPU that does not finish them is marked lost.
         void WaitIdle();
 
@@ -139,6 +150,8 @@ namespace wxl::vk::gxfront
         present::Display&     Screen() { return display_; }
         frame::Timeline&      Timeline() { return timeline_; }
         draw::Renderer&       Renderer() { return renderer_; }
+        /// wxl.render's resources and passes beside the engine's draws.
+        render::Render&       Mods() { return render_; }
         /// Grows each time the device is made again: what was made on the previous one is gone.
         uint64_t              Generation() const { return generation_; }
         const Stats&          Counters() const { return stats_; }
@@ -179,6 +192,7 @@ namespace wxl::vk::gxfront
         frame::Timeline       timeline_;
         present::Display      display_;
         draw::Renderer        renderer_;
+        render::Render        render_;
         uint64_t              generation_ = 0;
         Stats                 stats_;
 
@@ -197,6 +211,17 @@ namespace wxl::vk::gxfront
             uint64_t             generation = 0; ///< the device the program was made on
         };
         std::unordered_map<const void*, ShaderRecord> shaders_[2]; ///< [pixel, vertex]
+        /// A mod's program in the place of the client's shaders named by a prefix (wxl.render).
+        struct Replacement
+        {
+            std::string           prefix;
+            bool                  vertex = false;
+            std::vector<uint32_t> words;
+            uint64_t              identity = 0; ///< the words' hash
+        };
+        std::vector<Replacement> replacements_;
+        /// The program a shader draws with: its replacement's when one matches its name.
+        int ProgramOf(const ShaderRecord& record, bool vertex);
         draw::Texture* Record(void* tex);
         bool           missing_target_ = false; ///< the engine draws into a texture the device has not made
     };

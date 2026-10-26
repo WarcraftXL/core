@@ -16,12 +16,14 @@
 // the world and the text floating in it, and puts the two matrices back. Not reached at all where
 // there is no world: on the login and character screens.
 //
-// Before raises WorldRenderBegin; After raises WorldRenderEnd, the post-process slot, with the
-// world drawn and the interface over it not. A class static queued through its address, so it
+// Before raises WorldRenderBegin; After draws wxl.highlight's highlights, raises RenderPoint with
+// WXL_RENDER_POINT_AFTER_WORLD, then WorldRenderEnd, the post-process slot, with the world drawn
+// and the interface over it not. A class static queued through its address, so it
 // keeps the convention it is declared with: one argument, the world frame, on the stack.
 WXL_SEAM(WorldFrame, RenderWorld, "CGWorldFrame::RenderWorld", void, cdecl, (void* param))
 WXL_SEAM_RAISES(WorldFrame, RenderWorld, WorldRenderBegin)
 WXL_SEAM_RAISES(WorldFrame, RenderWorld, WorldRenderEnd)
+WXL_SEAM_RAISES(WorldFrame, RenderWorld, RenderPoint)
 
 // What a click in the world does: called at the release of a short click (CGInputControl::
 // UnsetControlBit, and wxl.input's gate when it keeps the mouse look out) with the button, it

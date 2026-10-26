@@ -14,12 +14,14 @@
 // nothing to draw into -- raises nothing, so a mod never sees an end without its begin.
 // About once a second, while a mod watches the address space (wxl.footprint), Before also
 // raises MemoryPressure when the largest free block just fell under the threshold. For the frame
-// it ends, while a mod listens, Before opens a frame of the runtime's Dear ImGui, raises
-// ImGuiFrame for the mods' windows and draws them, before FrameEnd.
+// it ends, Before raises RenderPoint with WXL_RENDER_POINT_AFTER_UI (the interface drawn), then,
+// while a mod listens, opens a frame of the runtime's Dear ImGui, raises ImGuiFrame for the mods'
+// windows and draws them, before FrameEnd.
 WXL_SEAM_BEFORE(Gx, ScenePresent, "GxScenePresent", void, cdecl, ())
 WXL_SEAM_RAISES(Gx, ScenePresent, FrameEnd)
 WXL_SEAM_RAISES(Gx, ScenePresent, MemoryPressure)
 WXL_SEAM_RAISES(Gx, ScenePresent, ImGuiFrame)
+WXL_SEAM_RAISES(Gx, ScenePresent, RenderPoint)
 
 // Releases everything the D3D9 device made that a Reset would invalidate: textures to recreate,
 // shaders, the vertex and index pools. Three callers. Two are the device's resets, each

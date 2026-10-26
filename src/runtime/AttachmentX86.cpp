@@ -25,6 +25,7 @@
 #include "services/WorldService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
+#include "services/RenderService.hpp"
 #include "services/SelectionCircleService.hpp"
 #include "services/TextureService.hpp"
 #include "services/CVarService.hpp"
@@ -92,6 +93,8 @@ namespace wxl::core::attachment
             { WXL_POSE_SERVICE, WXL_POSE_SERVICE_VERSION, &services::PoseApi() },
             { WXL_IMGUI_SERVICE, WXL_IMGUI_SERVICE_VERSION, &services::ImGuiApi() },
             { WXL_HIGHLIGHT_SERVICE, WXL_HIGHLIGHT_SERVICE_VERSION, &services::HighlightApi() },
+            { WXL_RENDER_SERVICE, WXL_RENDER_SERVICE_VERSION, &services::RenderApi() },
+            { WXL_VK_SERVICE, WXL_VK_SERVICE_VERSION, &services::VkApi() },
             { WXL_SELECTIONCIRCLE_SERVICE, WXL_SELECTIONCIRCLE_SERVICE_VERSION, &services::SelectionCircleApi() },
             { WXL_TEXTURE_SERVICE, WXL_TEXTURE_SERVICE_VERSION, &services::TextureApi() },
             { WXL_CVAR_SERVICE, WXL_CVAR_SERVICE_VERSION, &services::CVarApi() },

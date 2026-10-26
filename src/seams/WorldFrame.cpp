@@ -12,6 +12,7 @@
 #include "runtime/Frame.hpp"
 #include "gx/Vulkan.hpp"
 #include "services/HighlightService.hpp"
+#include "services/RenderService.hpp"
 #include "services/SelectionCircleService.hpp"
 
 #include "wxl/events.h"
@@ -21,7 +22,7 @@ namespace wxl::seam::WorldFrame::RenderWorld
 {
     void WXL_CALL Before(void* param)
     {
-        // The world's draws begin: the Vulkan device leaves them out until it draws the world.
+        // The world's draws begin: the Vulkan device counts them as the world's.
         wxl::core::gx::WorldPass(true);
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
@@ -43,6 +44,12 @@ namespace wxl::seam::WorldFrame::RenderWorld
         // The world and the text in it are drawn, and nothing of the interface over it yet: the
         // highlights go onto it first, then the mods' own passes.
         wxl::core::services::highlight::WorldEnd();
+        wxl_render_point_args point{};
+        if (wxl::core::services::render::PointBegin(WXL_RENDER_POINT_AFTER_WORLD, point))
+        {
+            host->Raise(WXL_EV_RenderPoint, &point);
+            wxl::core::services::render::PointEnd();
+        }
         // The circles of the frame are drawn: their counts are the last frame's now.
         wxl::core::services::selectioncircle::WorldEnd();
         wxl_frame_args args{};

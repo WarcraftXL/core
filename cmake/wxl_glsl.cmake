@@ -58,6 +58,14 @@ function(wxl_vk_glsl target out_dir)
     set(outputs)
     set(glsl_dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/gx/vk/shaders/glsl")
     file(GLOB includes "${glsl_dir}/*.glsl")
+    # The SDK's GLSL interface of wxl.render (wxl/render/*.glsl), which the runtime's own
+    # wxl.render programs are written against as a mod's are.
+    set(sdk_include)
+    set(sdk_includes)
+    if(WXL_SDK_DIR)
+        set(sdk_include "-I${WXL_SDK_DIR}/include")
+        file(GLOB sdk_includes "${WXL_SDK_DIR}/include/wxl/render/*.glsl")
+    endif()
     foreach(spec IN LISTS ARGN)
         string(REPLACE "=" ";" parts "${spec}")
         list(GET parts 0 name)
@@ -69,12 +77,18 @@ function(wxl_vk_glsl target out_dir)
         foreach(define IN LISTS rest)
             list(APPEND defines "-D${define}")
         endforeach()
+        # A source is a file of src/gx/vk/shaders/glsl/, or a path of its own (the tests').
+        if(IS_ABSOLUTE "${source}")
+            set(source_path "${source}")
+        else()
+            set(source_path "${glsl_dir}/${source}")
+        endif()
         set(out "${out_dir}/${name}.h")
         add_custom_command(OUTPUT "${out}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${out_dir}"
-            COMMAND "${WXL_GLSLANG_EXE}" -V --target-env vulkan1.3 ${defines} "-I${glsl_dir}" --vn "${name}"
-                    -o "${out}" "${glsl_dir}/${source}"
-            DEPENDS "${glsl_dir}/${source}" ${includes} ${WXL_GLSLANG_TARGET}
+            COMMAND "${WXL_GLSLANG_EXE}" -V --target-env vulkan1.3 ${defines} "-I${glsl_dir}" ${sdk_include} --vn "${name}"
+                    -o "${out}" "${source_path}"
+            DEPENDS "${source_path}" ${includes} ${sdk_includes} ${WXL_GLSLANG_TARGET}
             COMMENT "Compiling the renderer's ${source} to SPIR-V (${name})"
             VERBATIM)
         list(APPEND outputs "${out}")

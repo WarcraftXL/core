@@ -4,8 +4,9 @@
 // wxl.highlight: the highlights mods set, one per mod and object, kept here; each world pass finds
 // their objects' top models and hands them to the renderer, which keeps the batches drawn of
 // them and draws the highlights after the world. On the stock client the renderer is the D3D9
-// one (gx/d3d9/Highlight.cpp); the recompiled client has none until its Vulkan renderer has its
-// render points, and says so through the contract.
+// one (gx/d3d9/Highlight.cpp); on the recompiled client the Vulkan one's (gx/vk/render/
+// Highlight.cpp, made of wxl.render's pieces), the same passes; the recompiled client on D3D9
+// has none, and says so through the contract.
 
 #include "services/HighlightService.hpp"
 
@@ -18,6 +19,10 @@
 
 #if defined(_M_IX86)
     #include "gx/d3d9/Highlight.hpp"
+#else
+    #include "gx/Vulkan.hpp"
+    #include "gx/vk/gxfront/Front.hpp"
+    #include "gx/vk/render/Highlight.hpp"
 #endif
 
 #include <algorithm>
@@ -46,8 +51,8 @@ namespace
     uint32_t           g_drawn     = 0;
 
 #if !defined(_M_IX86)
-    constexpr const char* kNoRenderer =
-        "the recompiled client draws highlights through its Vulkan renderer's render points, which it does not have yet";
+    wxl::vk::render::Highlight g_vulkan; ///< the Vulkan renderer's passes, attached to its device's wxl.render
+    wxl::vk::render::Render*   g_attached = nullptr;
 #endif
 
     const char* Refusal()
@@ -55,7 +60,10 @@ namespace
 #if defined(_M_IX86)
         return gx::d3d9::highlight::Unsupported();
 #else
-        return kNoRenderer;
+        if (gx::VulkanFront()) return nullptr;
+        if (gx::VulkanActive()) return "the Vulkan device is being made again";
+        return "the recompiled client draws highlights on its Vulkan renderer, and it runs on Direct3D 9 (set [gx] api = vulkan in "
+               "WarcraftXL.ini)";
 #endif
     }
 
@@ -146,11 +154,18 @@ namespace wxl::core::services
 
     namespace highlight
     {
+        /// The styles of this pass, one per top model in view, in the order handed to the renderer.
 #if defined(_M_IX86)
         namespace renderer = gx::d3d9::highlight;
-
-        /// The styles of this pass, one per top model in view, in the order handed to the renderer.
-        std::vector<renderer::Style> g_styles;
+        using Style        = renderer::Style;
+#else
+        using Style = wxl::vk::render::Highlight::Style;
+        /// The highlighted top models of this pass, and the index of each one's style.
+        std::vector<const void*> g_roots;
+        std::vector<uint32_t>    g_styleOf;
+        bool                     g_fixedSaid = false;
+#endif
+        std::vector<Style> g_styles;
 
         /// The highlighted objects' top models, found at the pass's first batch: the camera has
         /// been placed by then (a mod may have set a highlight on what is under it) and nothing
@@ -190,9 +205,26 @@ namespace wxl::core::services
                 styleOf.push_back(static_cast<uint32_t>(g_styles.size()));
                 g_styles.push_back({entry.color, entry.outline, entry.glow, entry.strength});
             }
-            if (roots.empty() || renderer::Unsupported()) return;
+            if (roots.empty() || Refusal()) return;
+#if defined(_M_IX86)
             renderer::Begin(roots.data(), styleOf.data(), static_cast<uint32_t>(roots.size()));
+#else
+            wxl::vk::gxfront::Front* front = gx::VulkanFront();
+            if (!front) return;
+            if (g_attached != &front->Mods())
+            {
+                g_vulkan.Forget();
+                g_vulkan.Attach(front->Mods());
+                g_attached = &front->Mods();
+            }
+            g_roots   = std::move(roots);
+            g_styleOf = std::move(styleOf);
+            g_vulkan.Begin();
+#endif
             g_capturing = true;
+#if !defined(_M_IX86)
+            gx::UpdateBatchKeeping(); // the renderer keeps each draw from here
+#endif
         }
 
         void WorldBegin()
@@ -200,12 +232,40 @@ namespace wxl::core::services
             g_capturing = false;
             g_drawn     = 0;
             g_resolve   = !g_entries.empty();
+#if !defined(_M_IX86)
+            // The renderer keeps the world's draws from its first one, a highlighted model's first batch included.
+            if (g_resolve) gx::UpdateBatchKeeping();
+#endif
         }
 
-        void Batch(const void* render)
+        bool WantsBatch() { return g_resolve || g_capturing; }
+
+        bool Capturing() { return g_capturing || g_resolve; }
+
+        void Batch(const void* render, const wxl_model_batch_args& args)
         {
             if (g_resolve) Resolve();
-            if (g_capturing) renderer::Batch(render);
+            if (!g_capturing) return;
+#if defined(_M_IX86)
+            renderer::Batch(render, args);
+#else
+            (void)render;
+            const auto at = std::find(g_roots.begin(), g_roots.end(), args.root_model);
+            if (at == g_roots.end()) return;
+            // Translucent parts (blended: a weapon's enchant, a ghost) are not the object's silhouette.
+            if (args.blend_mode > 1) return;
+            wxl::vk::gxfront::Front* front = gx::VulkanFront();
+            const wxl::vk::draw::Batch* batch = front ? front->Renderer().LastBatch() : nullptr;
+            if (!batch) return;
+            if (batch->vertex < static_cast<uint16_t>(wxl::vk::pipelines::VertexProgram::Count))
+            {
+                // As on Direct3D 9: a model drawn by the fixed function has no program of its own.
+                if (!g_fixedSaid) WLOG_INFO(kTag, "wxl.highlight: a model drawn without a vertex program is not highlighted");
+                g_fixedSaid = true;
+                return;
+            }
+            g_vulkan.Keep(*batch, g_styleOf[static_cast<size_t>(at - g_roots.begin())]);
+#endif
         }
 
         void WorldEnd()
@@ -213,14 +273,38 @@ namespace wxl::core::services
             g_resolve = false;
             if (!g_capturing) return;
             g_capturing = false;
-            g_drawn     = renderer::Draw(g_styles.data(), static_cast<uint32_t>(g_styles.size()));
+#if defined(_M_IX86)
+            g_drawn = renderer::Draw(g_styles.data(), static_cast<uint32_t>(g_styles.size()));
+#else
+            gx::UpdateBatchKeeping();
+            static bool said = false;
+            const char* why  = nullptr;
+            g_drawn          = gx::VulkanFront() ? g_vulkan.Draw(g_styles.data(), static_cast<uint32_t>(g_styles.size()), &why) : 0;
+            if (why && !said) WLOG_WARN(kTag, "wxl.highlight: %s; nothing is drawn", why);
+            said = said || why;
+#endif
         }
 
         void DeviceLost()
         {
             g_capturing = false;
             g_resolve   = false;
+#if defined(_M_IX86)
             renderer::DeviceLost();
+#else
+            // The Vulkan passes' images and pipelines are wxl.render's: made again with the device.
+            g_vulkan.Begin();
+            gx::UpdateBatchKeeping();
+#endif
+        }
+
+        void DeviceGone()
+        {
+#if !defined(_M_IX86)
+            g_vulkan.Forget();
+            g_attached  = nullptr;
+            g_capturing = false;
+#endif
         }
 
         void Clear()
@@ -228,15 +312,13 @@ namespace wxl::core::services
             g_entries.clear();
             g_capturing = false;
             g_drawn     = 0;
+#if defined(_M_IX86)
             renderer::Shutdown();
-        }
 #else
-        void WorldBegin() {}
-        void Batch(const void*) {}
-        void WorldEnd() {}
-        void DeviceLost() {}
-        void Clear() { g_entries.clear(); }
+            g_vulkan.Detach();
+            g_attached = nullptr;
 #endif
+        }
 
         void ForgetMod(uint32_t mod)
         {

@@ -466,11 +466,9 @@ namespace wxl::core::gx::d3d9::highlight
         g_styleOf.assign(styles, styles + count);
     }
 
-    void Batch(const void* render)
+    void Batch(const void* render, const wxl_model_batch_args& args)
     {
         if (g_roots.empty() || !render || !g_source.device || g_kept.size() >= kMaxBatches) return;
-        wxl_model_batch_args args{};
-        if (!binding::gx_model_draw(render, &args)) return;
         const auto at = std::find(g_roots.begin(), g_roots.end(), args.root_model);
         if (at == g_roots.end()) return;
         // Translucent parts (blended: a weapon's enchant, a ghost) are not the object's silhouette.

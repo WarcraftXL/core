@@ -24,6 +24,8 @@
 #include "gx/vk/gxfront/Front.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
+#include "services/HighlightService.hpp"
+#include "services/RenderService.hpp"
 
 #include "wxl/core/gx_vk.h"
 #include "wxl/engine/gx.hpp"
@@ -160,7 +162,7 @@ namespace
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
     /// Each frame as a GPU zone of a "Vulkan" context, from its first command to the end of the
     /// present pass, timed by the frame's own timestamps once it has completed (nothing waits).
-    class GpuZones final : public vk::present::TimestampSink
+    class GpuZones final : public vk::present::TimestampSink, public vk::render::ZoneSink
     {
     public:
         /// The context of the device of the front's generation, made once the profiler is up.
@@ -181,6 +183,23 @@ namespace
             static const char kName[] = "Vulkan";
             ___tracy_emit_gpu_context_name(___tracy_gpu_context_name_data{context_, kName, static_cast<uint16_t>(sizeof kName - 1)});
             std::memset(open_, 0, sizeof open_);
+            // The mods' zones (wxl.profile's gpu_zone_begin) on the same timeline.
+            front.Mods().SetZoneSink(this);
+        }
+
+        /// A mod's zone, once its frame completed: begun, ended and timed at once.
+        void Zone(const char* name, int64_t begin, int64_t end) override
+        {
+            if (!___tracy_connected()) return;
+            static const char kSource[] = "wxl.render";
+            const size_t      length    = std::strlen(name);
+            const uint64_t    location  = ___tracy_alloc_srcloc_name(0, kSource, sizeof kSource - 1, kSource, sizeof kSource - 1, name, length, 0x9B59B6);
+            const uint16_t    first     = NextQuery();
+            const uint16_t    second    = NextQuery();
+            ___tracy_emit_gpu_zone_begin_alloc(___tracy_gpu_zone_begin_data{location, first, context_});
+            ___tracy_emit_gpu_zone_end(___tracy_gpu_zone_end_data{second, context_});
+            ___tracy_emit_gpu_time(___tracy_gpu_time_data{begin, first, context_});
+            ___tracy_emit_gpu_time(___tracy_gpu_time_data{end, second, context_});
         }
 
         void Begin(uint16_t query) override
@@ -211,6 +230,13 @@ namespace
         bool     open_[16]   = {};
         /// Context ids above those Tracy's own GPU contexts count up from 0; none is used in this process.
         static inline uint8_t next_ = 200;
+        /// The mods' zones' query ids, above the frame's own (0 to 15).
+        uint16_t query_ = 0x4000;
+        uint16_t NextQuery()
+        {
+            if (query_ == 0xFFFF) query_ = 0x4000;
+            return query_++;
+        }
     };
 
     GpuZones g_zones;
@@ -225,6 +251,9 @@ namespace
             g_front->WaitIdle();
             wxl::core::gx::ResourcesLost(true);
         }
+        // What the mods and the highlights hold of the renderer goes with it.
+        wxl::core::services::render::DeviceGone();
+        wxl::core::services::highlight::DeviceGone();
         delete g_front;
         g_front   = nullptr;
         g_renders = false;
@@ -329,7 +358,9 @@ namespace
     int32_t WXL_CALL SceneBeginRow(void* device)
     {
         if (!Mine(device)) return WXL_GX_VK_FRAME_LOST;
-        return g_front->BeginScene() ? WXL_GX_VK_FRAME_OK : WXL_GX_VK_FRAME_LOST;
+        if (!g_front->BeginScene()) return WXL_GX_VK_FRAME_LOST;
+        wxl::core::gx::UpdateBatchKeeping();
+        return WXL_GX_VK_FRAME_OK;
     }
 
     void WXL_CALL SceneClearRow(void* device, uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height)
@@ -591,6 +622,14 @@ namespace wxl::core::gx
     }
 
     bool VulkanActive() { return g_front && g_renders; }
+
+    wxl::vk::gxfront::Front* VulkanFront() { return g_front && g_renders && g_front->Ready() ? g_front : nullptr; }
+
+    void UpdateBatchKeeping()
+    {
+        if (!g_front || !g_renders) return;
+        g_front->Renderer().KeepBatches(services::render::WantsBatches() || services::highlight::Capturing());
+    }
 
     void WorldPass(bool inside) { g_world = inside; }
 
