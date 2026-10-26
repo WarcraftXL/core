@@ -243,19 +243,21 @@ int main(int argc, char** argv)
 
         // [gx]: the API over the client's request, Vulkan's validation and device.
         using wxl::core::settings::GxApi;
-        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0] && none.gx_frames == 2 && !none.gx_nearest,
-              "without a [gx] section the client's own choice stands, two frames in flight, bilinear");
+        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0] && none.gx_frames == 2 && !none.gx_nearest &&
+                  none.gx_async,
+              "without a [gx] section the client's own choice stands, two frames in flight, bilinear, pipelines compiled on workers");
         const char gxText[] = "[GX]\n"
                               "api = Vulkan ; tried first\n"
                               "validation = 1\n"
                               "gpu = GeForce RTX\n"
                               "frames_in_flight = 3\n"
-                              "present_filter = Nearest\n";
+                              "present_filter = Nearest\n"
+                              "Async_Pipelines = 0\n";
         wxl::core::settings::Settings gx;
         wxl::core::settings::Parse(gxText, sizeof gxText - 1, gx);
         Check(gx.gx_api == GxApi::vulkan && gx.gx_validation && std::strcmp(gx.gx_gpu, "GeForce RTX") == 0 &&
-                  gx.gx_frames == 3 && gx.gx_nearest && gx.problem_count == 0,
-              "[gx] api, validation, gpu, frames_in_flight and present_filter, in any case, a comment after a value");
+                  gx.gx_frames == 3 && gx.gx_nearest && !gx.gx_async && gx.problem_count == 0,
+              "[gx] api, validation, gpu, frames_in_flight, present_filter and async_pipelines, in any case, a comment after a value");
         const char gxRange[] = "[gx]\n"
                                "frames_in_flight = 4\n"
                                "present_filter = cubic\n";

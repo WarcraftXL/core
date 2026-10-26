@@ -28,6 +28,10 @@ namespace wxl::vk::test
     void DrawPureCases();
     bool DrawLiveCases();
 
+    /// V4's cases on the driver: readbacks in a frame, a multisampled scene, point sizes,
+    /// pipelines compiled on workers, linked from parts, and compiled ahead from the last launch.
+    bool V4LiveCases();
+
     /// The translator of the client's DX9 programs: what it refuses, its cache and pack (pure); and
     /// programs assembled here drawn on the driver against D3D9's formulas (live).
     void TranslatePureCases();
