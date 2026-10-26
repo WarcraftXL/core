@@ -12,7 +12,9 @@
 //   - an image cleared by dynamic rendering, a part of it cleared again inside the rendering, and
 //     read back to the CPU byte for byte;
 //   - the present module and Dear ImGui (present_tests.cpp);
-//   - the frame capture's reader (capture_tests.cpp).
+//   - the frame capture's reader (capture_tests.cpp);
+//   - the engine's draws through the renderer, and a capture replayed (draw_tests.cpp);
+//   - every program held to spirv-val (spirv_tests.cpp, in the native tree).
 //
 // Exit 0 when every check passes, 1 when one fails, 77 (ctest's skip) when the machine has no
 // Vulkan 1.3 device to run the live half on.
@@ -348,6 +350,9 @@ namespace wxl::vk::test
 {
     void Check(bool ok, const char* what)
     {
+        // WXL_VK_TRACE=1 names every check as it passes, to find where a run stops.
+        static const bool trace = Environment("WXL_VK_TRACE");
+        if (ok && trace) std::printf("ok   %s\n", what);
         if (ok) ++g_passes;
         else
         {
@@ -376,8 +381,11 @@ int main()
     FloorCases();
     wxl::vk::test::PresentPureCases();
     wxl::vk::test::CaptureCases();
+    wxl::vk::test::DrawPureCases();
+    if (!wxl::vk::test::SpirvValidation()) std::printf("(spirv-val is not in this build: the native tree of tests/vk/ runs it)\n");
     bool live = Live();
     if (live) live = wxl::vk::test::PresentLiveCases();
+    if (live) wxl::vk::test::DrawLiveCases();
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
     if (g_failures) return 1;

@@ -340,7 +340,8 @@ endif()
 # --- The Vulkan renderer's lower modules on the machine's driver --------------------------------------
 # The same program as the native tree of tests/vk/: the device floor and choice, a device made and
 # refused, VMA, the timeline, a clear read back. Skipped (77) on a machine without a Vulkan 1.3 device.
-add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cpp tests/vk/capture_tests.cpp)
+add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cpp tests/vk/capture_tests.cpp
+    tests/vk/draw_tests.cpp tests/vk/spirv_tests.cpp)
 target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
 target_compile_options(wxl-core-vk-tests PRIVATE /W4 /permissive-)
 target_compile_definitions(wxl-core-vk-tests PRIVATE _CRT_SECURE_NO_WARNINGS)

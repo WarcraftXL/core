@@ -4440,7 +4440,9 @@ namespace
 
         g_received.clear();
         wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        const bool inWorld = wxl::core::gx::InWorldPass();
         wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(inWorld && !wxl::core::gx::InWorldPass(), "the world's pass is marked from its Before to its After (the Vulkan device leaves its draws out)");
         wxl::seam::SimpleTop::OnLayerRender::After(&top);
         Check(g_received.empty(), "the world pass and the interface's end raise nothing outside a frame");
 
@@ -4541,8 +4543,9 @@ namespace
                   vk->device_destroy && vk->device_set_window && vk->device_caps && vk->window_size && vk->scene_begin &&
                   vk->scene_clear && vk->draw && vk->scene_present && vk->device_restore && vk->gamma_changed &&
                   vk->cursor_changed && vk->cursor_set && vk->pool_memory && vk->pool_resize && vk->pool_destroy &&
-                  vk->tex_create && vk->tex_destroy && vk->simulate_loss && vk->describe &&
-                  vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
+                  vk->tex_create && vk->tex_destroy && vk->simulate_loss && vk->describe && vk->shader_constants &&
+                  vk->shader_create && vk->shader_destroy && vk->tex_lock && vk->tex_unlock && vk->pool_discard &&
+                  vk->pool_written && vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
               "the Vulkan table is whole, with the layout of CGxDevice it reads the engine by");
         if (vk)
         {
@@ -4552,12 +4555,20 @@ namespace
             alignas(16) unsigned char fakeTex[sizeof(wxl::engine::CGxTex)]       = {};
             char                      said[128]                                  = {};
             Check(vk->scene_begin(fakeDevice) == WXL_GX_VK_FRAME_LOST && vk->scene_present(fakeDevice) == WXL_GX_VK_FRAME_LOST &&
-                      !vk->pool_memory(fakeDevice, fakePool) && vk->tex_create(fakeDevice, fakeTex) == 0 &&
+                      !vk->pool_memory(fakeDevice, fakePool) && vk->tex_create(fakeDevice, fakeTex, 4, 4, 1) == 0 &&
+                      !vk->tex_lock(fakeDevice, fakeTex, 0, 0, 0, 0, 4, 4, nullptr) &&
+                      vk->shader_create(fakeDevice, fakeTex, 1, "UI:0") == 0 &&
                       vk->device_restore(fakeDevice, said, sizeof said) == WXL_E_INVALID &&
                       vk->device_set_window(fakeDevice, nullptr, said, sizeof said) == WXL_E_INVALID,
                   "the Vulkan rows refuse a device they did not make");
             vk->scene_clear(fakeDevice, 3, 0xFF000000u, 0, 0, 16, 16);
             vk->draw(fakeDevice, nullptr, 0);
+            const float rows[4] = {};
+            vk->shader_constants(fakeDevice, 0, 0, 1, rows);
+            vk->shader_destroy(fakeDevice, fakeTex);
+            vk->tex_unlock(fakeDevice, fakeTex);
+            vk->pool_discard(fakeDevice, fakePool);
+            vk->pool_written(fakeDevice, fakePool, 0, 16);
             vk->window_size(fakeDevice, 640, 480, 0);
             vk->gamma_changed(fakeDevice);
             vk->cursor_changed(fakeDevice);

@@ -22,4 +22,13 @@ namespace wxl::vk::test
     /// The live cases on the machine's driver: the present pass, the frame loop, the swapchain on a
     /// headless surface, Dear ImGui drawn offscreen. False when no device could be made.
     bool PresentLiveCases();
+
+    /// The engine's draws through the renderer: the tables and the engine reading (pure), then
+    /// formats, blends, stages, programs, pools, uploads and a capture replayed on the driver.
+    void DrawPureCases();
+    bool DrawLiveCases();
+
+    /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
+    /// build has no validator (SPIRV-Tools is built in the native test tree only).
+    bool SpirvValidation();
 }

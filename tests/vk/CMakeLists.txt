@@ -31,8 +31,24 @@ set(WXL_VK_IMGUI_TARGET wxl-vk-test-imgui)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/wxl_vk.cmake")
 
-add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp)
-target_link_libraries(wxl-vk-tests PRIVATE wxl-vk)
+# SPIRV-Tools (deps/spirv-tools), for spirv-val over every program the renderer makes: the tests
+# only, never the runtime.
+set(SPIRV-Headers_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-headers")
+set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
+set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
+set(SPIRV_WERROR OFF CACHE BOOL "" FORCE)
+set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
+set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-tools" spirv-tools EXCLUDE_FROM_ALL)
+
+add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp)
+target_link_libraries(wxl-vk-tests PRIVATE wxl-vk SPIRV-Tools-static)
+target_compile_definitions(wxl-vk-tests PRIVATE WXL_VK_SPIRV_VAL)
+
+# A frame capture drawn again on this machine's driver and compared with its D3D9 back buffer:
+#   wxl-vk-replay <capture folder> [<output folder>]
+add_executable(wxl-vk-replay replay_tool.cpp)
+target_link_libraries(wxl-vk-replay PRIVATE wxl-vk)
 
 enable_testing()
 add_test(NAME vk COMMAND wxl-vk-tests)
