@@ -904,6 +904,9 @@ GROUND_TRUTH = {
     "InputControl.SetControlBit":      ("0x005FA170", "thiscall", ["ecx"], 2),
     "InputControl.UnsetControlBit":    ("0x005FA450", "thiscall", ["ecx"], 3),
     "Unit.PreAnimate":                 ("0x0073DAB0", "thiscall", ["ecx"], 1),
+    # CGWorldFrame::PerformDefaultAction reads ECX into ESI (0x004F7887) and its button at
+    # [ebp+8] (0x004F78C7), and ends `ret 4` on every path (0x004F78E7, 0x004F7A38).
+    "WorldFrame.PerformDefaultAction": ("0x004F7880", "thiscall", ["ecx"], 1),
     "Point.CM2Cache_CreateShared":     ("0x0081C390", "thiscall", ["ecx"], 2),
     "Point.CGWorldFrame_RenderWorld":  ("0x004FAF90", "cdecl", [], 1),
     "Point.vFrameScript_SignalEvent":  ("0x0081AC90", "cdecl", [], 3),
@@ -967,6 +970,13 @@ GROUND_TRUTH = {
     "M2Call.ObjectCreateStatic":       ("0x00782000", "cdecl", [], 5),
     "M2Call.ObjectUpdate":             ("0x00780240", "cdecl", [], 7),
     "M2Call.ObjectDestroy":            ("0x007826E0", "cdecl", [], 1),
+    # The object reads' calls (calls_x86.def), read by hand: CanAttack moves ECX to EBX
+    # (0x00729744) and ends `ret 4` (0x00729768); CanInteractNow moves ECX to ESI (0x00729625)
+    # and ends `ret 4` (0x0072968F, 0x00729738); CanHighlight moves ECX to ESI (0x0070F581) and
+    # ends in bare `ret`s (0x0070F61B, 0x0070F627).
+    "ObjectCall.CanAttack":            ("0x00729740", "thiscall", ["ecx"], 1),
+    "ObjectCall.CanInteractNow":       ("0x00729620", "thiscall", ["ecx"], 1),
+    "ObjectCall.CanHighlight":         ("0x0070F580", "thiscall", ["ecx"], 0),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read

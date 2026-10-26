@@ -1674,6 +1674,29 @@ namespace
     }
     void WXL_CALL FakeLookStop() { ++g_lookStops; }
 
+    // What the world frame's default action would act on, and whether a spell waits for its target.
+    struct FakeClickHit
+    {
+        uint32_t kind = 0;
+        uint64_t guid = 0;
+        wxl_vec3 point{};
+    };
+    FakeClickHit g_clickHit;
+    wxl_bool     g_spellTargeting = WXL_FALSE;
+    uint32_t WXL_CALL FakeClickHitRead(const void* frame, uint64_t* guid, wxl_vec3* point)
+    {
+        if (guid) *guid = frame ? g_clickHit.guid : 0;
+        if (point) *point = frame ? g_clickHit.point : wxl_vec3{};
+        return frame ? g_clickHit.kind : 0;
+    }
+    wxl_bool WXL_CALL FakeSpellTargeting() { return g_spellTargeting; }
+
+    // What the player can do with a unit or a game object: hostile (reaction below 3) is
+    // attackable, friendly or neutral talks; a game object's client flag 0x2 makes it usable.
+    wxl_bool WXL_CALL FakeCanAttack(const void*, const void* t) { return Obj(t)->reaction < 3 ? WXL_TRUE : WXL_FALSE; }
+    wxl_bool WXL_CALL FakeCanInteract(const void*, const void* t) { return Obj(t)->reaction >= 3 ? WXL_TRUE : WXL_FALSE; }
+    wxl_bool WXL_CALL FakeCanUse(const void* o) { return Obj(o)->clientFlags & 0x2u ? WXL_TRUE : WXL_FALSE; }
+
     // A model's head bone as the pose rows set it.
     struct FakeHeadBone
     {
@@ -1883,6 +1906,11 @@ namespace
         init.input_clear_pending_action = &FakeClearPending;
         init.input_default_action   = &FakeDefaultAction;
         init.input_mouse_look_stop  = &FakeLookStop;
+        init.input_click_hit        = &FakeClickHitRead;
+        init.input_spell_targeting  = &FakeSpellTargeting;
+        init.unit_can_attack        = &FakeCanAttack;
+        init.unit_can_interact      = &FakeCanInteract;
+        init.gameobject_can_use     = &FakeCanUse;
         init.model_bone_flags       = &FakeBoneFlags;
         init.model_bone_transform   = &FakeBoneTransform;
         init.camera_read            = &FakeCameraRead;
@@ -2722,6 +2750,25 @@ namespace
         Check(api->unit_reaction_to(unit, player, &value) == WXL_OK && value == WXL_REACTION_HOSTILE &&
                   api->unit_reaction_to(unit, item, &value) == WXL_E_INVALID,
               "unit_reaction_to another unit, refused for an item");
+        Check(api->unit_can_attack(unit, &yes) == WXL_OK && yes == WXL_TRUE &&
+                  api->unit_can_attack(item, &yes) == WXL_E_INVALID,
+              "unit_can_attack asks the client's CanAttack from the active player, refused for an item");
+        yes = WXL_TRUE;
+        Check(api->unit_can_interact(unit, &yes) == WXL_OK && yes == WXL_FALSE,
+              "unit_can_interact: a unit that offers nothing (no NPC flags) cannot be talked to");
+        {
+            FakeObject herb;
+            herb.guid        = 0xF110000000000456ull;
+            herb.typeId      = WXL_OBJECT_GAMEOBJECT;
+            herb.clientFlags = 0x2;
+            wxl::seam::ObjectMgr::InitObject::After(&herb, nullptr, 100u);
+            const wxl_handle node = wxl::core::objects::HandleOf(&herb);
+            yes = WXL_FALSE;
+            Check(api->gameobject_can_use(node, &yes) == WXL_OK && yes == WXL_TRUE &&
+                      api->gameobject_can_use(unit, &yes) == WXL_E_INVALID,
+                  "gameobject_can_use asks the client's own test, refused for a unit");
+            wxl::seam::ObjectMgr::ObjDelete::Before(&herb);
+        }
         Check(api->unit_creature_type(unit, &value) == WXL_OK && value == WXL_CREATURE_BEAST &&
                   api->unit_creature_family(unit, &value) == WXL_OK && value == 1 &&
                   api->unit_classification(unit, &value) == WXL_OK && value == WXL_CLASSIFICATION_RARE_ELITE,
@@ -6226,6 +6273,13 @@ namespace
                           std::string(zone.real_zone_text.data, zone.real_zone_text.size) };
     }
 
+    /// Refuses a click on a model or a name plate, as a mod without click targeting would.
+    void WXL_CALL RefuseClickOnObjects(void*, const void* args)
+    {
+        const auto* click = static_cast<const wxl_world_click_request_args*>(args);
+        if (click->hit == WXL_WORLD_HIT_OBJECT || click->hit == WXL_WORLD_HIT_NAME_PLATE) *click->refused = WXL_TRUE;
+    }
+
     void CheckWorldZoneMouseoverClick()
     {
         FakeObject boar;
@@ -6317,6 +6371,50 @@ namespace
             Check(args.object == boarHandle && args.point.x == 10.0f && args.point.z == 30.0f && args.button == 0,
                   "with the object, its position, and the left button as 0");
         }
+
+        // The click before the game acts on it: nobody listening, the gate never takes it.
+        Mute(WXL_EV_WorldClickRequest);
+        int      frame  = 0;
+        void*    self   = &frame;
+        uint32_t button = 4;
+        g_clickHit      = FakeClickHit{2, boar.guid, wxl_vec3{10.0f, 20.0f, 31.0f}};
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "WorldFrame.PerformDefaultAction: with nobody listening, the click is the game's");
+        Unmute(WXL_EV_WorldClickRequest);
+        g_received.clear();
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a click nobody refuses goes on to the game");
+        const Received* request = Only(WXL_EV_WorldClickRequest);
+        Check(request != nullptr, "and raises WorldClickRequest once");
+        if (request)
+        {
+            const wxl_world_click_request_args args = request->As<wxl_world_click_request_args>();
+            Check(args.button == WXL_MOUSE_RIGHT && args.hit == WXL_WORLD_HIT_OBJECT && args.object == boarHandle &&
+                      args.object_guid == boar.guid && args.point.z == 31.0f && args.targeting == WXL_FALSE,
+                  "with the right button, the model hit, the unit, its guid and the point");
+        }
+        const wxl_subscription refuse =
+            g_host->Events().Subscribe(WXL_EV_WorldClickRequest, &RefuseClickOnObjects, nullptr, 0);
+        button = 1;
+        Check(wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a handler that refuses a click on a model takes the call: the game does nothing");
+        g_clickHit       = FakeClickHit{1, 0, wxl_vec3{1.0f, 2.0f, 3.0f}};
+        g_spellTargeting = WXL_TRUE;
+        g_received.clear();
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "the same handler lets a click on the ground through");
+        request = Only(WXL_EV_WorldClickRequest);
+        Check(request && request->As<wxl_world_click_request_args>().hit == WXL_WORLD_HIT_GROUND &&
+                  request->As<wxl_world_click_request_args>().object == WXL_HANDLE_NONE &&
+                  request->As<wxl_world_click_request_args>().button == WXL_MOUSE_LEFT &&
+                  request->As<wxl_world_click_request_args>().targeting == WXL_TRUE,
+              "which says the ground, no object, the left button and a spell waiting for its target");
+        g_clickHit = FakeClickHit{4, boar.guid, wxl_vec3{}};
+        Check(wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a name plate's unit is refused too");
+        g_host->Events().Unsubscribe(refuse);
+        g_clickHit       = FakeClickHit{};
+        g_spellTargeting = WXL_FALSE;
 
         wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
     }
