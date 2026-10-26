@@ -13,7 +13,7 @@
 
 void main()
 {
-    vec4  t = Sample0(vTex0.xy);
+    vec4  t = Sample0(StageCoord0().xy);
     float l = dot(t.rgb, vec3(0.299, 0.587, 0.114));
     float a = t.a * vColor.a;
     if (AlphaRejected(a)) discard;

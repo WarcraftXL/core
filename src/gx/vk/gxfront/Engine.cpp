@@ -6,6 +6,7 @@
 #include "gx/vk/gxfront/Engine.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace wxl::vk::gxfront
@@ -43,6 +44,32 @@ namespace wxl::vk::gxfront
             std::memcpy(out, r, sizeof r);
         }
 
+        /// The inverse of @p m; false when it has none.
+        bool Inverse(const float* m, float* out)
+        {
+            float inv[16];
+            inv[0]  = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+            inv[4]  = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+            inv[8]  = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+            inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+            inv[1]  = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+            inv[5]  = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+            inv[9]  = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+            inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+            inv[2]  = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+            inv[6]  = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+            inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+            inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+            inv[3]  = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+            inv[7]  = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+            inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+            inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+            const float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+            if (det == 0.0f || !std::isfinite(det)) return false;
+            for (int i = 0; i < 16; ++i) out[i] = inv[i] / det;
+            return true;
+        }
+
         const engine::C44Matrix& Top(const engine::CGxMatrixStack& stack) { return stack.m_mtx[std::min<uint32_t>(stack.m_level, 3)]; }
         bool IsIdentity(const engine::CGxMatrixStack& stack) { return (stack.m_flags[std::min<uint32_t>(stack.m_level, 3)] & kIdentity) != 0; }
 
@@ -53,6 +80,12 @@ namespace wxl::vk::gxfront
             out[2] = static_cast<float>(argb & 0xFF) / 255.0f;
             out[3] = static_cast<float>(argb >> 24) / 255.0f;
         }
+
+        /// p (a row vector) times the 4x4 @p m.
+        void RowTimes(const float p[4], const float* m, float out[4])
+        {
+            for (int j = 0; j < 4; ++j) out[j] = p[0] * m[j] + p[1] * m[4 + j] + p[2] * m[8 + j] + p[3] * m[12 + j];
+        }
     }
 
     const char* VerdictName(Verdict verdict)
@@ -60,13 +93,13 @@ namespace wxl::vk::gxfront
         switch (verdict)
         {
         case Verdict::Draw: return "drawn";
-        case Verdict::Target: return "into a texture target";
-        case Verdict::World: return "in the world's pass";
-        case Verdict::Perspective: return "3D outside the world";
-        case Verdict::Program: return "a client program not translated yet";
+        case Verdict::Target: return "into a depth texture alone";
+        case Verdict::Program: return "a client program not translated";
         default: return "a buffer not ready";
         }
     }
+
+    bool IntoTexture(const engine::CGxDevice& d) { return d.m_textureTarget[0].m_texture || d.m_textureTarget[1].m_texture; }
 
     void ClearRect(const engine::CGxDevice& d, int32_t rect[4])
     {
@@ -77,6 +110,7 @@ namespace wxl::vk::gxfront
         rect[1] = static_cast<int32_t>((1.0f - vp.y_high) * window.maxY + 0.5f);
         rect[2] = static_cast<int32_t>(vp.x_high * window.maxX - static_cast<float>(rect[0]) + 0.5f);
         rect[3] = static_cast<int32_t>((1.0f - vp.y_low) * window.maxY - static_cast<float>(rect[1]) + 0.5f);
+        if (IntoTexture(d)) rect[1] = static_cast<int32_t>(window.maxY * vp.y_low);
     }
 
     Verdict BuildDraw(const EngineView& view, const wxl_gx_batch& batch, int32_t indexed, Resolver& resolver, draw::Packet& out)
@@ -88,26 +122,26 @@ namespace wxl::vk::gxfront
         auto F = [rs](uint32_t which) { return rs[which].value.data.f[0]; };
         auto P = [rs](uint32_t which) { return static_cast<const void*>(rs[which].value.data.p); };
         const uint32_t masters = d.m_appMasterEnables;
+        const bool     texture = IntoTexture(d);
 
-        if (d.m_textureTarget[0].m_texture || d.m_textureTarget[1].m_texture) return Verdict::Target;
-        if (view.world) return Verdict::World;
+        if (!d.m_textureTarget[0].m_texture && d.m_textureTarget[1].m_texture) return Verdict::Target;
 
         out = draw::Packet{};
+        out.vertex = static_cast<uint16_t>(pipelines::VertexProgram::Fixed);
+        out.pixel  = static_cast<uint16_t>(pipelines::PixelProgram::Fixed);
         if (const void* vs = P(kVertexShader))
         {
             const int program = resolver.Program(vs, true);
             if (program < 0) return Verdict::Program;
-            out.vertex = static_cast<pipelines::VertexProgram>(program);
+            out.vertex = static_cast<uint16_t>(program);
         }
         if (const void* ps = P(kPixelShader))
         {
             const int program = resolver.Program(ps, false);
             if (program < 0) return Verdict::Program;
-            out.pixel = static_cast<pipelines::PixelProgram>(program);
+            out.pixel = static_cast<uint16_t>(program);
         }
-        // Fixed function in perspective (the native projection's w taken from z, XformSetProjection's
-        // d3 of 0): a model's work outside the world, not the interface's.
-        if (out.vertex == pipelines::VertexProgram::Fixed && d.m_projNative.d3 == 0.0f) return Verdict::Perspective;
+        const bool fixedVertex = out.vertex == static_cast<uint16_t>(pipelines::VertexProgram::Fixed);
 
         // The vertex: D3D9's declaration from the attributes the mask names, one stream per buffer,
         // each stream as wide as its attributes (IStateSyncVertexPtrs).
@@ -170,16 +204,18 @@ namespace wxl::vk::gxfront
         out.cull      = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
         out.wireframe = (masters & kMasterFill) == 0;
 
-        // The viewport and scissor, in the window's pixels (IXformSetViewport, IStateSyncScissorRect).
+        // The viewport and scissor, in the target's pixels (IXformSetViewport, IStateSyncScissorRect);
+        // a texture target's are not turned upside down.
         wxl_gx_viewport vp{};
         std::memcpy(&vp, d.m_viewport, sizeof vp);
         const engine::CRect& window = d.m_curWindowRect;
         const uint32_t       x      = static_cast<uint32_t>(vp.x_low * window.maxX + 0.5f);
-        const uint32_t       y      = static_cast<uint32_t>((1.0f - vp.y_high) * window.maxY + 0.5f);
-        out.viewport[0]             = static_cast<float>(x);
-        out.viewport[1]             = static_cast<float>(y);
+        uint32_t             y      = static_cast<uint32_t>((1.0f - vp.y_high) * window.maxY + 0.5f);
         out.viewport[2]             = static_cast<float>(static_cast<uint32_t>(vp.x_high * window.maxX - static_cast<float>(x) + 0.5f));
         out.viewport[3]             = static_cast<float>(static_cast<uint32_t>((1.0f - vp.y_low) * window.maxY - static_cast<float>(y) + 0.5f));
+        if (texture) y = static_cast<uint32_t>(window.maxY * vp.y_low);
+        out.viewport[0]             = static_cast<float>(x);
+        out.viewport[1]             = static_cast<float>(y);
         out.viewport[4]             = vp.z_low;
         out.viewport[5]             = vp.z_high;
         if (I(kScissorTest))
@@ -189,6 +225,11 @@ namespace wxl::vk::gxfront
             int32_t right  = static_cast<int32_t>(s.maxX * window.maxX + 1.0f);
             int32_t top    = static_cast<int32_t>((1.0f - s.maxY) * window.maxY + 0.5f);
             int32_t bottom = static_cast<int32_t>(1.0f + (1.0f - s.minY) * window.maxY);
+            if (texture)
+            {
+                top    = static_cast<int32_t>(s.minY * window.maxY + 0.5f);
+                bottom = static_cast<int32_t>(1.0f + s.maxY * window.maxY);
+            }
             left           = std::max(left, 0);
             top            = std::max(top, 0);
             right          = std::min(right, static_cast<int32_t>(window.maxX));
@@ -204,8 +245,8 @@ namespace wxl::vk::gxfront
             out.scissor[3] = static_cast<int32_t>(window.maxY);
         }
 
-        // Textures of stages 0 and 1, and their samplers (ISetTexture).
-        for (uint32_t stage = 0; stage < 2; ++stage)
+        // Every stage's texture and sampler (ISetTexture).
+        for (uint32_t stage = 0; stage < draw::kStages; ++stage)
         {
             const void* tex = P(kTexture0 + stage);
             if (!tex) continue;
@@ -221,9 +262,47 @@ namespace wxl::vk::gxfront
             }
         }
 
+        // D3D9's fog: applied after a pixel program below ps_3_0 and after fixed function (the
+        // renderer asks only the programs it applies to), with the vertex's fog factor.
+        const bool fog = (masters & kMasterFog) && I(kFog);
+        if (fog) out.flags |= shaders::kFlagFog;
+        out.fog_color = U(kFogColor);
+
+        // Points: their size (D3D9's POINTSIZE where a vertex program writes none), as sprites.
+        out.point_size = std::max(F(kPointScale), 1.0f);
+        if (!std::isfinite(out.point_size)) out.point_size = 1.0f;
+        if (I(kPointSprite) && batch.primitive == draw::kPoints) out.flags |= shaders::kFlagPointSprite;
+
         draw::DrawData& data = out.data;
-        // The cascade of fixed function's pixel stages, whichever program the vertex has: a stage
-        // without a texture ends it (ISetTexture's DISABLE).
+        float world[16], viewMatrix[16];
+        Copy(world, Top(d.m_xforms[8]));
+        Copy(viewMatrix, Top(d.m_xforms[10]));
+
+        // The user clip plane (ClipPlaneSet's plane 0, the only one the engine sets): against the
+        // clip-space position with a vertex program, as D3D9 takes it; in world space with fixed
+        // function, carried to clip space here.
+        if ((U(kClipPlaneMask) & 1) && d.m_caps.m_maxClipPlanes > 0)
+        {
+            const engine::C4Plane& plane = d.m_clipPlane[0];
+            const float            p[4]  = {plane.n.x, plane.n.y, plane.n.z, plane.d};
+            out.flags |= shaders::kFlagClip;
+            if (!fixedVertex) std::memcpy(out.clip_plane, p, sizeof p);
+            else
+            {
+                // A world point x: x . p = 0; in clip space c = x * VP, so p' = VP^-1 p (a column).
+                float vp4[16], projection[16], inverse[16];
+                Copy(projection, d.m_projNative);
+                Multiply(viewMatrix, projection, vp4);
+                if (Inverse(vp4, inverse))
+                    for (int i = 0; i < 4; ++i)
+                        out.clip_plane[i] = inverse[i * 4] * p[0] + inverse[i * 4 + 1] * p[1] + inverse[i * 4 + 2] * p[2] + inverse[i * 4 + 3] * p[3];
+                else
+                    out.flags &= ~shaders::kFlagClip;
+            }
+        }
+
+        // The cascade of fixed function's pixel stages: a stage without a texture ends it
+        // (ISetTexture's DISABLE).
         data.ops[0] = data.ops[1] = data.ops[2] = data.ops[3] = -1;
         if (out.textures[0])
         {
@@ -235,93 +314,138 @@ namespace wxl::vk::gxfront
                 data.ops[3] = I(kAlphaOp0 + 1);
             }
         }
-        if (out.vertex != pipelines::VertexProgram::Fixed)
+        if (!fixedVertex)
         {
             // The interface's program reads c0..c3.
             if (view.vertex_constants) std::memcpy(data.constants, view.vertex_constants, sizeof data.constants);
+            return Verdict::Draw;
         }
-        else
+
+        // The fixed function's transforms (IStateSyncXforms): world then view, the native projection.
+        Multiply(world, viewMatrix, data.worldView);
+        Copy(data.projection, d.m_projNative);
+
+        // Each stage's coordinate (ISetTexCoordIndex, ISetTexGen, IXformSetTex).
+        for (uint32_t stage = 0; stage < 2; ++stage)
         {
-            // The fixed function's transforms (IStateSyncXforms): world then view, the native projection.
-            float world[16], viewMatrix[16];
-            Copy(world, Top(d.m_xforms[8]));
-            Copy(viewMatrix, Top(d.m_xforms[10]));
-            Multiply(world, viewMatrix, data.worldView);
-            Copy(data.projection, d.m_projNative);
-
-            // Each stage's coordinate (ISetTexCoordIndex, ISetTexGen, IXformSetTex).
-            for (uint32_t stage = 0; stage < 2; ++stage)
+            const engine::CGxMatrixStack& texGen = d.m_texGen[stage];
+            const engine::CGxMatrixStack& xform  = d.m_xforms[stage];
+            int32_t                       flags  = 0;
+            float*                        m      = data.texMatrix[stage];
+            switch (I(kTextureShader0 + stage))
             {
-                const engine::CGxMatrixStack& texGen = d.m_texGen[stage];
-                const engine::CGxMatrixStack& xform  = d.m_xforms[stage];
-                int32_t                       flags  = 0;
-                float*                        m      = data.texMatrix[stage];
-                switch (I(kTextureShader0 + stage))
-                {
-                case 0:
-                    Copy(m, Top(texGen));
-                    flags = IsIdentity(texGen) ? 0 : kCount3;
-                    break;
-                case 1:
-                {
-                    float a[16], b[16];
-                    Copy(a, Top(texGen));
-                    Copy(b, Top(xform));
-                    Multiply(a, b, m);
-                    if (I(kTexGen0 + stage)) flags = kCount3;
-                    else
-                    {
-                        // COUNT2: the translation of row 3 moves to row 2, where D3D reads a 2D one.
-                        flags = kCount2;
-                        m[8]  = m[12];
-                        m[9]  = m[13];
-                    }
-                    break;
-                }
-                case 2:
-                {
-                    float a[16], b[16];
-                    Copy(a, Top(texGen));
-                    Copy(b, Top(xform));
-                    Multiply(a, b, m);
-                    flags = kCount3 | kProjected;
-                    break;
-                }
-                default: break;
-                }
-                data.texgen[stage * 2]     = I(kTexGen0 + stage);
-                data.texgen[stage * 2 + 1] = flags;
-                data.inputs[stage]         = I(kTextureCoord0 + stage);
-            }
-
-            // The colour (IStateSyncLights): the vertex's, or with no vertex colour and a material
-            // that is not white, D3D9's ambient-only lighting: the material's diffuse plus its
-            // emissive. The engine's lights themselves come with the world (V3/V4).
-            const bool     vertexColor = (d.m_primVertexMask & (1u << 4)) != 0;
-            const uint32_t diffuse     = U(kMatDiffuse);
-            if (!vertexColor && diffuse != 0xFFFFFFFFu)
+            case 0:
+                Copy(m, Top(texGen));
+                flags = IsIdentity(texGen) ? 0 : kCount3;
+                break;
+            case 1:
             {
-                float dif[4], emi[4];
-                ArgbToFloats(diffuse, dif);
-                ArgbToFloats(U(kMatEmissive), emi);
-                data.inputs[2]   = 1;
-                data.material[0] = std::min(dif[0] + emi[0], 1.0f);
-                data.material[1] = std::min(dif[1] + emi[1], 1.0f);
-                data.material[2] = std::min(dif[2] + emi[2], 1.0f);
-                data.material[3] = dif[3];
+                float a[16], b[16];
+                Copy(a, Top(texGen));
+                Copy(b, Top(xform));
+                Multiply(a, b, m);
+                if (I(kTexGen0 + stage)) flags = kCount3;
+                else
+                {
+                    // COUNT2: the translation of row 3 moves to row 2, where D3D reads a 2D one.
+                    flags = kCount2;
+                    m[8]  = m[12];
+                    m[9]  = m[13];
+                }
+                break;
             }
-            (void)kMasterLighting;
-
-            // D3D9's linear vertex fog on the view depth.
-            if ((masters & kMasterFog) && I(kFog))
+            case 2:
             {
-                const float start = F(kFogStart), end = F(kFogEnd);
-                const float range = end - start;
-                data.fog[0]       = range != 0.0f ? -1.0f / range : 0.0f;
-                data.fog[1]       = range != 0.0f ? end / range : 1.0f;
-                data.fog[2]       = 1.0f;
-                ArgbToFloats(U(kFogColor), data.fogColor);
+                float a[16], b[16];
+                Copy(a, Top(texGen));
+                Copy(b, Top(xform));
+                Multiply(a, b, m);
+                flags = kCount3 | kProjected;
+                break;
             }
+            default: break;
+            }
+            data.texgen[stage * 2]     = I(kTexGen0 + stage);
+            data.texgen[stage * 2 + 1] = flags;
+            data.inputs[stage]         = I(kTextureCoord0 + stage);
+        }
+
+        // The colour (IStateSyncLights, IStateSyncMaterial, ISetMaterial): D3D9's lighting with the
+        // engine's four lights when Lighting is on; with it off, the vertex's colour, or with no
+        // vertex colour and a material that is not white, D3D9's ambient-only lighting.
+        const bool     vertexColor = (d.m_primVertexMask & (1u << 4)) != 0;
+        const uint32_t diffuse     = U(kMatDiffuse);
+        float          dif[4], emi[4], spe[4];
+        ArgbToFloats(diffuse, dif);
+        ArgbToFloats(U(kMatEmissive), emi);
+        ArgbToFloats(U(kMatSpecular), spe);
+        std::memcpy(data.matDiffuse, dif, sizeof dif);
+        std::memcpy(data.matAmbient, dif, sizeof dif);
+        std::memcpy(data.matEmissive, emi, sizeof emi);
+        std::memcpy(data.matSpecular, spe, sizeof spe);
+        const float power   = F(kMatSpecularExp);
+        data.matSpecular[3] = power;
+        if (vertexColor)
+        {
+            const int32_t material = I(kColorMaterial);
+            data.sources[0] = data.sources[1] = material == 0 ? 1 : 0;
+            data.sources[2] = material == 2 ? 1 : 0;
+            data.sources[3] = material == 1 ? 1 : 0;
+        }
+        if ((masters & kMasterLighting) && I(kLighting))
+        {
+            data.lighting[1] = 1;
+            data.lighting[2] = power > 0.0f && U(kMatSpecular) != 0 ? 1 : 0;
+            data.lighting[3] = I(kNormalizeNormals) != 0 ? 1 : 0;
+            const auto* lights = reinterpret_cast<const wxl_gx_light*>(d.m_lights);
+            for (int i = 0; i < 4; ++i)
+            {
+                const wxl_gx_light& l = lights[i];
+                if (!l.enable) continue;
+                data.lighting[0] |= 1 << i;
+                // In camera space: a position through the view, a direction towards the light.
+                float position[4];
+                if (l.dir[3] == 1.0f)
+                {
+                    const float p[4] = {l.dir[0], l.dir[1], l.dir[2], 1.0f};
+                    RowTimes(p, viewMatrix, position);
+                    position[3] = 1.0f;
+                }
+                else
+                {
+                    const float p[4] = {-l.dir[0], -l.dir[1], -l.dir[2], 0.0f};
+                    RowTimes(p, viewMatrix, position);
+                    const float length = std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]);
+                    for (int c = 0; c < 3; ++c) position[c] = length > 0.0f ? position[c] / length : 0.0f;
+                    position[3] = 0.0f;
+                }
+                std::memcpy(data.lightPosition[i], position, sizeof position);
+                for (int c = 0; c < 3; ++c)
+                {
+                    data.lightDiffuse[i][c]  = l.diffuse[c];
+                    data.lightAmbient[i][c]  = l.ambient[c];
+                    data.lightSpecular[i][c] = l.specular[c];
+                }
+                data.lightAttenuation[i][0] = l.attenuation[0];
+                data.lightAttenuation[i][1] = l.attenuation[1];
+                data.lightAttenuation[i][2] = l.attenuation[2];
+                data.lightAttenuation[i][3] = 3.402823466e38f; // D3D9's MaxLightRange
+            }
+        }
+        else if (!vertexColor && diffuse != 0xFFFFFFFFu)
+        {
+            data.lighting[1] = 1;
+            data.globalAmbient[0] = data.globalAmbient[1] = data.globalAmbient[2] = data.globalAmbient[3] = 1.0f;
+        }
+
+        // D3D9's linear vertex fog on the view depth.
+        if (fog)
+        {
+            const float start = F(kFogStart), end = F(kFogEnd);
+            const float range = end - start;
+            data.fog[0]       = range != 0.0f ? -1.0f / range : 0.0f;
+            data.fog[1]       = range != 0.0f ? end / range : 1.0f;
+            data.fog[2]       = 1.0f;
         }
         return Verdict::Draw;
     }

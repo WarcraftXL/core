@@ -37,7 +37,8 @@ namespace wxl::vk::device
     X(fillModeNonSolid, "1.0", false, core10)                                                       \
     X(shaderClipDistance, "1.0", false, core10)                                                     \
     X(independentBlend, "1.0", false, core10)                                                       \
-    X(depthBiasClamp, "1.0", false, core10)
+    X(depthBiasClamp, "1.0", false, core10)                                                         \
+    X(occlusionQueryPrecise, "1.0", false, core10)
 
     /**
      * The device extensions the renderer looks for. One row is X(member, name, enabled): an

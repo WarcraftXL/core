@@ -23,10 +23,10 @@ void main()
     gl_Position = vec4(dot(d.constants[0], p), dot(d.constants[1], p), dot(d.constants[2], p), dot(d.constants[3], p));
 #endif
     gl_Position.y = -gl_Position.y;
-    vColor        = VertexColor(d);
-    vTex0         = (d.inputs.w & kHasTex0) != 0 ? vec4(inTex0.xy, 0.0, 0.0) : vec4(0.0);
-    vTex1         = vec4(0.0);
-    vFog          = 1.0;
-    // A point list draws points of one pixel, as D3D9 draws them without its point states.
-    gl_PointSize = 1.0;
+    DefaultVaryings();
+    vColor = VertexColor(d);
+    vTex0  = (d.inputs.w & kHasTex0) != 0 ? vec4(inTex0.xy, 0.0, 0.0) : vec4(0.0);
+    vTex1  = vec4(0.0);
+    vFog   = vec4(1.0, 0.0, 0.0, 0.0);
+    gl_PointSize = pc.pointSize;
 }

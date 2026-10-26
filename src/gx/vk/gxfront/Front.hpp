@@ -9,9 +9,10 @@
 // What it does: the device, the window's surface and swapchain, the scene cleared to the engine's
 // colour and shown through the present pass (stretched, the gamma ramp in fullscreen, the software
 // cursor), vsync and its emulated intervals, the hardware cursor, the loss and its recovery, the
-// engine's capabilities; the engine's pools and textures on the device, its interface programs, and
-// its draws read out of its state (Engine.hpp) and recorded by the renderer (draw/). At this step
-// the interface is drawn; the draws Engine.hpp leaves out are counted by reason.
+// engine's capabilities; the engine's pools, textures, render targets, programs (its own records
+// translated), registers and occlusion queries on the device, its draws read out of its state
+// (Engine.hpp) and recorded by the renderer (draw/), its copies from the back buffer. The draws
+// Engine.hpp leaves out are counted by reason.
 //
 // Windows only (the window, the cursor), built into WarcraftXL.dll. Main thread only.
 
@@ -25,8 +26,10 @@
 #include "gx/vk/resources/Resources.hpp"
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace wxl::vk::gxfront
 {
@@ -36,6 +39,7 @@ namespace wxl::vk::gxfront
         bool            validation = false;               ///< [gx] validation
         uint32_t        frames = 2;                       ///< [gx] frames_in_flight
         present::Filter filter = present::Filter::Linear; ///< [gx] present_filter
+        std::string     cache_dir;                        ///< where the shader pack and the pipeline cache live (empty: none)
     };
 
     class Front
@@ -44,7 +48,8 @@ namespace wxl::vk::gxfront
         struct Stats
         {
             uint64_t draws = 0;     ///< the engine's draws
-            uint64_t left_out[6] = {}; ///< by Verdict: [0] the ones drawn, the others left out
+            uint64_t left_out[static_cast<int>(Verdict::Count)] = {}; ///< by Verdict: [0] the ones drawn, the others left out
+            uint64_t world = 0;     ///< of the drawn, those inside the world's pass
             uint64_t clears = 0;
             uint64_t losses = 0;
         };
@@ -101,9 +106,21 @@ namespace wxl::vk::gxfront
         void  TexDestroy(void* tex);
         char* TexLock(void* tex, uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t& pitch);
         void  TexUnlock(void* tex);
-        bool  ShaderCreate(void* shader, bool vertex, const char* name);
+        bool  ShaderCreate(void* shader, bool vertex, const char* name, const void* code, uint32_t size);
         void  ShaderDestroy(void* shader);
         void  ShaderConstants(int32_t target, uint32_t first, uint32_t rows, const float* values);
+        void  ShaderPrewarm(const void* const* codes, const uint32_t* sizes, uint32_t count);
+        /// The engine's render target changed (CGxDevice::m_textureTarget).
+        void  TargetChanged();
+        /// D3D9's TexCopy and TexStretch from the back buffer; false when nothing was copied.
+        bool  TexCopy(void* tex, int32_t dest_x, int32_t dest_y, int32_t source_x, int32_t source_y, int32_t width, int32_t height,
+                      uint32_t level, uint32_t plane);
+        bool  TexStretch(void* tex, const int32_t* dest, const int32_t* source, uint32_t level, uint32_t face);
+        uint32_t QueryCreate();
+        void     QueryDestroy(uint32_t query);
+        bool     QueryBegin(uint32_t query);
+        bool     QueryEnd(uint32_t query);
+        bool     QueryResult(uint32_t query, uint32_t& samples);
 
         /// Waits (bounded) for the frames submitted; a GPU that does not finish them is marked lost.
         void WaitIdle();
@@ -167,8 +184,17 @@ namespace wxl::vk::gxfront
 
         std::unordered_set<void*> pools_;    ///< pools whose m_apiSpecific is a draw::Pool of ours
         std::unordered_set<void*> textures_; ///< textures whose m_apiSpecificData is a TexRecord of ours
-        std::unordered_map<const void*, uint8_t> programs_[2]; ///< [pixel, vertex]: the client's shaders the renderer draws
-        float vertex_constants_[256 * 4] = {};
-        float pixel_constants_[256 * 4] = {};
+        /// A client shader: its record (kept, so that a device made again after a loss makes its
+        /// program again) and its program on the current device.
+        struct ShaderRecord
+        {
+            std::string          name;
+            std::vector<uint8_t> code;
+            int                  program = -1;
+            uint64_t             generation = 0; ///< the device the program was made on
+        };
+        std::unordered_map<const void*, ShaderRecord> shaders_[2]; ///< [pixel, vertex]
+        draw::Texture* Record(void* tex);
+        bool           missing_target_ = false; ///< the engine draws into a texture the device has not made
     };
 }

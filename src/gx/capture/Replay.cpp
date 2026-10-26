@@ -85,6 +85,7 @@ namespace wxl::gx::capture
             h.state_size != sizeof(wxl_gx_app_state))
             return Fail(why, "the capture was made by a client of another layout than this build reads");
         if (!renderer.Screen().InFrame()) return Fail(why, "no frame is open on the renderer's display");
+        renderer.SetTarget(nullptr, 0, nullptr);
 
         Chunk chunk;
         while (reader.Next(chunk, why))
@@ -100,7 +101,8 @@ namespace wxl::gx::capture
             case WXL_GX_CAPTURE_CONSTANTS: ok = Constants(chunk, why); break;
             case WXL_GX_CAPTURE_CLEAR: ok = Clear(reader, chunk, why); break;
             case WXL_GX_CAPTURE_DRAW: ok = Draw(reader, chunk, why); break;
-            case WXL_GX_CAPTURE_COPY: ++stats_.copies; break;
+            case WXL_GX_CAPTURE_COPY: ok = CopyChunk(reader, chunk, why); break;
+            case WXL_GX_CAPTURE_TARGET: ok = TargetChunk(reader, chunk, why); break;
             case WXL_GX_CAPTURE_SHOT: ok = ShotChunk(chunk, why); break;
             default: break;
             }
@@ -117,10 +119,13 @@ namespace wxl::gx::capture
         if (!Read64(chunk, 0, id) || !Read32(chunk, 8, target) || !Read32(chunk, 12, length) || 16ull + length > chunk.size)
             return Fail(why, "a malformed SHDR chunk");
         const std::string name(reinterpret_cast<const char*>(chunk.body + 16), length);
+        uint32_t          size = 0;
+        const uint8_t*    code = nullptr;
+        if (Read32(chunk, 16 + length, size) && 20ull + length + size <= chunk.size) code = chunk.body + 20 + length;
         ++stats_.shaders;
-        const bool vertex = target == 0; // EGxShTarget: 0 vertex, 4 pixel
-        uint8_t    program = 0;
-        if (vk::draw::ProgramByName(vertex, name.c_str(), program))
+        const bool vertex  = target == 0; // EGxShTarget: 0 vertex, 4 pixel
+        const int  program = renderer_->Program(!vertex, name.c_str(), code, code ? size : 0);
+        if (program >= 0)
         {
             programs_[vertex ? 1 : 0][id] = program;
             ++stats_.programs;
@@ -230,7 +235,7 @@ namespace wxl::gx::capture
             entry.texture      = renderer_->CreateTexture(desc);
             if (entry.texture) ++stats_.textures;
         }
-        if (!entry.texture) return true;
+        if (!entry.texture || entry.drawn) return true;
         for (const Level& l : levels)
         {
             uint32_t pitch = 0;
@@ -252,7 +257,7 @@ namespace wxl::gx::capture
             return Fail(why, "a malformed CONS chunk");
         if (first >= 256) return true;
         rows = std::min(rows, 256 - first);
-        std::memcpy((target == 0 ? vertex_ : pixel_) + first * 4, chunk.body + 12, rows * 16);
+        renderer_->Constants(target != 0, first, rows, reinterpret_cast<const float*>(chunk.body + 12));
         return true;
     }
 
@@ -264,14 +269,13 @@ namespace wxl::gx::capture
         if (device.size() != sizeof(engine::CGxDevice)) return Fail(why, "a clear before the device's state");
         const auto& d = *reinterpret_cast<const engine::CGxDevice*>(device.data());
         ++stats_.clears;
-        if (d.m_textureTarget[0].m_texture || d.m_textureTarget[1].m_texture) return true;
         int32_t rect[4];
         vk::gxfront::ClearRect(d, rect);
         const float rgba[4] = {static_cast<float>((argb >> 16) & 0xFF) / 255.0f, static_cast<float>((argb >> 8) & 0xFF) / 255.0f,
                                static_cast<float>(argb & 0xFF) / 255.0f, static_cast<float>(argb >> 24) / 255.0f};
         if (rect[2] > 0 && rect[3] > 0)
-            renderer_->Screen().Clear((mask & 1) != 0, (mask & 2) != 0, rgba, 1.0f,
-                                      VkRect2D{{rect[0], rect[1]}, {static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])}});
+            renderer_->Clear((mask & 1) != 0, (mask & 2) != 0, rgba, 1.0f,
+                             VkRect2D{{rect[0], rect[1]}, {static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])}});
         return true;
     }
 
@@ -290,11 +294,96 @@ namespace wxl::gx::capture
         vk::gxfront::EngineView view;
         view.device           = reinterpret_cast<const engine::CGxDevice*>(device.data());
         view.states           = reinterpret_cast<const wxl_gx_app_state*>(states.data());
-        view.vertex_constants = vertex_;
+        view.vertex_constants = renderer_->Registers(false);
         vk::draw::Packet             packet;
         const vk::gxfront::Verdict verdict = vk::gxfront::BuildDraw(view, batch, static_cast<int32_t>(count), *this, packet);
         ++stats_.verdicts[static_cast<int>(verdict)];
         if (verdict == vk::gxfront::Verdict::Draw && renderer_->Draw(packet)) ++stats_.recorded;
+        return true;
+    }
+
+    Replay::TextureEntry* Replay::TargetTexture(uint64_t id, const engine::CGxDevice& device)
+    {
+        if (!id) return nullptr;
+        TextureEntry& entry = textures_[id];
+        if (!entry.texture)
+        {
+            // A texture first named as a target: the capture has not read it yet. Its size is the
+            // target's (the device's window rect follows it), its format the engine's usual one.
+            vk::draw::TextureDesc desc;
+            desc.format = entry.fields.m_format ? entry.fields.m_format : vk::draw::kTexArgb8888;
+            desc.width  = entry.fields.m_width ? entry.fields.m_width : static_cast<uint32_t>(device.m_curWindowRect.maxX);
+            desc.height = entry.fields.m_height ? entry.fields.m_height : static_cast<uint32_t>(device.m_curWindowRect.maxY);
+            desc.cube   = entry.fields.m_target == 1;
+            desc.target = true;
+            if (!desc.width || !desc.height) return nullptr;
+            entry.texture = renderer_->CreateTexture(desc);
+            if (entry.texture) ++stats_.textures;
+        }
+        return &entry;
+    }
+
+    bool Replay::TargetChunk(const Reader& reader, const Chunk& chunk, std::string& why)
+    {
+        uint32_t buffer = 0, plane = 0;
+        uint64_t id = 0;
+        if (!Read32(chunk, 0, buffer) || !Read64(chunk, 4, id) || !Read32(chunk, 12, plane)) return Fail(why, "a malformed RTGT chunk");
+        const std::vector<uint8_t>& device = reader.Region(WXL_GX_CAPTURE_REGION_DEVICE);
+        if (device.size() != sizeof(engine::CGxDevice)) return Fail(why, "a target before the device's state");
+        const auto& d = *reinterpret_cast<const engine::CGxDevice*>(device.data());
+        ++stats_.targets;
+        // The device's state after the change names both targets.
+        TextureEntry* color = TargetTexture(Id(d.m_textureTarget[0].m_texture), d);
+        TextureEntry* depth = TargetTexture(Id(d.m_textureTarget[1].m_texture), d);
+        if (color) color->drawn = true;
+        if (depth) depth->drawn = true;
+        renderer_->SetTarget(color ? color->texture : nullptr, d.m_textureTarget[0].m_plane, depth ? depth->texture : nullptr);
+        (void)buffer;
+        (void)plane;
+        return true;
+    }
+
+    bool Replay::CopyChunk(const Reader& reader, const Chunk& chunk, std::string& why)
+    {
+        uint32_t kind = 0;
+        uint64_t id   = 0;
+        int32_t  v[10] = {};
+        if (!Read32(chunk, 0, kind) || !Read64(chunk, 4, id)) return Fail(why, "a malformed COPY chunk");
+        const uint32_t count = kind == 0 ? 8 : 10;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            uint32_t value = 0;
+            if (!Read32(chunk, 12 + i * 4, value)) return Fail(why, "a malformed COPY chunk");
+            v[i] = static_cast<int32_t>(value);
+        }
+        ++stats_.copies;
+        const std::vector<uint8_t>& device = reader.Region(WXL_GX_CAPTURE_REGION_DEVICE);
+        if (device.size() != sizeof(engine::CGxDevice)) return true;
+        TextureEntry* dest = TargetTexture(id, *reinterpret_cast<const engine::CGxDevice*>(device.data()));
+        if (!dest || !dest->texture) return true;
+        dest->drawn = true;
+        bool made = false;
+        if (kind == 0)
+        {
+            const VkRect2D from{{v[2], v[3]}, {static_cast<uint32_t>(std::max(v[4], 0)), static_cast<uint32_t>(std::max(v[5], 0))}};
+            const VkRect2D to{{v[0], v[1]}, from.extent};
+            made = renderer_->CopyScene(dest->texture, static_cast<uint32_t>(v[6]), static_cast<uint32_t>(v[7]), from, to, false);
+        }
+        else
+        {
+            // Each rectangle minY, minX, maxY, maxX; all -1 for the whole surface.
+            const VkExtent2D scene = renderer_->Screen().SceneExtent();
+            const uint32_t   level = static_cast<uint32_t>(v[8]);
+            const uint32_t   tw = std::max(dest->texture->desc.width >> level, 1u), th = std::max(dest->texture->desc.height >> level, 1u);
+            auto rect = [](const int32_t* r, uint32_t w, uint32_t h) {
+                if (r[0] == -1 && r[1] == -1 && r[2] == -1 && r[3] == -1) return VkRect2D{{0, 0}, {w, h}};
+                return VkRect2D{{r[1], r[0]}, {static_cast<uint32_t>(std::max(r[3] - r[1], 0)), static_cast<uint32_t>(std::max(r[2] - r[0], 0))}};
+            };
+            const VkRect2D to = rect(v, tw, th), from = rect(v + 4, scene.width, scene.height);
+            made = renderer_->CopyScene(dest->texture, level, static_cast<uint32_t>(v[9]), from, to,
+                                        from.extent.width != to.extent.width || from.extent.height != to.extent.height);
+        }
+        if (made) ++stats_.copied;
         return true;
     }
 

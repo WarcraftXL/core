@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string>
 
 namespace
 {
@@ -123,6 +124,25 @@ namespace
         return 1000.0 * static_cast<double>(end.QuadPart - begin.QuadPart) / static_cast<double>(frequency.QuadPart);
     }
 
+    /// <client>\WarcraftXL\cache\vk\, made when missing (outside the client's Cache\, which it
+    /// wipes); empty when it cannot be.
+    std::string CacheDirectory()
+    {
+        char path[MAX_PATH] = {};
+        const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+        if (!n || n >= MAX_PATH) return {};
+        std::string dir(path, n);
+        const size_t slash = dir.find_last_of("\\/");
+        if (slash == std::string::npos) return {};
+        dir.resize(slash + 1);
+        for (const char* part : {"WarcraftXL\\", "cache\\", "vk\\"})
+        {
+            dir += part;
+            if (!CreateDirectoryA(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return {};
+        }
+        return dir;
+    }
+
     vk::gxfront::Options OptionsOf(const wxl::core::settings::Settings& settings)
     {
         vk::gxfront::Options options;
@@ -130,6 +150,7 @@ namespace
         options.validation = settings.gx_validation;
         options.frames     = settings.gx_frames;
         options.filter     = settings.gx_nearest ? vk::present::Filter::Nearest : vk::present::Filter::Linear;
+        options.cache_dir  = CacheDirectory();
         return options;
     }
 
@@ -255,8 +276,8 @@ namespace
         g_renders = true;
         g_losses.clear();
         const wxl::core::settings::Settings& s = wxl::core::session::CurrentSettings();
-        WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling). At this step it draws the "
-                        "interface; the world's draws are left out and counted",
+        WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling): the interface and the world, "
+                        "the client's shaders translated as it creates them; the draws it cannot make are left out and counted",
                   s.gx_frames, s.gx_nearest ? "nearest" : "bilinear");
         return WXL_OK;
     }
@@ -420,9 +441,9 @@ namespace
         if (Mine(device)) g_front->ShaderConstants(target, first, rows, values);
     }
 
-    int32_t WXL_CALL ShaderCreateRow(void* device, void* shader, int32_t vertex, const char* name)
+    int32_t WXL_CALL ShaderCreateRow(void* device, void* shader, int32_t vertex, const char* name, const void* code, uint32_t size)
     {
-        return Mine(device) && g_front->ShaderCreate(shader, vertex != 0, name) ? 1 : 0;
+        return Mine(device) && g_front->ShaderCreate(shader, vertex != 0, name, code, size) ? 1 : 0;
     }
 
     void WXL_CALL ShaderDestroyRow(void* device, void* shader)
@@ -452,6 +473,46 @@ namespace
     void WXL_CALL PoolWrittenRow(void* device, void* pool, uint32_t offset, uint32_t size)
     {
         if (Mine(device) && pool) g_front->PoolWritten(pool, offset, size);
+    }
+
+    void WXL_CALL ShaderPrewarmRow(void* device, const void* const* codes, const uint32_t* sizes, uint32_t count)
+    {
+        if (Mine(device)) g_front->ShaderPrewarm(codes, sizes, count);
+    }
+
+    void WXL_CALL TargetSetRow(void* device)
+    {
+        if (Mine(device)) g_front->TargetChanged();
+    }
+
+    int32_t WXL_CALL TexCopyRow(void* device, void* tex, int32_t dest_x, int32_t dest_y, int32_t source_x, int32_t source_y, int32_t width,
+                                int32_t height, uint32_t level, uint32_t plane)
+    {
+        return Mine(device) && tex && g_front->TexCopy(tex, dest_x, dest_y, source_x, source_y, width, height, level, plane) ? 1 : 0;
+    }
+
+    int32_t WXL_CALL TexStretchRow(void* device, void* tex, const int32_t* dest, const int32_t* source, uint32_t level, uint32_t face)
+    {
+        return Mine(device) && tex && g_front->TexStretch(tex, dest, source, level, face) ? 1 : 0;
+    }
+
+    uint32_t WXL_CALL QueryCreateRow(void* device) { return Mine(device) ? g_front->QueryCreate() : 0; }
+
+    void WXL_CALL QueryDestroyRow(void* device, uint32_t query)
+    {
+        if (Mine(device)) g_front->QueryDestroy(query);
+    }
+
+    int32_t WXL_CALL QueryBeginRow(void* device, uint32_t query) { return Mine(device) && g_front->QueryBegin(query) ? 1 : 0; }
+
+    int32_t WXL_CALL QueryEndRow(void* device, uint32_t query) { return Mine(device) && g_front->QueryEnd(query) ? 1 : 0; }
+
+    int32_t WXL_CALL QueryResultRow(void* device, uint32_t query, uint32_t* samples)
+    {
+        uint32_t count = 0;
+        const bool known = Mine(device) && g_front->QueryResult(query, count);
+        if (samples) *samples = count;
+        return known ? 1 : 0;
     }
 
     const wxl_gx_vk_backend kBackend = {
@@ -486,6 +547,15 @@ namespace
         TexUnlockRow,
         PoolDiscardRow,
         PoolWrittenRow,
+        ShaderPrewarmRow,
+        TargetSetRow,
+        TexCopyRow,
+        TexStretchRow,
+        QueryCreateRow,
+        QueryDestroyRow,
+        QueryBeginRow,
+        QueryEndRow,
+        QueryResultRow,
     };
 }
 

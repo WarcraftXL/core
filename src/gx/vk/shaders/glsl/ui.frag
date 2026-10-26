@@ -12,7 +12,7 @@
 
 void main()
 {
-    vec4 c = Sample0(vTex0.xy) * vColor;
+    vec4 c = Sample0(StageCoord0().xy) * vColor;
     if (AlphaRejected(c.a)) discard;
     outColor = c;
 }

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// What every program the renderer draws the engine's work with shares (src/gx/vk/draw/): the
-// bindless table, the push constants and the draw's data block, and the interface between the
-// stages. One interface for all, fixed by meaning, so that any vertex program pairs with any
-// pixel program, as D3D9 lets the engine pair them.
+// What the renderer's own programs share with every program the engine's draws use (the client's
+// translated ones included, shaders/Interface.hpp, whose numbers this file repeats): the bindless
+// table, the 128 bytes of push constants and the varyings at fixed locations, so that any vertex
+// program pairs with any pixel program, as D3D9 lets the engine pair them. Plus the draw's data
+// block the renderer's own programs read.
 //
 // Vertex inputs sit at the location of the engine's attribute (EGxVertexAttrib): position 0,
 // normal 3, colour 4, texture coordinates 0 and 1 at 6 and 7. An input the vertex does not carry
-// reads zeros (a buffer of its own); draw.inputs says which it carries.
+// reads zeros (a buffer of its own); draw.inputs.w says which it carries.
 //
 // The engine's matrices travel as it keeps them: rows, a point multiplied on their left
 // (p' = p * M). Uploaded as they are, a GLSL mat4's column i is the engine's row i, so the product
@@ -29,27 +30,48 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Dr
     mat4  projection;   ///< its native projection (D3D's depth range, [0, 1])
     mat4  texMatrix[2]; ///< stages 0 and 1: the transform D3D9's fixed function applies to their coordinates
     vec4  constants[4]; ///< the vertex program's registers c0..c3 (the interface's program)
-    vec4  material;     ///< the colour a vertex without one takes (colour mode 1), or white
     vec4  fog;          ///< x, y: f = z * x + y on the view depth; z: 1 when fog is on
-    vec4  fogColor;
     ivec4 ops;          ///< colour op 0, alpha op 0, colour op 1, alpha op 1 (EGxTexOp); -1: the stage is off
     ivec4 texgen;       ///< stage 0's coordinate source (EGxTexGen), its transform flags, stage 1's, its flags
-    ivec4 inputs;       ///< x, y: the coordinate set stages 0 and 1 read; z: colour mode; w: the attributes carried
+    ivec4 inputs;       ///< x, y: the coordinate set stages 0 and 1 read; z: unused; w: the attributes carried
+    vec4  lightPosition[4];    ///< camera space: a point light's position (w 1), or the direction towards a directional one (w 0)
+    vec4  lightDiffuse[4];
+    vec4  lightAmbient[4];
+    vec4  lightSpecular[4];
+    vec4  lightAttenuation[4]; ///< constant, linear, quadratic, range
+    vec4  matDiffuse;
+    vec4  matAmbient;
+    vec4  matEmissive;
+    vec4  matSpecular;         ///< w: the power
+    vec4  globalAmbient;
+    ivec4 lighting;            ///< x: the lights on (a bit each), y: lighting on, z: specular on, w: normals normalised
+    ivec4 sources;             ///< diffuse, ambient, emissive, specular: 0 the material, 1 the vertex's colour
 };
 
 layout(push_constant) uniform Push
 {
-    uvec2 data;     ///< the address of the draw's DrawData
-    uint  image0;   ///< bindless slots of the textures of stages 0 and 1
-    uint  image1;
-    uint  sampler0; ///< and of their samplers
-    uint  sampler1;
-    float alphaRef; ///< the alpha test's reference, 1..255; 0: no test
-    uint  flags;    ///< kFlag* below
+    uvec2 data;      ///< the address of the draw's DrawData
+    uvec2 vertexRegs;
+    uvec2 pixelRegs;
+    float alphaRef;  ///< the alpha test's reference, 1..255; 0: no test
+    uint  flags;     ///< kFlag* below
+    vec4  clipPlane; ///< against D3D9's clip-space position
+    uint  fogColor;  ///< 0xAARRGGBB
+    float pointSize;
+    uvec2 reserved;
+    uint  stages[16]; ///< a stage's texture slot (low 16 bits) and sampler (high 16)
 } pc;
 
-/// The vertex colour arrives in RGBA byte order (the device reads no B8G8R8A8 vertex attribute).
-const uint kFlagColorRgba = 1u;
+const uint kFlagFog          = 1u << 1;
+const uint kFlagPointSprite  = 1u << 2;
+const uint kFlagClip         = 1u << 3;
+const uint kFlagSwizzleShift = 16u;
+
+// The varyings' locations (shaders::Varying).
+#define WXL_COLOR0    0
+#define WXL_COLOR1    1
+#define WXL_TEXCOORD0 2
+#define WXL_FOG       10
 
 // The attributes in DrawData.inputs.w, by EGxVertexAttrib.
 const int kHasNormal = 1 << 3;
@@ -68,4 +90,12 @@ vec4 Row(vec4 p, mat4 m)
 bool AlphaRejected(float alpha)
 {
     return pc.alphaRef > 0.0 && floor(clamp(alpha, 0.0, 1.0) * 255.0 + 0.5) < pc.alphaRef;
+}
+
+/// D3D9's fog after the pixel stage, when the draw asks: the fog colour by the factor's complement.
+vec4 Fogged(vec4 color, float factor)
+{
+    if ((pc.flags & kFlagFog) == 0u) return color;
+    vec3 fog = vec3(float((pc.fogColor >> 16) & 0xFFu), float((pc.fogColor >> 8) & 0xFFu), float(pc.fogColor & 0xFFu)) / 255.0;
+    return vec4(mix(fog, color.rgb, clamp(factor, 0.0, 1.0)), color.a);
 }

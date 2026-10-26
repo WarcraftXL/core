@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// A frame capture drawn again through the Vulkan renderer: its shaders, pools, buffers and textures
-// made on the device, its device state read at each clear and draw as the live client's is
-// (gxfront/Engine.hpp), its draws recorded into the open frame of the renderer's display. What
+// A frame capture drawn again through the Vulkan renderer: its shaders (the client's records
+// translated as the live client's are), pools, buffers and textures made on the device, its device
+// state read at each clear and draw as the live client's is (gxfront/Engine.hpp), its draws, render
+// targets and copies from the back buffer recorded into the open frame of the renderer's display.
+// A texture the frame draws into is read back by the capture when a later draw names it; the
+// replay keeps what it drew there instead. A draw the engine makes from a texture's Latch (the
+// minimap's) comes in the capture after the draw that latched it, so that draw reads the
+// texture's contents of the frame before. What
 // the D3D9 frame looked like (its SHOT) is kept, to be compared with what the renderer drew.
 // Portable: the tests and the replay tool run it natively on lavapipe.
 
@@ -26,14 +31,16 @@ namespace wxl::gx::capture
         struct Stats
         {
             uint32_t draws = 0;
-            uint32_t verdicts[6] = {}; ///< by gxfront::Verdict
+            uint32_t verdicts[static_cast<int>(wxl::vk::gxfront::Verdict::Count)] = {}; ///< by gxfront::Verdict
             uint32_t recorded = 0;     ///< the drawn ones the renderer recorded
             uint32_t clears = 0;
-            uint32_t copies = 0;       ///< TexCopy/TexStretch, not replayed at this step
+            uint32_t copies = 0;       ///< TexCopy/TexStretch
+            uint32_t copied = 0;       ///< of those, the ones the renderer made
+            uint32_t targets = 0;      ///< render target changes
             uint32_t textures = 0;
             uint32_t pools = 0;
             uint32_t shaders = 0;
-            uint32_t programs = 0;     ///< shaders the renderer has a program for
+            uint32_t programs = 0;     ///< shaders the renderer has a program for (its own, or translated)
             uint32_t unknown = 0;      ///< pool ranges the capture could not read back
         };
 
@@ -75,12 +82,17 @@ namespace wxl::gx::capture
         bool Clear(const Reader& reader, const Chunk& chunk, std::string& why);
         bool Draw(const Reader& reader, const Chunk& chunk, std::string& why);
         bool ShotChunk(const Chunk& chunk, std::string& why);
+        bool TargetChunk(const Reader& reader, const Chunk& chunk, std::string& why);
+        bool CopyChunk(const Reader& reader, const Chunk& chunk, std::string& why);
 
         struct TextureEntry
         {
             wxl::engine::CGxTex     fields{};
             wxl::vk::draw::Texture* texture = nullptr;
+            bool                    drawn = false; ///< drawn into by this replay: the capture's later readbacks of it are not uploaded
         };
+        TextureEntry* TargetTexture(uint64_t id, const wxl::engine::CGxDevice& device);
+
         struct PoolEntry
         {
             wxl::vk::draw::Pool* pool = nullptr;
@@ -92,8 +104,6 @@ namespace wxl::gx::capture
         std::unordered_map<uint64_t, PoolEntry>           pools_;
         std::unordered_map<uint64_t, TextureEntry>        textures_;
         std::unordered_map<uint64_t, int>                 programs_[2]; ///< [pixel, vertex]
-        float                                             vertex_[256 * 4] = {};
-        float                                             pixel_[256 * 4] = {};
         std::vector<uint32_t>                             shot_;
         uint32_t                                          shot_width_ = 0;
         uint32_t                                          shot_height_ = 0;

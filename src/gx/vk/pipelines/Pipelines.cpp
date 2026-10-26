@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The pipelines of the engine's draws, and the renderer's programs they are made from.
+// The pipelines of the engine's draws, and the programs they are made from.
 
 #include "gx/vk/pipelines/Pipelines.hpp"
 
 #include "gx/vk/Log.hpp"
+#include "gx/vk/shaders/Interface.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,7 @@ namespace wxl::vk::pipelines
     {
         // The programs, compiled from shaders/glsl/ when the runtime is built (cmake/wxl_glsl.cmake).
 #include "ff_vert.h"
+#include "ff_clip_vert.h"
 #include "ui_vert.h"
 #include "ui_stereo_vert.h"
 #include "ff_frag.h"
@@ -23,13 +25,20 @@ namespace wxl::vk::pipelines
 #include "desaturate_frag.h"
     }
 
-    const uint32_t* VertexCode(VertexProgram program, size_t& words)
+    const uint32_t* VertexCode(VertexProgram program, size_t& words, bool clip)
     {
         switch (program)
         {
         case VertexProgram::Interface: words = sizeof spirv::ui_vert / 4; return spirv::ui_vert;
         case VertexProgram::InterfaceStereo: words = sizeof spirv::ui_stereo_vert / 4; return spirv::ui_stereo_vert;
-        default: words = sizeof spirv::ff_vert / 4; return spirv::ff_vert;
+        default:
+            if (clip)
+            {
+                words = sizeof spirv::ff_clip_vert / 4;
+                return spirv::ff_clip_vert;
+            }
+            words = sizeof spirv::ff_vert / 4;
+            return spirv::ff_vert;
         }
     }
 
@@ -79,16 +88,41 @@ namespace wxl::vk::pipelines
         {
             return format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D16_UNORM_S8_UINT;
         }
+
+        /// The interface of the renderer's own vertex programs: position, normal, colour, two coordinates.
+        constexpr uint32_t kOwnInputs = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7);
+
+        std::vector<uint8_t> ReadFile(const std::string& path)
+        {
+            std::vector<uint8_t> bytes;
+            if (path.empty()) return bytes;
+            if (FILE* f = std::fopen(path.c_str(), "rb"))
+            {
+                uint8_t chunk[65536];
+                size_t  got = 0;
+                while ((got = std::fread(chunk, 1, sizeof chunk, f)) > 0) bytes.insert(bytes.end(), chunk, chunk + got);
+                std::fclose(f);
+            }
+            return bytes;
+        }
     }
 
-    bool Pipelines::Create(device::Context& context, VkDescriptorSetLayout set_layout, VkFormat color, VkFormat depth, char* why,
+    bool Pipelines::Own(bool pixel, const uint32_t* code, size_t words, const shaders::ProgramInfo& info)
+    {
+        Program p;
+        p.module = Module(context_->Device(), code, words);
+        p.info   = info;
+        if (!p.module) return false;
+        (pixel ? pixel_ : vertex_).push_back(p);
+        return true;
+    }
+
+    bool Pipelines::Create(device::Context& context, VkDescriptorSetLayout set_layout, const std::string& cache_file, char* why,
                            uint32_t why_size)
     {
         Destroy();
         context_           = &context;
-        color_             = color;
-        depth_             = depth;
-        stencil_           = HasStencil(depth);
+        cache_file_        = cache_file;
         const VkDevice dev = context.Device();
 
         const VkPushConstantRange  push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, kPushBytes};
@@ -101,24 +135,41 @@ namespace wxl::vk::pipelines
         VkResult result             = vkCreatePipelineLayout(dev, &info, nullptr, &layout_);
         if (result == VK_SUCCESS)
         {
-            VkPipelineCacheCreateInfo cache{};
-            cache.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-            result      = vkCreatePipelineCache(dev, &cache, nullptr, &cache_);
+            // What the previous launches compiled, when the driver takes it (it checks the header
+            // itself: another device, driver or version starts empty).
+            const std::vector<uint8_t> saved = ReadFile(cache_file_);
+            VkPipelineCacheCreateInfo  cache{};
+            cache.sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+            cache.initialDataSize = saved.size();
+            cache.pInitialData    = saved.empty() ? nullptr : saved.data();
+            result                = vkCreatePipelineCache(dev, &cache, nullptr, &cache_);
+            if (result != VK_SUCCESS && !saved.empty())
+            {
+                cache.initialDataSize = 0;
+                cache.pInitialData    = nullptr;
+                result                = vkCreatePipelineCache(dev, &cache, nullptr, &cache_);
+            }
+            if (result == VK_SUCCESS && !saved.empty()) Log(LogLevel::Debug, "pipeline cache: %zu bytes from %s", saved.size(), cache_file_.c_str());
         }
         bool modules = result == VK_SUCCESS;
+        const bool clip = context.Chosen().features.shaderClipDistance;
         for (int i = 0; modules && i < static_cast<int>(VertexProgram::Count); ++i)
         {
-            size_t          words = 0;
-            const uint32_t* code  = VertexCode(static_cast<VertexProgram>(i), words);
-            vertex_[i]            = Module(dev, code, words);
-            modules               = vertex_[i] != VK_NULL_HANDLE;
+            size_t               words = 0;
+            const uint32_t*      code  = VertexCode(static_cast<VertexProgram>(i), words, clip);
+            shaders::ProgramInfo own;
+            own.inputs = kOwnInputs;
+            modules    = Own(false, code, words, own);
         }
         for (int i = 0; modules && i < static_cast<int>(PixelProgram::Count); ++i)
         {
-            size_t          words = 0;
-            const uint32_t* code  = PixelCode(static_cast<PixelProgram>(i), words);
-            pixel_[i]             = Module(dev, code, words);
-            modules               = pixel_[i] != VK_NULL_HANDLE;
+            size_t               words = 0;
+            const uint32_t*      code  = PixelCode(static_cast<PixelProgram>(i), words);
+            shaders::ProgramInfo own;
+            own.pixel     = true;
+            own.samplers  = i == static_cast<int>(PixelProgram::Fixed) ? 3u : 1u;
+            own.fixed_fog = i == static_cast<int>(PixelProgram::Fixed);
+            modules       = Own(true, code, words, own);
         }
         if (!modules)
         {
@@ -129,28 +180,67 @@ namespace wxl::vk::pipelines
         return true;
     }
 
+    void Pipelines::Save()
+    {
+        if (!context_ || !cache_ || cache_file_.empty()) return;
+        size_t size = 0;
+        if (vkGetPipelineCacheData(context_->Device(), cache_, &size, nullptr) != VK_SUCCESS || !size) return;
+        std::vector<uint8_t> bytes(size);
+        if (vkGetPipelineCacheData(context_->Device(), cache_, &size, bytes.data()) != VK_SUCCESS) return;
+        // Written beside, then moved over: a launch that dies while writing leaves the old file.
+        const std::string temporary = cache_file_ + ".new";
+        FILE*             f         = std::fopen(temporary.c_str(), "wb");
+        if (!f) return;
+        const bool written = std::fwrite(bytes.data(), 1, size, f) == size;
+        std::fclose(f);
+        std::remove(cache_file_.c_str());
+        if (!written || std::rename(temporary.c_str(), cache_file_.c_str()) != 0) std::remove(temporary.c_str());
+        else Log(LogLevel::Debug, "pipeline cache: %zu bytes to %s", size, cache_file_.c_str());
+    }
+
     void Pipelines::Destroy()
     {
         if (context_ && context_->Ready())
         {
+            if (!context_->Lost()) Save();
             const VkDevice dev = context_->Device();
             for (auto& entry : pipelines_)
                 if (entry.second) vkDestroyPipeline(dev, entry.second, nullptr);
-            for (VkShaderModule& m : vertex_)
-                if (m) vkDestroyShaderModule(dev, m, nullptr);
-            for (VkShaderModule& m : pixel_)
-                if (m) vkDestroyShaderModule(dev, m, nullptr);
+            for (Program& p : vertex_)
+                if (p.module) vkDestroyShaderModule(dev, p.module, nullptr);
+            for (Program& p : pixel_)
+                if (p.module) vkDestroyShaderModule(dev, p.module, nullptr);
             if (cache_) vkDestroyPipelineCache(dev, cache_, nullptr);
             if (layout_) vkDestroyPipelineLayout(dev, layout_, nullptr);
         }
         pipelines_.clear();
         layouts_.clear();
         layout_ids_.clear();
-        for (VkShaderModule& m : vertex_) m = VK_NULL_HANDLE;
-        for (VkShaderModule& m : pixel_) m = VK_NULL_HANDLE;
+        targets_.clear();
+        vertex_.clear();
+        pixel_.clear();
         cache_   = VK_NULL_HANDLE;
         layout_  = VK_NULL_HANDLE;
         context_ = nullptr;
+    }
+
+    int Pipelines::AddProgram(const std::vector<uint32_t>& words, const shaders::ProgramInfo& info)
+    {
+        std::vector<Program>& table = info.pixel ? pixel_ : vertex_;
+        if (!context_ || table.size() >= 0xFFFF) return -1;
+        Program p;
+        p.module = Module(context_->Device(), words.data(), words.size());
+        p.info   = info;
+        if (!p.module) return -1;
+        table.push_back(p);
+        return static_cast<int>(table.size() - 1);
+    }
+
+    const shaders::ProgramInfo& Pipelines::Info(bool pixel, uint16_t id) const
+    {
+        static const shaders::ProgramInfo kNone;
+        const std::vector<Program>& table = pixel ? pixel_ : vertex_;
+        return id < table.size() ? table[id].info : kNone;
     }
 
     uint16_t Pipelines::LayoutId(const VertexLayout& layout)
@@ -163,7 +253,16 @@ namespace wxl::vk::pipelines
         const uint16_t id = static_cast<uint16_t>(layouts_.size());
         layouts_.push_back(layout);
         layout_ids_.emplace(std::move(bytes), id);
+        if (layouts_.size() == 0x1000) Log(LogLevel::Warn, "4096 vertex layouts: the pipeline keys of later ones share ids");
         return id;
+    }
+
+    uint8_t Pipelines::TargetId(VkFormat color, VkFormat depth)
+    {
+        for (size_t i = 0; i < targets_.size(); ++i)
+            if (targets_[i].color == color && targets_[i].depth == depth) return static_cast<uint8_t>(i);
+        targets_.push_back(Target{color, depth});
+        return static_cast<uint8_t>(targets_.size() - 1);
     }
 
     VkPipeline Pipelines::Get(const Key& key)
@@ -175,24 +274,26 @@ namespace wxl::vk::pipelines
         // A key that cannot be made is remembered too: it is not tried again at every draw.
         pipelines_.emplace(packed, made);
         if (!made)
-            Log(LogLevel::Warn, "a pipeline could not be made (programs %d/%d, layout %u, blend %u): its draws are dropped",
-                static_cast<int>(key.vertex), static_cast<int>(key.pixel), key.layout, key.blend);
+            Log(LogLevel::Warn, "a pipeline could not be made (programs %u/%u, layout %u, blend %u, target %u): its draws are dropped",
+                key.vertex, key.pixel, key.layout, key.blend, key.target);
         return made;
     }
 
     VkPipeline Pipelines::Make(const Key& key)
     {
-        if (key.layout >= layouts_.size()) return VK_NULL_HANDLE;
+        if (key.layout >= layouts_.size() || key.vertex >= vertex_.size() || key.pixel >= pixel_.size() || key.target >= targets_.size())
+            return VK_NULL_HANDLE;
         const VertexLayout& layout = layouts_[key.layout];
+        const Target&       target = targets_[key.target];
 
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = vertex_[static_cast<int>(key.vertex)];
+        stages[0].module = vertex_[key.vertex].module;
         stages[0].pName  = "main";
         stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = pixel_[static_cast<int>(key.pixel)];
+        stages[1].module = pixel_[key.pixel].module;
         stages[1].pName  = "main";
 
         VkPipelineVertexInputStateCreateInfo input{};
@@ -225,7 +326,14 @@ namespace wxl::vk::pipelines
         VkPipelineDepthStencilStateCreateInfo depth{};
         depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 
-        const Blend                         blend = BlendOf(key.blend);
+        // A target whose format cannot blend (a float one on some devices) draws unblended.
+        Blend blend = BlendOf(key.blend);
+        if (blend.enable)
+        {
+            VkFormatProperties props{};
+            vkGetPhysicalDeviceFormatProperties(context_->Physical(), target.color, &props);
+            if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) blend.enable = false;
+        }
         VkPipelineColorBlendAttachmentState attachment{};
         attachment.blendEnable         = blend.enable ? VK_TRUE : VK_FALSE;
         attachment.srcColorBlendFactor = blend.source;
@@ -256,9 +364,9 @@ namespace wxl::vk::pipelines
         VkPipelineRenderingCreateInfo rendering{};
         rendering.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         rendering.colorAttachmentCount    = 1;
-        rendering.pColorAttachmentFormats = &color_;
-        rendering.depthAttachmentFormat   = depth_;
-        rendering.stencilAttachmentFormat = stencil_ ? depth_ : VK_FORMAT_UNDEFINED;
+        rendering.pColorAttachmentFormats = &target.color;
+        rendering.depthAttachmentFormat   = target.depth;
+        rendering.stencilAttachmentFormat = HasStencil(target.depth) ? target.depth : VK_FORMAT_UNDEFINED;
 
         VkGraphicsPipelineCreateInfo info{};
         info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;

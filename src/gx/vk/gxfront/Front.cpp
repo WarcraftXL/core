@@ -115,8 +115,14 @@ namespace wxl::vk::gxfront
         present::Display::Options display;
         display.frames = options_.frames;
         display.filter = options_.filter;
+        draw::Renderer::Paths paths;
+        if (!options_.cache_dir.empty())
+        {
+            paths.pipeline_cache = options_.cache_dir + "pipelines.bin";
+            paths.shader_pack    = options_.cache_dir + "shaders.pack";
+        }
         if (!display_.Create(context_, allocator_, timeline_, display, why, why_size) ||
-            !renderer_.Create(context_, allocator_, display_, why, why_size))
+            !renderer_.Create(context_, allocator_, display_, paths, why, why_size))
             return false;
         const VkExtent2D extent = ClientExtent(window_);
         display_.SetWindowExtent(extent);
@@ -191,8 +197,8 @@ namespace wxl::vk::gxfront
             t->m_apiSpecificData = nullptr;
         }
         textures_.clear();
-        programs_[0].clear();
-        programs_[1].clear();
+        shaders_[0].clear();
+        shaders_[1].clear();
         device_ = nullptr;
         window_ = nullptr;
         stats_  = Stats{};
@@ -290,8 +296,8 @@ namespace wxl::vk::gxfront
         caps.m_colorWrite            = 1;
         caps.m_maxClipPlanes         = f.shaderClipDistance ? static_cast<int32_t>(std::min<uint32_t>(limits.maxClipDistances, 6)) : 0;
         caps.m_hwCursor              = 1;
-        // Occlusion queries come with the step that draws the world; until then the engine does without.
-        caps.m_occlusionQuery        = 0;
+        // Occlusion queries where the device counts samples (the sun's glare reads them).
+        caps.m_occlusionQuery        = renderer_.QueriesSupported() ? 1 : 0;
         caps.m_pointParameters       = f.largePoints ? 1 : 0;
         caps.m_pointScaleMax         = f.largePoints ? limits.pointSizeRange[1] : 1.0f;
         caps.m_pointSprite           = f.largePoints ? 1 : 0;
@@ -325,12 +331,18 @@ namespace wxl::vk::gxfront
 
     void Front::Clear(uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height)
     {
-        if (!display_.InFrame() || width <= 0 || height <= 0) return;
+        if (!display_.InFrame() || width <= 0 || height <= 0 || !device_ || missing_target_) return;
         ++stats_.clears;
+        // The viewport D3D9 clears, as the engine's device holds it now (a texture target's included).
+        (void)x;
+        (void)y;
+        int32_t rect[4];
+        ClearRect(*Engine(device_), rect);
+        if (rect[2] <= 0 || rect[3] <= 0) return;
         const float rgba[4] = {((argb >> 16) & 0xFF) / 255.0f, ((argb >> 8) & 0xFF) / 255.0f, (argb & 0xFF) / 255.0f,
                                ((argb >> 24) & 0xFF) / 255.0f};
-        display_.Clear((mask & 1) != 0, (mask & 2) != 0, rgba, 1.0f,
-                       VkRect2D{{x, y}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}});
+        renderer_.Clear((mask & 1) != 0, (mask & 2) != 0, rgba, 1.0f,
+                        VkRect2D{{rect[0], rect[1]}, {static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])}});
     }
 
     void Front::Draw(const wxl_gx_batch* batch, int32_t count, bool world)
@@ -341,14 +353,19 @@ namespace wxl::vk::gxfront
         EngineView         view;
         view.device           = dev;
         view.states           = static_cast<const wxl_gx_app_state*>(dev->m_appRenderStates.m_data);
-        view.vertex_constants = vertex_constants_;
-        view.world            = world;
+        view.vertex_constants = renderer_.Registers(false);
         if (!view.states || dev->m_appRenderStates.m_count < kRenderStates) return;
         Live           live(*this);
         draw::Packet   packet;
         const Verdict  verdict = BuildDraw(view, *batch, count, live, packet);
         ++stats_.left_out[static_cast<int>(verdict)];
-        if (verdict == Verdict::Draw) renderer_.Draw(packet);
+        if (verdict == Verdict::Draw && missing_target_)
+        {
+            --stats_.left_out[0];
+            ++stats_.left_out[static_cast<int>(Verdict::Target)];
+            return;
+        }
+        if (verdict == Verdict::Draw && renderer_.Draw(packet) && world) ++stats_.world;
     }
 
     void Front::UpdateSync()
@@ -475,9 +492,17 @@ namespace wxl::vk::gxfront
 
     int Front::Live::Program(const void* shader, bool vertex)
     {
-        const auto& programs = front_.programs_[vertex ? 1 : 0];
-        const auto  found    = programs.find(shader);
-        return found == programs.end() ? -1 : found->second;
+        auto&      shaders = front_.shaders_[vertex ? 1 : 0];
+        const auto found   = shaders.find(shader);
+        if (found == shaders.end()) return -1;
+        ShaderRecord& record = found->second;
+        if (record.generation != front_.generation_)
+        {
+            // Made on a device since lost: made again on this one.
+            record.program    = front_.renderer_.Program(!vertex, record.name.c_str(), record.code.data(), record.code.size());
+            record.generation = front_.generation_;
+        }
+        return record.program;
     }
 
     char* Front::PoolMemory(void* pool)
@@ -572,26 +597,89 @@ namespace wxl::vk::gxfront
         renderer_.UnlockTexture(static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData)->texture);
     }
 
-    bool Front::ShaderCreate(void* shader, bool vertex, const char* name)
+    bool Front::ShaderCreate(void* shader, bool vertex, const char* name, const void* code, uint32_t size)
     {
-        uint8_t program = 0;
-        if (!shader || !draw::ProgramByName(vertex, name, program)) return false;
-        programs_[vertex ? 1 : 0][shader] = program;
-        return true;
+        if (!shader || !renderer_.Ready()) return false;
+        ShaderRecord record;
+        record.name = name ? name : "";
+        if (code && size) record.code.assign(static_cast<const uint8_t*>(code), static_cast<const uint8_t*>(code) + size);
+        std::string why;
+        record.program    = renderer_.Program(!vertex, record.name.c_str(), record.code.data(), record.code.size(), &why);
+        record.generation = generation_;
+        const bool made   = record.program >= 0;
+        shaders_[vertex ? 1 : 0][shader] = std::move(record);
+        return made;
     }
 
     void Front::ShaderDestroy(void* shader)
     {
-        programs_[0].erase(shader);
-        programs_[1].erase(shader);
+        shaders_[0].erase(shader);
+        shaders_[1].erase(shader);
     }
 
     void Front::ShaderConstants(int32_t target, uint32_t first, uint32_t rows, const float* values)
     {
-        if (!values || first >= 256) return;
-        rows = std::min(rows, 256 - first);
-        std::memcpy((target == 0 ? vertex_constants_ : pixel_constants_) + first * 4, values, rows * 4 * sizeof(float));
+        renderer_.Constants(target != 0, first, rows, values);
     }
+
+    void Front::ShaderPrewarm(const void* const* codes, const uint32_t* sizes, uint32_t count)
+    {
+        if (!renderer_.Ready() || !codes || !sizes) return;
+        std::vector<std::vector<uint8_t>> records;
+        for (uint32_t i = 0; i < count; ++i)
+            if (codes[i] && sizes[i])
+                records.emplace_back(static_cast<const uint8_t*>(codes[i]), static_cast<const uint8_t*>(codes[i]) + sizes[i]);
+        renderer_.Prewarm(std::move(records));
+    }
+
+    draw::Texture* Front::Record(void* tex)
+    {
+        if (!tex || !textures_.count(tex)) return nullptr;
+        return static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData)->texture;
+    }
+
+    void Front::TargetChanged()
+    {
+        if (!device_ || !renderer_.Ready()) return;
+        const engine::CGxDevice* dev = Engine(device_);
+        draw::Texture* color = Record(dev->m_textureTarget[0].m_texture);
+        draw::Texture* depth = Record(dev->m_textureTarget[1].m_texture);
+        // A target the device could not make draws nowhere rather than into the scene.
+        missing_target_ = (dev->m_textureTarget[0].m_texture && !color) || (dev->m_textureTarget[1].m_texture && !depth);
+        renderer_.SetTarget(color, dev->m_textureTarget[0].m_plane, depth);
+    }
+
+    bool Front::TexCopy(void* tex, int32_t dest_x, int32_t dest_y, int32_t source_x, int32_t source_y, int32_t width, int32_t height,
+                        uint32_t level, uint32_t plane)
+    {
+        draw::Texture* dest = Record(tex);
+        if (!dest || width <= 0 || height <= 0) return false;
+        const VkRect2D from{{source_x, source_y}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
+        const VkRect2D to{{dest_x, dest_y}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
+        return renderer_.CopyScene(dest, level, plane, from, to, false);
+    }
+
+    bool Front::TexStretch(void* tex, const int32_t* dest, const int32_t* source, uint32_t level, uint32_t face)
+    {
+        draw::Texture* target = Record(tex);
+        if (!target) return false;
+        // The rectangles as CiRect holds them (minY, minX, maxY, maxX); null: the whole surface.
+        const VkExtent2D scene = display_.SceneExtent();
+        const uint32_t   tw = std::max(target->desc.width >> level, 1u), th = std::max(target->desc.height >> level, 1u);
+        auto rect = [](const int32_t* r, uint32_t w, uint32_t h) {
+            if (!r) return VkRect2D{{0, 0}, {w, h}};
+            return VkRect2D{{r[1], r[0]}, {static_cast<uint32_t>(std::max(r[3] - r[1], 0)), static_cast<uint32_t>(std::max(r[2] - r[0], 0))}};
+        };
+        const VkRect2D from = rect(source, scene.width, scene.height), to = rect(dest, tw, th);
+        const bool linear = !(source && dest && from.extent.width == to.extent.width && from.extent.height == to.extent.height);
+        return renderer_.CopyScene(target, level, face, from, to, linear);
+    }
+
+    uint32_t Front::QueryCreate() { return renderer_.Ready() ? renderer_.CreateQuery() : 0; }
+    void     Front::QueryDestroy(uint32_t query) { renderer_.DestroyQuery(query); }
+    bool     Front::QueryBegin(uint32_t query) { return renderer_.BeginQuery(query); }
+    bool     Front::QueryEnd(uint32_t query) { return renderer_.EndQuery(query); }
+    bool     Front::QueryResult(uint32_t query, uint32_t& samples) { return renderer_.QueryResult(query, samples); }
 
     void Front::WaitIdle()
     {
@@ -615,12 +703,18 @@ namespace wxl::vk::gxfront
         const present::Display::Stats& s = display_.Counters();
         const draw::Renderer::Stats&   r = renderer_.Counters();
         auto n = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+        const shaders::Cache::Stats c = const_cast<draw::Renderer&>(renderer_).ShaderCache().Counters();
         std::snprintf(out, size,
-                      "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %llu draws (%llu drawn; left out: "
-                      "%llu into targets, %llu in the world's pass, %llu 3D, %llu client programs, %llu not ready), %llu pipelines, "
-                      "%llu pass breaks, %llu textures, %llu losses%s",
+                      "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %llu draws (%llu drawn, %llu in the "
+                      "world's pass; left out: %llu untranslated programs, %llu into a depth texture alone, %llu not ready, %llu refused "
+                      "by the renderer), %llu pipelines, %llu programs translated (%llu refused; %llu translated in %.0f ms, %llu from "
+                      "the cache, %llu ahead), %llu target renderings, %llu copies, %llu queries, %llu pass breaks, %llu textures, "
+                      "%llu losses%s",
                       context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), n(stats_.draws), n(r.draws),
-                      n(stats_.left_out[1]), n(stats_.left_out[2]), n(stats_.left_out[3]), n(stats_.left_out[4]), n(stats_.left_out[5]),
-                      n(r.pipelines), n(r.pass_breaks), n(r.textures), n(stats_.losses), context_.Lost() ? ", the device is lost" : "");
+                      n(stats_.world), n(stats_.left_out[static_cast<int>(Verdict::Program)]),
+                      n(stats_.left_out[static_cast<int>(Verdict::Target)]), n(stats_.left_out[static_cast<int>(Verdict::Unready)]),
+                      n(r.refused), n(r.pipelines), n(r.programs), n(r.programs_refused), n(c.translated), c.milliseconds, n(c.from_disk),
+                      n(c.prewarmed), n(r.target_renderings), n(r.copies), n(r.queries), n(r.pass_breaks), n(r.textures), n(stats_.losses),
+                      context_.Lost() ? ", the device is lost" : "");
     }
 }

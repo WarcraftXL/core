@@ -402,8 +402,56 @@ namespace wxl::vk::present
     void Display::EndRendering()
     {
         if (rendering_ == Rendering::None) return;
-        vkCmdEndRendering(frames_.Current());
-        rendering_ = Rendering::None;
+        const VkCommandBuffer cmd = frames_.Current();
+        if (hook_) hook_->RenderingEnding(cmd);
+        vkCmdEndRendering(cmd);
+        rendering_  = Rendering::None;
+        target_key_ = 0;
+        if (hook_) hook_->RenderingEnded(cmd);
+    }
+
+    VkCommandBuffer Display::BeginTargetRendering(const TargetRendering& target)
+    {
+        if (!frames_.Open() || !target.color || !target.extent.width || !target.extent.height) return VK_NULL_HANDLE;
+        if (rendering_ == Rendering::Target && target_key_ == target.key) return frames_.Current();
+        EndRendering();
+        VkRenderingAttachmentInfo color{};
+        color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color.imageView   = target.color;
+        color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingAttachmentInfo depth{};
+        depth.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth.imageView   = target.depth;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo info{};
+        info.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea           = {{0, 0}, target.extent};
+        info.layerCount           = 1;
+        info.colorAttachmentCount = 1;
+        info.pColorAttachments    = &color;
+        if (target.depth)
+        {
+            info.pDepthAttachment = &depth;
+            if (HasStencil(target.depth_format)) info.pStencilAttachment = &depth;
+        }
+        vkCmdBeginRendering(frames_.Current(), &info);
+        rendering_     = Rendering::Target;
+        target_key_    = target.key;
+        target_extent_ = target.extent;
+        ++epoch_;
+        return frames_.Current();
+    }
+
+    bool Display::PrepareScene()
+    {
+        if (!frames_.Open() || !EnsureScene()) return false;
+        EndRendering();
+        Touch();
+        return true;
     }
 
     void Display::Clear(bool color, bool depth, const float rgba[4], float z, VkRect2D rect)

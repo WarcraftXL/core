@@ -91,17 +91,17 @@ typedef struct wxl_gx_vk_backend
     /// Opens the next frame, as the D3D9 device's scene begin: WXL_GX_VK_FRAME_OK or _LOST.
     int32_t(WXL_CALL* scene_begin)(void* device);
 
-    /// Clears the open frame's back buffer inside (x, y, width, height): its colour (0xAARRGGBB)
-    /// when @p mask has 1, its depth when it has 2.
+    /// Clears the render target inside the viewport (as D3D9 does; @p x, @p y, @p width and
+    /// @p height are the back buffer's, a texture target's is the runtime's to work out): its
+    /// colour (0xAARRGGBB) when @p mask has 1, its depth when it has 2.
     void(WXL_CALL* scene_clear)(void* device, uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height);
 
     /**
      * @brief A draw of the engine (CGxDevice::Draw, @p batch a CGxBatch, indexed when @p count is
      *        not 0), its render states synced (IRsSync) and its constants flushed
      *        (shader_constants): drawn from the device's state as the D3D9 device's IStateSync
-     *        reads it. At this step the interface is drawn; a draw into a texture target, inside
-     *        the world's pass, testing depth, or binding a client program the renderer has none of
-     *        is counted and left out.
+     *        reads it, into the render target target_set last named. A draw binding a client
+     *        shader whose record the translator refused is counted and left out.
      */
     void(WXL_CALL* draw)(void* device, const wxl_gx_batch* batch, int32_t count);
 
@@ -155,11 +155,13 @@ typedef struct wxl_gx_vk_backend
     void(WXL_CALL* shader_constants)(void* device, int32_t target, uint32_t first, uint32_t rows, const float* values);
 
     /**
-     * @brief A client shader (CGxShader) is made on the device, by the name of its record ("UI:0",
-     *        "Desaturate"): 1 when the renderer has a program for it (the client marks it valid), 0
-     *        otherwise (it stays invalid, as one D3D9 refuses).
+     * @brief A client shader (CGxShader) is made on the device: by the name of its record ("UI:0",
+     *        "Desaturate") when the renderer has a program of its own for it, otherwise from its DX9
+     *        record (@p code, @p size bytes: CGxShader::m_code) translated. 1 when it has a program
+     *        (the client marks it valid), 0 when the record is refused (it stays invalid, as one
+     *        D3D9 refuses).
      */
-    int32_t(WXL_CALL* shader_create)(void* device, void* shader, int32_t vertex, const char* name);
+    int32_t(WXL_CALL* shader_create)(void* device, void* shader, int32_t vertex, const char* name, const void* code, uint32_t size);
 
     /// A client shader goes.
     void(WXL_CALL* shader_destroy)(void* device, void* shader);
@@ -181,6 +183,34 @@ typedef struct wxl_gx_vk_backend
 
     /// @p size bytes at @p offset of a pool's memory were written (its buffer unlocked).
     void(WXL_CALL* pool_written)(void* device, void* pool, uint32_t offset, uint32_t size);
+
+    /// The records of a shader's @p count permutations, just loaded (CGxDevice::ShaderCreate):
+    /// translated ahead, off the main thread, before their first bind.
+    void(WXL_CALL* shader_prewarm)(void* device, const void* const* codes, const uint32_t* sizes, uint32_t count);
+
+    /// The engine's render target changed (CGxDevice::m_textureTarget, after DeviceSetRenderTarget;
+    /// the client makes a target texture first, as the D3D9 device does).
+    void(WXL_CALL* target_set)(void* device);
+
+    /// D3D9's TexCopy: @p width x @p height of the back buffer at (@p source_x, @p source_y) into
+    /// @p tex's @p level (@p plane of a cube) at (@p dest_x, @p dest_y). 1 when copied.
+    int32_t(WXL_CALL* tex_copy)(void* device, void* tex, int32_t dest_x, int32_t dest_y, int32_t source_x, int32_t source_y, int32_t width,
+                                int32_t height, uint32_t level, uint32_t plane);
+
+    /// D3D9's TexStretch: the back buffer's @p source rectangle into @p tex's @p dest one, each
+    /// (minY, minX, maxY, maxX) as CiRect holds it, or null for the whole surface; filtered when
+    /// the sizes differ. 1 when copied.
+    int32_t(WXL_CALL* tex_stretch)(void* device, void* tex, const int32_t* dest, const int32_t* source, uint32_t level, uint32_t face);
+
+    /// An occlusion query (CGxQuery): its handle (0 when there are none: the device counts no samples).
+    uint32_t(WXL_CALL* query_create)(void* device);
+    void(WXL_CALL* query_destroy)(void* device, uint32_t query);
+    /// The samples of the draws between begin and end are counted. 1 when the query was issued.
+    int32_t(WXL_CALL* query_begin)(void* device, uint32_t query);
+    int32_t(WXL_CALL* query_end)(void* device, uint32_t query);
+    /// 1 with @p samples when the query's count is known (a query never issued is, with 0), 0 while
+    /// the GPU has not finished it: never waits.
+    int32_t(WXL_CALL* query_result)(void* device, uint32_t query, uint32_t* samples);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

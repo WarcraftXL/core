@@ -16,39 +16,49 @@ namespace wxl::vk::draw
     namespace
     {
         constexpr VkDeviceSize kStagingChunk = 8u << 20;
-        constexpr VkDeviceSize kDataChunk    = 1u << 20;
+        constexpr VkDeviceSize kDataChunk    = 4u << 20;
         constexpr uint32_t     kZeroBinding  = 15; ///< the binding of the zeros an absent input reads
-        constexpr uint32_t     kFlagColorRgba = 1;
 
-        /// The vertex inputs the programs declare (shaders/glsl/interface.vert.glsl), by EGxVertexAttrib.
-        constexpr uint8_t kInputs[] = {0, 3, 4, 6, 7};
+        VkImageAspectFlags AspectOf(const Texture& t)
+        {
+            if (!t.info.depth) return VK_IMAGE_ASPECT_COLOR_BIT;
+            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (t.info.format == VK_FORMAT_D24_UNORM_S8_UINT || t.info.format == VK_FORMAT_D32_SFLOAT_S8_UINT) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            return aspect;
+        }
 
-        void ImageBarrier(VkCommandBuffer cmd, const Texture& t, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 srcStage,
-                          VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
-                          uint32_t level = 0, uint32_t levels = VK_REMAINING_MIP_LEVELS)
+        bool HasStencil(VkFormat format)
+        {
+            return format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D16_UNORM_S8_UINT;
+        }
+
+        void ImageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                          VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+                          uint32_t level = 0, uint32_t levels = VK_REMAINING_MIP_LEVELS, uint32_t layer = 0,
+                          uint32_t layers = VK_REMAINING_ARRAY_LAYERS)
         {
             VkImageMemoryBarrier2 barrier{};
-            barrier.sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            barrier.srcStageMask  = srcStage;
-            barrier.srcAccessMask = srcAccess;
-            barrier.dstStageMask  = dstStage;
-            barrier.dstAccessMask = dstAccess;
-            barrier.oldLayout     = from;
-            barrier.newLayout     = to;
-            barrier.image         = t.image.image;
-            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-            if (t.info.depth)
-            {
-                aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-                if (t.info.format == VK_FORMAT_D24_UNORM_S8_UINT || t.info.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
-                    aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
-            }
-            barrier.subresourceRange = {aspect, level, levels, 0, VK_REMAINING_ARRAY_LAYERS};
+            barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            barrier.srcStageMask     = srcStage;
+            barrier.srcAccessMask    = srcAccess;
+            barrier.dstStageMask     = dstStage;
+            barrier.dstAccessMask    = dstAccess;
+            barrier.oldLayout        = from;
+            barrier.newLayout        = to;
+            barrier.image            = image;
+            barrier.subresourceRange = {aspect, level, levels, layer, layers};
             VkDependencyInfo dependency{};
             dependency.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
             dependency.imageMemoryBarrierCount = 1;
             dependency.pImageMemoryBarriers    = &barrier;
             vkCmdPipelineBarrier2(cmd, &dependency);
+        }
+
+        void ImageBarrier(VkCommandBuffer cmd, const Texture& t, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 srcStage,
+                          VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, uint32_t level = 0,
+                          uint32_t levels = VK_REMAINING_MIP_LEVELS)
+        {
+            ImageBarrier(cmd, t.image.image, AspectOf(t), from, to, srcStage, srcAccess, dstStage, dstAccess, level, levels);
         }
 
         void MemoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
@@ -72,6 +82,12 @@ namespace wxl::vk::draw
         constexpr VkAccessFlags2 kReads =
             VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT;
         constexpr VkPipelineStageFlags2 kTransfer = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
+        constexpr VkPipelineStageFlags2 kColorStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        constexpr VkAccessFlags2 kColorAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+        constexpr VkPipelineStageFlags2 kDepthStage =
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        constexpr VkAccessFlags2 kDepthAccess =
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
         uint32_t MipLevels(uint32_t width, uint32_t height)
         {
@@ -106,33 +122,35 @@ namespace wxl::vk::draw
             std::memcpy(&bits, &value, sizeof bits);
             return bits;
         }
+
+        uint64_t KeyBits(const shaders::CacheKey& key) { return key.low ^ (key.high * 0x9E3779B97F4A7C15ull); }
     }
 
-    bool ProgramByName(bool vertex, const char* name, uint8_t& program)
+    bool ProgramByName(bool vertex, const char* name, uint16_t& program)
     {
         if (!name) return false;
         if (vertex)
         {
             if (std::strcmp(name, "UI:0") == 0)
             {
-                program = static_cast<uint8_t>(pipelines::VertexProgram::Interface);
+                program = static_cast<uint16_t>(pipelines::VertexProgram::Interface);
                 return true;
             }
             if (std::strcmp(name, "UI:1") == 0)
             {
-                program = static_cast<uint8_t>(pipelines::VertexProgram::InterfaceStereo);
+                program = static_cast<uint16_t>(pipelines::VertexProgram::InterfaceStereo);
                 return true;
             }
             return false;
         }
         if (std::strcmp(name, "UI") == 0)
         {
-            program = static_cast<uint8_t>(pipelines::PixelProgram::Interface);
+            program = static_cast<uint16_t>(pipelines::PixelProgram::Interface);
             return true;
         }
         if (std::strcmp(name, "Desaturate") == 0)
         {
-            program = static_cast<uint8_t>(pipelines::PixelProgram::Desaturate);
+            program = static_cast<uint16_t>(pipelines::PixelProgram::Desaturate);
             return true;
         }
         return false;
@@ -140,8 +158,8 @@ namespace wxl::vk::draw
 
     // --- Life ------------------------------------------------------------------------------------------
 
-    bool Renderer::Create(device::Context& context, resources::Allocator& allocator, present::Display& display, char* why,
-                          uint32_t why_size)
+    bool Renderer::Create(device::Context& context, resources::Allocator& allocator, present::Display& display, const Paths& paths,
+                          char* why, uint32_t why_size)
     {
         Destroy();
         context_   = &context;
@@ -156,10 +174,12 @@ namespace wxl::vk::draw
         resources::ImageInfo black;
         black.format = VK_FORMAT_B8G8R8A8_UNORM;
         black.usage  = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        if (!allocator.CreateImage(black, black_) ||
+        resources::ImageInfo cube = black;
+        cube.cube                 = true;
+        if (!allocator.CreateImage(black, black_) || !allocator.CreateImage(cube, black_cube_) ||
             !allocator.CreateBuffer(64, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, resources::Access::Upload, zeros_) || !zeros_.mapped)
         {
-            std::snprintf(why, why_size, "the renderer's default texture or its zero vertex could not be made");
+            std::snprintf(why, why_size, "the renderer's default textures or its zero vertex could not be made");
             Destroy();
             return false;
         }
@@ -171,20 +191,41 @@ namespace wxl::vk::draw
         if (!bindless_.Create(context, 1u << 16, black_.view, why, why_size) ||
             !staging_.Create(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, kStagingChunk, slots) ||
             !data_.Create(allocator, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kDataChunk, slots) ||
-            !pipelines_.Create(context, bindless_.Layout(), present::Display::kSceneFormat, display.DepthFormat(), why, why_size))
+            !pipelines_.Create(context, bindless_.Layout(), paths.pipeline_cache, why, why_size))
         {
             if (why[0] == '\0') std::snprintf(why, why_size, "the renderer's rings could not be made");
             Destroy();
             return false;
         }
+        black_cube_slot_ = bindless_.AddImage(black_cube_.view);
+        scene_target_id_ = pipelines_.TargetId(present::Display::kSceneFormat, display.DepthFormat());
+
+        // Occlusion queries count samples only where the device counts them precisely.
+        queries_supported_ = context.Chosen().features.occlusionQueryPrecise;
+        if (queries_supported_)
+        {
+            VkQueryPoolCreateInfo info{};
+            info.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            info.queryType  = VK_QUERY_TYPE_OCCLUSION;
+            info.queryCount = kQueriesPerFrame * frame::Frames::kMax;
+            queries_supported_ = vkCreateQueryPool(context.Device(), &info, nullptr, &query_pool_) == VK_SUCCESS;
+        }
+
+        shaders::Options options;
+        options.clip_distance = context.Chosen().features.shaderClipDistance;
+        cache_.Open(paths.shader_pack, options);
+
         display.SetFrameHook(this);
         stats_ = Stats{};
+        vertex_regs_ = RegisterFile{};
+        pixel_regs_  = RegisterFile{};
         return true;
     }
 
     void Renderer::Destroy()
     {
         if (display_) display_->SetFrameHook(nullptr);
+        cache_.Close();
         if (allocator_ && context_ && context_->Ready())
         {
             Collect(true);
@@ -193,10 +234,18 @@ namespace wxl::vk::draw
             staging_.Destroy();
             data_.Destroy();
             allocator_->Destroy(black_);
+            allocator_->Destroy(black_cube_);
+            allocator_->Destroy(target_depth_);
             allocator_->Destroy(zeros_);
+            if (query_pool_) vkDestroyQueryPool(context_->Device(), query_pool_, nullptr);
         }
+        query_pool_ = VK_NULL_HANDLE;
+        queries_.clear();
+        programs_.clear();
         dead_.clear();
         opened_.clear();
+        target_ = open_ = Target{};
+        target_depth_ready_ = false;
         context_   = nullptr;
         allocator_ = nullptr;
         display_   = nullptr;
@@ -207,12 +256,23 @@ namespace wxl::vk::draw
     void Renderer::Retire(resources::Buffer buffer)
     {
         if (!buffer.buffer) return;
-        dead_.push_back(Dead{display_->FrameNumber(), buffer, {}, VK_NULL_HANDLE, resources::Bindless::kNoSlot});
+        Dead d{};
+        d.frame  = display_->FrameNumber();
+        d.buffer = buffer;
+        d.slots[0] = d.slots[1] = resources::Bindless::kNoSlot;
+        dead_.push_back(d);
     }
 
-    void Renderer::Retire(resources::Image image, VkImageView flat, uint32_t slot)
+    void Renderer::Retire(resources::Image image, VkImageView flat, uint32_t slot, uint32_t cube_slot, const VkImageView* attach)
     {
-        dead_.push_back(Dead{display_->FrameNumber(), {}, image, flat, slot});
+        Dead d{};
+        d.frame    = display_->FrameNumber();
+        d.image    = image;
+        d.views[0] = flat;
+        for (int i = 0; i < 6; ++i) d.views[1 + i] = attach ? attach[i] : VK_NULL_HANDLE;
+        d.slots[0] = slot;
+        d.slots[1] = cube_slot;
+        dead_.push_back(d);
     }
 
     void Renderer::Collect(bool all)
@@ -227,11 +287,86 @@ namespace wxl::vk::draw
                 continue;
             }
             allocator_->Destroy(d.buffer);
-            if (d.flat) vkDestroyImageView(context_->Device(), d.flat, nullptr);
+            for (VkImageView v : d.views)
+                if (v) vkDestroyImageView(context_->Device(), v, nullptr);
             allocator_->Destroy(d.image);
-            bindless_.ReleaseImage(d.slot);
+            bindless_.ReleaseImage(d.slots[0]);
+            bindless_.ReleaseImage(d.slots[1]);
         }
         dead_.resize(kept);
+    }
+
+    // --- Programs --------------------------------------------------------------------------------------
+
+    int Renderer::Program(bool pixel, const char* name, const void* code, size_t size, std::string* why)
+    {
+        uint16_t own = 0;
+        if (ProgramByName(!pixel, name, own)) return own;
+        if (!Ready() || !code || !size)
+        {
+            if (why) *why = "no record";
+            return -1;
+        }
+        shaders::Options options;
+        options.clip_distance = context_->Chosen().features.shaderClipDistance;
+        // A record is one program per stage it is asked for (the wrong stage is refused once).
+        const uint64_t key   = KeyBits(shaders::Cache::KeyOf(code, size, options)) ^ (pixel ? 0x8000000000000000ull : 0);
+        const auto     found = programs_.find(key);
+        if (found != programs_.end())
+        {
+            if (found->second < 0 && why) *why = "refused before";
+            return found->second;
+        }
+        std::string reason;
+        const auto  translation = cache_.Get(code, size, reason);
+        int         id          = -1;
+        if (!translation) {}
+        else if (translation->info.pixel != pixel)
+            reason = pixel ? "a vertex program where a pixel one is wanted" : "a pixel program where a vertex one is wanted";
+        else
+        {
+            id = pipelines_.AddProgram(translation->words, translation->info);
+            if (id < 0) reason = "its module could not be made";
+        }
+        if (id < 0)
+        {
+            ++stats_.programs_refused;
+            Log(LogLevel::Debug, "the %s program %s is not translated: %s", pixel ? "pixel" : "vertex", name ? name : "?", reason.c_str());
+        }
+        else
+            ++stats_.programs;
+        programs_.emplace(key, id);
+        if (why) *why = reason;
+        return id;
+    }
+
+    void Renderer::Prewarm(std::vector<std::vector<uint8_t>> records) { cache_.Prewarm(std::move(records)); }
+
+    void Renderer::Constants(bool pixel, uint32_t first, uint32_t rows, const float* values)
+    {
+        if (!values || first >= shaders::kRegisterRows) return;
+        rows               = std::min(rows, shaders::kRegisterRows - first);
+        RegisterFile& file = pixel ? pixel_regs_ : vertex_regs_;
+        std::memcpy(file.rows + first * 4, values, rows * 4 * sizeof(float));
+        file.dirty = true;
+    }
+
+    VkDeviceAddress Renderer::Snapshot(RegisterFile& file, uint32_t rows)
+    {
+        if (!rows) return 0;
+        const uint64_t frame = display_->FrameNumber();
+        if (!file.dirty && file.frame == frame && file.copied >= rows && file.address) return file.address;
+        // A program that reads more rows than the copy holds, or registers that changed: a new copy.
+        rows = std::max(rows, file.frame == frame && !file.dirty ? file.copied : 0u);
+        resources::Ring::Span span;
+        if (!data_.Allocate(rows * 16ull, 16, span)) return 0;
+        std::memcpy(span.data, file.rows, rows * 16ull);
+        stats_.register_bytes += rows * 16ull;
+        file.address = span.address;
+        file.copied  = rows;
+        file.frame   = frame;
+        file.dirty   = false;
+        return file.address;
     }
 
     // --- The frame ---------------------------------------------------------------------------------
@@ -243,21 +378,33 @@ namespace wxl::vk::draw
         data_.Begin(slot);
         epoch_        = 0;
         last_address_ = 0;
+        slot_         = slot;
+        query_next_   = 0;
         opened_.clear();
         // Nothing of this frame's upload pass may overwrite what the frames before it still read.
         MemoryBarrier(upload, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, kTransfer,
                       VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+        if (query_pool_) vkCmdResetQueryPool(upload, query_pool_, slot * kQueriesPerFrame, kQueriesPerFrame);
+        // A query issued in the frame this slot last held and never read is lost with the reset.
+        for (Query& q : queries_)
+            if (q.alive && q.state == Query::Issued && q.slot == slot)
+            {
+                q.state = Query::Idle;
+                q.samples = 0;
+            }
         if (!black_ready_)
         {
-            Texture black;
-            black.image     = black_;
-            ImageBarrier(upload, black, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
-                         VK_ACCESS_2_NONE, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
             const VkClearColorValue       opaque{{0.0f, 0.0f, 0.0f, 1.0f}};
-            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdClearColorImage(upload, black_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &opaque, 1, &range);
-            ImageBarrier(upload, black, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer,
-                         VK_ACCESS_2_TRANSFER_WRITE_BIT, kReadStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            for (const resources::Image* image : {&black_, &black_cube_})
+            {
+                ImageBarrier(upload, image->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
+                vkCmdClearColorImage(upload, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &opaque, 1, &range);
+                ImageBarrier(upload, image->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, kReadStages,
+                             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
             black_ready_ = true;
         }
     }
@@ -277,6 +424,25 @@ namespace wxl::vk::draw
         MemoryBarrier(upload, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT, kReadStages, kReads);
         staging_.Flush();
         data_.Flush();
+        // A query begun and never drawn into is not issued.
+        for (Query& q : queries_)
+            if (q.alive && q.state == Query::Pending) q.state = Query::Idle;
+    }
+
+    void Renderer::RenderingEnding(VkCommandBuffer cmd) { EndQueries(cmd); }
+
+    void Renderer::RenderingEnded(VkCommandBuffer cmd)
+    {
+        if (!open_.color) return;
+        // A texture drawn into is sampled next: SHADER_READ_ONLY again, as every texture is between renderings.
+        ImageBarrier(cmd, open_.color->image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     kReadStages | kTransfer | kColorStage, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT, 0, 1,
+                     open_.color->desc.cube ? open_.face : 0, 1);
+        if (open_.depth)
+            ImageBarrier(cmd, *open_.depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         kDepthStage, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, kReadStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, 0, 1);
+        open_ = Target{};
     }
 
     VkCommandBuffer Renderer::Inline()
@@ -324,10 +490,12 @@ namespace wxl::vk::draw
         }
         if (desc.cube) t->flat = allocator_->CreateLayerView(t->image, 0, info.swizzle);
         t->slot = bindless_.AddImage(desc.cube ? t->flat : t->image.view);
-        if (t->slot == resources::Bindless::kNoSlot)
+        if (desc.cube && t->slot != resources::Bindless::kNoSlot) t->cube_slot = bindless_.AddImage(t->image.view);
+        if (t->slot == resources::Bindless::kNoSlot || (desc.cube && t->cube_slot == resources::Bindless::kNoSlot))
         {
             Log(LogLevel::Warn, "the bindless table is full (%u images): a %ux%u texture is not made", bindless_.Capacity(), desc.width,
                 desc.height);
+            bindless_.ReleaseImage(t->slot);
             if (t->flat) vkDestroyImageView(context_->Device(), t->flat, nullptr);
             allocator_->Destroy(t->image);
             delete t;
@@ -341,7 +509,9 @@ namespace wxl::vk::draw
     {
         if (!texture) return;
         opened_.erase(std::remove(opened_.begin(), opened_.end(), texture), opened_.end());
-        Retire(texture->image, texture->flat, texture->slot);
+        if (target_.color == texture || target_.depth == texture) target_ = Target{};
+        if (open_.color == texture || open_.depth == texture) display_->EndRendering();
+        Retire(texture->image, texture->flat, texture->slot, texture->cube_slot, texture->attach);
         --stats_.textures;
         delete texture;
     }
@@ -357,16 +527,12 @@ namespace wxl::vk::draw
         if (!t->defined)
         {
             // What was never written reads as transparent black (D3D9's new texture holds whatever,
-            // a render target the engine has not drawn into yet included).
-            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+            // a render target the engine has not drawn into yet included); a depth as far.
+            const VkImageSubresourceRange range{AspectOf(*t), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
             if (t->info.depth)
             {
-                VkImageSubresourceRange depth = range;
-                depth.aspectMask              = VK_IMAGE_ASPECT_DEPTH_BIT;
-                if (t->info.format == VK_FORMAT_D24_UNORM_S8_UINT || t->info.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
-                    depth.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
                 const VkClearDepthStencilValue far{1.0f, 0};
-                vkCmdClearDepthStencilImage(upload, t->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far, 1, &depth);
+                vkCmdClearDepthStencilImage(upload, t->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far, 1, &range);
             }
             else if (t->info.block == 1)
             {
@@ -608,25 +774,290 @@ namespace wxl::vk::draw
         return true;
     }
 
+    // --- Targets ----------------------------------------------------------------------------------------
+
+    void Renderer::SetTarget(Texture* color, uint32_t face, Texture* depth)
+    {
+        target_.color = color;
+        target_.face  = color && color->desc.cube ? std::min(face, 5u) : 0;
+        target_.depth = depth;
+    }
+
+    VkExtent2D Renderer::TargetExtent() const
+    {
+        if (target_.color) return {target_.color->desc.width, target_.color->desc.height};
+        if (target_.depth) return {target_.depth->desc.width, target_.depth->desc.height};
+        return display_ ? display_->SceneExtent() : VkExtent2D{0, 0};
+    }
+
+    VkImageView Renderer::AttachView(Texture* t, uint32_t face)
+    {
+        VkImageView& view = t->attach[face];
+        if (view) return view;
+        VkImageViewCreateInfo info{};
+        info.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        info.image            = t->image.image;
+        info.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        info.format           = t->info.format;
+        info.subresourceRange = {AspectOf(*t), 0, 1, face, 1};
+        if (vkCreateImageView(context_->Device(), &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
+        return view;
+    }
+
+    bool Renderer::EnsureTargetDepth(VkExtent2D extent)
+    {
+        // D3D9 keeps one depth surface for colour targets, grown to the largest asked for.
+        if (target_depth_.image && target_depth_.width >= extent.width && target_depth_.height >= extent.height) return true;
+        if (target_depth_.image)
+        {
+            Dead d{};
+            d.frame  = display_->FrameNumber();
+            d.image  = target_depth_;
+            d.slots[0] = d.slots[1] = resources::Bindless::kNoSlot;
+            dead_.push_back(d);
+            target_depth_ = resources::Image{};
+        }
+        const VkFormat format = display_->DepthFormat();
+        const uint32_t w = std::max(extent.width, target_depth_.width), h = std::max(extent.height, target_depth_.height);
+        if (!allocator_->CreateImage(w, h, format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target_depth_,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)))
+            return false;
+        target_depth_ready_ = false;
+        return true;
+    }
+
+    VkCommandBuffer Renderer::Rendering(uint8_t& target_id)
+    {
+        if (!target_.color)
+        {
+            if (target_.depth) return VK_NULL_HANDLE; // a depth target alone: not drawn
+            target_id = scene_target_id_;
+            return display_->BeginSceneRendering();
+        }
+        Texture*       color = target_.color;
+        Texture*       depth = target_.depth && target_.depth->info.depth ? target_.depth : nullptr;
+        const uint64_t key   = reinterpret_cast<uintptr_t>(color) ^ (static_cast<uint64_t>(target_.face) << 60) ^
+                             (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(depth)) * 0x9E3779B97F4A7C15ull);
+        const VkFormat depth_format = display_->DepthFormat();
+        target_id = pipelines_.TargetId(color->info.format, depth_format);
+        if (display_->InRendering() && display_->TargetKey() == key) return display_->Cmd();
+
+        const VkExtent2D extent{color->desc.width, color->desc.height};
+        const VkImageView color_view = AttachView(color, target_.face);
+        VkImageView       depth_view = VK_NULL_HANDLE;
+        if (depth) depth_view = AttachView(depth, 0);
+        else if (EnsureTargetDepth(extent)) depth_view = target_depth_.view;
+        if (!color_view || !depth_view || !(color->image.image) || color->info.depth) return VK_NULL_HANDLE;
+
+        display_->EndRendering();
+        // Every texture is SHADER_READ_ONLY between renderings; one never written gets its first
+        // contents (transparent black) in the frame's upload pass.
+        if (!color->defined && color->opened != display_->FrameNumber()) OpenInUpload(color);
+        if (depth && !depth->defined && depth->opened != display_->FrameNumber()) OpenInUpload(depth);
+        const VkCommandBuffer cmd = display_->Cmd();
+        ImageBarrier(cmd, color->image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadStages | kTransfer, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, kColorStage,
+                     kColorAccess, 0, 1, color->desc.cube ? target_.face : 0, 1);
+        if (depth)
+            ImageBarrier(cmd, *depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, kReadStages,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, kDepthStage, kDepthAccess, 0, 1);
+        else if (!target_depth_ready_)
+        {
+            ImageBarrier(cmd, target_depth_.image, VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(depth_format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0),
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, kDepthStage, VK_ACCESS_2_NONE, kDepthStage,
+                         kDepthAccess);
+            target_depth_ready_ = true;
+        }
+        else
+            MemoryBarrier(cmd, kDepthStage, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, kDepthStage, kDepthAccess);
+
+        present::TargetRendering rendering;
+        rendering.color        = color_view;
+        rendering.depth        = depth_view;
+        rendering.depth_format = depth_format;
+        rendering.extent       = extent;
+        rendering.key          = key;
+        const VkCommandBuffer open = display_->BeginTargetRendering(rendering);
+        if (open)
+        {
+            open_.color = color;
+            open_.face  = color->desc.cube ? target_.face : 0;
+            open_.depth = depth;
+            color->used = display_->FrameNumber();
+            ++stats_.target_renderings;
+        }
+        return open;
+    }
+
+    void Renderer::Clear(bool color, bool depth, const float rgba[4], float z, VkRect2D rect)
+    {
+        if (!display_->InFrame() || (!color && !depth)) return;
+        if (TargetIsScene())
+        {
+            display_->Clear(color, depth, rgba, z, rect);
+            return;
+        }
+        uint8_t               id  = 0;
+        const VkCommandBuffer cmd = Rendering(id);
+        if (!cmd) return;
+        const VkExtent2D extent = display_->RenderingExtent();
+        const int32_t x0 = std::clamp<int32_t>(rect.offset.x, 0, static_cast<int32_t>(extent.width));
+        const int32_t y0 = std::clamp<int32_t>(rect.offset.y, 0, static_cast<int32_t>(extent.height));
+        const int32_t x1 = std::clamp<int32_t>(rect.offset.x + static_cast<int32_t>(rect.extent.width), 0, static_cast<int32_t>(extent.width));
+        const int32_t y1 = std::clamp<int32_t>(rect.offset.y + static_cast<int32_t>(rect.extent.height), 0, static_cast<int32_t>(extent.height));
+        if (x1 <= x0 || y1 <= y0) return;
+        VkClearAttachment attachments[2]{};
+        uint32_t          count = 0;
+        if (color)
+        {
+            attachments[count].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            std::memcpy(attachments[count].clearValue.color.float32, rgba, sizeof(float) * 4);
+            ++count;
+        }
+        if (depth)
+        {
+            attachments[count].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (HasStencil(display_->DepthFormat()) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+            attachments[count].clearValue.depthStencil.depth = z;
+            ++count;
+        }
+        VkClearRect clear{};
+        clear.rect       = {{x0, y0}, {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)}};
+        clear.layerCount = 1;
+        vkCmdClearAttachments(cmd, count, attachments, 1, &clear);
+    }
+
+    bool Renderer::CopyScene(Texture* dest, uint32_t level, uint32_t face, VkRect2D from, VkRect2D to, bool linear)
+    {
+        if (!dest || !display_->InFrame() || level >= dest->image.levels || face >= dest->image.layers || dest->info.depth) return false;
+        if (!display_->PrepareScene()) return false;
+        const resources::Image& scene = display_->SceneImage();
+        // Both rectangles kept inside their images.
+        const int32_t sw = static_cast<int32_t>(scene.width), sh = static_cast<int32_t>(scene.height);
+        const int32_t dw = static_cast<int32_t>(std::max(dest->desc.width >> level, 1u)), dh = static_cast<int32_t>(std::max(dest->desc.height >> level, 1u));
+        auto clip = [](VkRect2D r, int32_t w, int32_t h, VkOffset3D& a, VkOffset3D& b) {
+            a = {std::clamp(r.offset.x, 0, w), std::clamp(r.offset.y, 0, h), 0};
+            b = {std::clamp(r.offset.x + static_cast<int32_t>(r.extent.width), 0, w), std::clamp(r.offset.y + static_cast<int32_t>(r.extent.height), 0, h), 1};
+            return b.x > a.x && b.y > a.y;
+        };
+        VkImageBlit blit{};
+        if (!clip(from, sw, sh, blit.srcOffsets[0], blit.srcOffsets[1]) || !clip(to, dw, dh, blit.dstOffsets[0], blit.dstOffsets[1])) return false;
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, face, 1};
+
+        if (!dest->defined && dest->opened != display_->FrameNumber()) OpenInUpload(dest);
+        const VkCommandBuffer cmd = display_->Cmd();
+        ImageBarrier(cmd, scene.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        ImageBarrier(cmd, dest->image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     kReadStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, level, 1, face, 1);
+        vkCmdBlitImage(cmd, scene.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+        ImageBarrier(cmd, dest->image.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, kReadStages | kColorStage, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, level,
+                     1, face, 1);
+        ImageBarrier(cmd, scene.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, kColorStage, kColorAccess);
+        ++stats_.copies;
+        return true;
+    }
+
+    // --- Queries ------------------------------------------------------------------------------------------
+
+    uint32_t Renderer::CreateQuery()
+    {
+        for (uint32_t i = 0; i < queries_.size(); ++i)
+            if (!queries_[i].alive)
+            {
+                queries_[i]       = Query{};
+                queries_[i].alive = true;
+                return i + 1;
+            }
+        Query q;
+        q.alive = true;
+        queries_.push_back(q);
+        return static_cast<uint32_t>(queries_.size());
+    }
+
+    void Renderer::DestroyQuery(uint32_t query)
+    {
+        if (query && query <= queries_.size()) queries_[query - 1].alive = false;
+    }
+
+    bool Renderer::BeginQuery(uint32_t query)
+    {
+        if (!queries_supported_ || !query || query > queries_.size() || !display_->InFrame()) return false;
+        Query& q = queries_[query - 1];
+        if (q.state == Query::Running || q.state == Query::Pending) return false;
+        q.state = Query::Pending;
+        return true;
+    }
+
+    bool Renderer::EndQuery(uint32_t query)
+    {
+        if (!query || query > queries_.size()) return false;
+        Query& q = queries_[query - 1];
+        if (q.state == Query::Pending)
+        {
+            // Nothing was drawn between its begin and its end: no sample passed.
+            q.state   = Query::Idle;
+            q.samples = 0;
+            return true;
+        }
+        if (q.state != Query::Running) return false;
+        if (display_->InRendering() && display_->RenderingEpoch() == q.epoch) vkCmdEndQuery(display_->Cmd(), query_pool_, q.index);
+        q.state = Query::Issued;
+        return true;
+    }
+
+    void Renderer::EndQueries(VkCommandBuffer cmd)
+    {
+        for (Query& q : queries_)
+            if (q.alive && q.state == Query::Running && q.epoch == display_->RenderingEpoch())
+            {
+                vkCmdEndQuery(cmd, query_pool_, q.index);
+                q.state = Query::Issued;
+            }
+    }
+
+    bool Renderer::QueryResult(uint32_t query, uint32_t& samples)
+    {
+        samples = 0;
+        if (!query || query > queries_.size()) return false;
+        Query& q = queries_[query - 1];
+        if (q.state == Query::Pending || q.state == Query::Running) return false;
+        if (q.state == Query::Issued)
+        {
+            if (display_->FramesCompleted() < q.frame) return false;
+            uint64_t value = 0;
+            if (vkGetQueryPoolResults(context_->Device(), query_pool_, q.index, 1, sizeof value, &value, sizeof value, VK_QUERY_RESULT_64_BIT) ==
+                VK_SUCCESS)
+                q.samples = static_cast<uint32_t>(std::min<uint64_t>(value, UINT32_MAX));
+            q.state = Query::Idle;
+        }
+        samples = q.samples;
+        return true;
+    }
+
     // --- Draws ----------------------------------------------------------------------------------------------
 
-    uint16_t Renderer::LayoutOf(const Packet& packet, int32_t& inputs)
+    uint16_t Renderer::LayoutOf(const Packet& packet, uint32_t needed, uint32_t& carried)
     {
-        bool same = packet.attribute_count == last_attribute_count_ && packet.stream_count == last_stream_count_;
+        bool same = packet.attribute_count == last_attribute_count_ && packet.stream_count == last_stream_count_ && needed == last_needed_;
         for (uint32_t i = 0; same && i < packet.attribute_count; ++i)
             same = std::memcmp(&packet.attributes[i], &last_attributes_[i], sizeof(Attribute)) == 0;
         for (uint32_t i = 0; same && i < packet.stream_count; ++i) same = packet.streams[i].stride == last_strides_[i];
         if (same)
         {
-            inputs = last_inputs_;
+            carried = last_carried_;
             return last_layout_;
         }
 
         pipelines::VertexLayout layout;
         bool                    zeros = false;
-        inputs                        = 0;
-        for (uint8_t location : kInputs)
+        carried                       = 0;
+        for (uint32_t location = 0; location < shaders::kVertexInputs; ++location)
         {
+            if (!(needed & (1u << location))) continue;
             const Attribute* found = nullptr;
             for (uint32_t i = 0; i < packet.attribute_count && !found; ++i)
                 if (packet.attributes[i].location == location && packet.attributes[i].stream < packet.stream_count) found = &packet.attributes[i];
@@ -652,7 +1083,8 @@ namespace wxl::vk::draw
                 a.binding = found->stream;
                 a.format  = format;
                 a.offset  = found->offset;
-                inputs |= 1 << location;
+                carried |= 1u << location;
+                if (found->type == kD3dColor && color_rgba_) carried |= 1u << (shaders::kFlagSwizzleShift + location);
             }
             else
             {
@@ -667,7 +1099,8 @@ namespace wxl::vk::draw
         if (zeros) layout.bindings[layout.binding_count++] = {kZeroBinding, 0, VK_VERTEX_INPUT_RATE_VERTEX};
 
         last_layout_          = pipelines_.LayoutId(layout);
-        last_inputs_          = inputs;
+        last_carried_         = carried;
+        last_needed_          = needed;
         last_attribute_count_ = packet.attribute_count;
         last_stream_count_    = packet.stream_count;
         std::memcpy(last_attributes_, packet.attributes, sizeof(Attribute) * packet.attribute_count);
@@ -678,7 +1111,16 @@ namespace wxl::vk::draw
     bool Renderer::Draw(const Packet& packet)
     {
         if (!Ready() || !display_->InFrame() || !packet.count) return false;
-        const uint64_t frame = display_->FrameNumber();
+        if (packet.vertex >= pipelines_.Programs(false) || packet.pixel >= pipelines_.Programs(true))
+        {
+            ++stats_.refused;
+            return false;
+        }
+        const uint64_t              frame  = display_->FrameNumber();
+        const shaders::ProgramInfo& vinfo  = pipelines_.Info(false, packet.vertex);
+        const shaders::ProgramInfo& pinfo  = pipelines_.Info(true, packet.pixel);
+        const bool                  own    = packet.vertex < static_cast<uint16_t>(pipelines::VertexProgram::Count) ||
+                          packet.pixel < static_cast<uint16_t>(pipelines::PixelProgram::Count);
 
         // The buffers: a static or dynamic pool's writes reach the device first.
         VkBuffer     buffers[14] = {};
@@ -702,15 +1144,51 @@ namespace wxl::vk::draw
         for (Texture* t : packet.textures)
             if (t && !t->defined && t->opened != frame) OpenInUpload(t);
 
-        int32_t        inputs = 0;
+        uint32_t       carried = 0;
         pipelines::Key key;
         key.vertex     = packet.vertex;
         key.pixel      = packet.pixel;
-        key.layout     = LayoutOf(packet, inputs);
+        key.layout     = LayoutOf(packet, vinfo.inputs, carried);
         key.blend      = static_cast<uint8_t>(packet.blend < kBlendModes ? packet.blend : 0);
         key.color_mask = static_cast<uint8_t>(packet.color_mask & 0xF);
         key.topology   = ClassOf(packet.primitive);
         key.wireframe  = packet.wireframe;
+
+        // The draw's data (the renderer's own programs), written once for the draws that share it.
+        if (own)
+        {
+            DrawData data  = packet.data;
+            data.inputs[3] = static_cast<int32_t>(carried & 0xFFFF);
+            if (!last_address_ || std::memcmp(&data, &last_data_, sizeof data) != 0)
+            {
+                resources::Ring::Span span;
+                if (!data_.Allocate(sizeof data, 16, span))
+                {
+                    ++stats_.refused;
+                    return false;
+                }
+                std::memcpy(span.data, &data, sizeof data);
+                last_data_    = data;
+                last_address_ = span.address;
+            }
+        }
+        // The engine's registers, as many rows as the programs read.
+        const VkDeviceAddress vregs = Snapshot(vertex_regs_, vinfo.const_rows);
+        const VkDeviceAddress pregs = Snapshot(pixel_regs_, pinfo.const_rows);
+        if ((vinfo.const_rows && !vregs) || (pinfo.const_rows && !pregs))
+        {
+            ++stats_.refused;
+            return false;
+        }
+
+        uint8_t               target_id = 0;
+        const VkCommandBuffer cmd       = Rendering(target_id);
+        if (!cmd)
+        {
+            ++stats_.refused;
+            return false;
+        }
+        key.target                = target_id;
         const VkPipeline pipeline = pipelines_.Get(key);
         if (!pipeline)
         {
@@ -719,29 +1197,11 @@ namespace wxl::vk::draw
         }
         stats_.pipelines = pipelines_.Count();
 
-        // The draw's data, written once for the draws that share it.
-        DrawData data   = packet.data;
-        data.inputs[3]  = inputs;
-        if (!last_address_ || std::memcmp(&data, &last_data_, sizeof data) != 0)
-        {
-            resources::Ring::Span span;
-            if (!data_.Allocate(sizeof data, 16, span))
-            {
-                ++stats_.refused;
-                return false;
-            }
-            std::memcpy(span.data, &data, sizeof data);
-            last_data_    = data;
-            last_address_ = span.address;
-        }
-
         for (uint32_t i = 0; i < packet.stream_count; ++i) packet.streams[i].pool->used = frame;
         if (packet.indexed) packet.indices->used = frame;
         for (Texture* t : packet.textures)
             if (t) t->used = frame;
 
-        const VkCommandBuffer cmd = display_->BeginSceneRendering();
-        if (!cmd) return false;
         if (epoch_ != display_->RenderingEpoch())
         {
             // A new rendering (or another recorder in between): everything is set again.
@@ -764,6 +1224,23 @@ namespace wxl::vk::draw
             const VkBuffer     zero   = zeros_.buffer;
             const VkDeviceSize origin = 0;
             vkCmdBindVertexBuffers(cmd, kZeroBinding, 1, &zero, &origin);
+        }
+        // Occlusion queries the engine began: counted from this draw, inside this rendering.
+        for (Query& q : queries_)
+        {
+            if (!q.alive || q.state != Query::Pending) continue;
+            if (query_next_ >= kQueriesPerFrame)
+            {
+                q.state = Query::Idle;
+                continue;
+            }
+            q.slot  = slot_;
+            q.index = slot_ * kQueriesPerFrame + query_next_++;
+            q.frame = frame;
+            q.epoch = display_->RenderingEpoch();
+            vkCmdBeginQuery(cmd, query_pool_, q.index, VK_QUERY_CONTROL_PRECISE_BIT);
+            q.state = Query::Running;
+            ++stats_.queries;
         }
         if (pipeline != pipeline_)
         {
@@ -803,11 +1280,11 @@ namespace wxl::vk::draw
         }
         if (std::memcmp(scissor_, packet.scissor, sizeof scissor_) != 0)
         {
-            const VkExtent2D scene = display_->SceneExtent();
-            const int32_t    x0    = std::clamp(packet.scissor[0], 0, static_cast<int32_t>(scene.width));
-            const int32_t    y0    = std::clamp(packet.scissor[1], 0, static_cast<int32_t>(scene.height));
-            const int32_t    x1    = std::clamp(packet.scissor[0] + packet.scissor[2], x0, static_cast<int32_t>(scene.width));
-            const int32_t    y1    = std::clamp(packet.scissor[1] + packet.scissor[3], y0, static_cast<int32_t>(scene.height));
+            const VkExtent2D extent = display_->RenderingExtent();
+            const int32_t    x0     = std::clamp(packet.scissor[0], 0, static_cast<int32_t>(extent.width));
+            const int32_t    y0     = std::clamp(packet.scissor[1], 0, static_cast<int32_t>(extent.height));
+            const int32_t    x1     = std::clamp(packet.scissor[0] + packet.scissor[2], x0, static_cast<int32_t>(extent.width));
+            const int32_t    y1     = std::clamp(packet.scissor[1] + packet.scissor[3], y0, static_cast<int32_t>(extent.height));
             const VkRect2D   rect{{x0, y0}, {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)}};
             vkCmdSetScissor(cmd, 0, 1, &rect);
             std::memcpy(scissor_, packet.scissor, sizeof scissor_);
@@ -829,7 +1306,7 @@ namespace wxl::vk::draw
         if (states[6] != dynamic_[6])
         {
             // D3D9's DEPTHBIAS is in depth units; Vulkan's constant factor in the format's smallest
-            // step, 2^-24 for the 24-bit depth the scene has (D32's is close enough at this step).
+            // step, 2^-24 for the 24-bit depth the scene has (D32 is near enough).
             vkCmdSetDepthBias(cmd, packet.depth_bias * 16777216.0f, 0.0f, 0.0f);
         }
         if (states[7] != dynamic_[7])
@@ -839,23 +1316,28 @@ namespace wxl::vk::draw
         }
         std::memcpy(dynamic_, states, sizeof states);
 
-        struct Push
-        {
-            uint32_t data[2];
-            uint32_t image0, image1;
-            uint32_t sampler0, sampler1;
-            float    alpha_ref;
-            uint32_t flags;
-        } push{};
-        static_assert(sizeof(Push) == pipelines::Pipelines::kPushBytes, "the programs' push constants");
-        push.data[0]   = static_cast<uint32_t>(last_address_);
-        push.data[1]   = static_cast<uint32_t>(last_address_ >> 32);
-        push.image0    = packet.textures[0] ? packet.textures[0]->slot : 0;
-        push.image1    = packet.textures[1] ? packet.textures[1]->slot : 0;
-        push.sampler0  = bindless_.Sampler(packet.samplers[0]);
-        push.sampler1  = bindless_.Sampler(packet.samplers[1]);
+        shaders::Push push{};
+        push.data[0]   = static_cast<uint32_t>(own ? last_address_ : 0);
+        push.data[1]   = static_cast<uint32_t>(own ? last_address_ >> 32 : 0);
+        push.vertex[0] = static_cast<uint32_t>(vregs);
+        push.vertex[1] = static_cast<uint32_t>(vregs >> 32);
+        push.pixel[0]  = static_cast<uint32_t>(pregs);
+        push.pixel[1]  = static_cast<uint32_t>(pregs >> 32);
         push.alpha_ref = packet.alpha_ref;
-        push.flags     = color_rgba_ ? kFlagColorRgba : 0;
+        push.flags     = packet.flags | (carried & ~0xFFFFu);
+        if (!pinfo.fixed_fog) push.flags &= ~shaders::kFlagFog;
+        std::memcpy(push.clip_plane, packet.clip_plane, sizeof push.clip_plane);
+        push.fog_color  = packet.fog_color;
+        push.point_size = packet.point_size;
+        for (uint32_t s = 0; s < kStages; ++s)
+        {
+            const Texture* t     = packet.textures[s];
+            const bool     cube  = (pinfo.cube >> s) & 1;
+            uint32_t       image = cube ? black_cube_slot_ : 0;
+            // A texture drawn into by this rendering reads as the default (D3D9 leaves it undefined).
+            if (t && t != open_.color && t != open_.depth) image = cube ? (t->desc.cube ? t->cube_slot : black_cube_slot_) : t->slot;
+            push.stages[s] = shaders::StageWord(image, t ? bindless_.Sampler(packet.samplers[s]) : 0);
+        }
         vkCmdPushConstants(cmd, pipelines_.Layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
 
         if (packet.indexed) vkCmdDrawIndexed(cmd, packet.count, 1, packet.first_index, 0, 0);

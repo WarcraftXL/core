@@ -60,11 +60,17 @@ _wxl_vk_warnings(wxl-vk-resources)
 add_library(wxl-vk-spirv-headers INTERFACE)
 target_include_directories(wxl-vk-spirv-headers SYSTEM INTERFACE "${WXL_VK_ROOT}/deps/spirv-headers/include")
 
-# --- shaders: the SPIR-V writer and the renderer's own shaders, made at run time --------------------
+# --- shaders: the SPIR-V writer, the renderer's own shaders made at run time, and the translator of
+# the client's DX9 programs (decoder, SPIR-V writer of the fixed interface) -------------------------
 add_library(wxl-vk-shaders STATIC
     "${WXL_VK_ROOT}/src/gx/vk/shaders/Spirv.cpp"
-    "${WXL_VK_ROOT}/src/gx/vk/shaders/Own.cpp")
-target_link_libraries(wxl-vk-shaders PUBLIC wxl-vk-device wxl-vk-spirv-headers)
+    "${WXL_VK_ROOT}/src/gx/vk/shaders/Own.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/shaders/Dx9.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/shaders/Translate.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/shaders/Cache.cpp")
+find_package(Threads REQUIRED)
+target_include_directories(wxl-vk-shaders SYSTEM PRIVATE "${WXL_SDK_DIR}/deps/xxhash")
+target_link_libraries(wxl-vk-shaders PUBLIC wxl-vk-device wxl-vk-spirv-headers Threads::Threads)
 _wxl_vk_warnings(wxl-vk-shaders)
 
 # --- pipelines: the renderer's programs (GLSL compiled at build time) and the pipelines of the engine's draws
@@ -72,6 +78,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/wxl_glsl.cmake")
 set(WXL_VK_SPIRV_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/vk_spirv")
 wxl_vk_glsl(wxl-vk-programs "${WXL_VK_SPIRV_DIR}"
     ff_vert=ff.vert
+    ff_clip_vert=ff.vert:WXL_CLIP
     ui_vert=ui.vert
     ui_stereo_vert=ui.vert:WXL_STEREO
     ff_frag=ff.frag
@@ -79,7 +86,7 @@ wxl_vk_glsl(wxl-vk-programs "${WXL_VK_SPIRV_DIR}"
     desaturate_frag=desaturate.frag)
 add_library(wxl-vk-pipelines STATIC "${WXL_VK_ROOT}/src/gx/vk/pipelines/Pipelines.cpp")
 target_include_directories(wxl-vk-pipelines PRIVATE "${WXL_VK_SPIRV_DIR}")
-target_link_libraries(wxl-vk-pipelines PUBLIC wxl-vk-device)
+target_link_libraries(wxl-vk-pipelines PUBLIC wxl-vk-device wxl-vk-shaders)
 add_dependencies(wxl-vk-pipelines wxl-vk-programs)
 _wxl_vk_warnings(wxl-vk-pipelines)
 

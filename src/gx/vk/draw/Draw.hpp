@@ -6,21 +6,22 @@
 // the engine's numbers (its texture formats, pool usages, primitives, blend modes, texture ops)
 // but none of its objects: it builds and tests natively, on lavapipe.
 //
-//   Texture   a CGxTex on the device: its image, its bindless slot, its uploads (Lock/Unlock)
+//   Texture   a CGxTex on the device: its image, its bindless slots (a 2D view, and a cube's own),
+//             its uploads (Lock/Unlock), its views as a render target
 //   Pool      a CGxPool on the device: a stream pool's mapped buffers, renamed when the engine
 //             discards it; a static or dynamic pool's CPU copy and device buffer, the ranges the
 //             engine wrote copied over before the first draw that reads them
 //   Packet    one draw, every state it depends on resolved
-//   Renderer  records packets into the open frame of a present::Display: the programs, the
-//             pipelines (made at first use, no pipeline libraries yet), the bindless table, the
+//   Renderer  the programs (its own, and the client's translated from their DX9 records through a
+//             cache kept on disk), the engine's register files (copied into the frame as the bound
+//             programs read them), the render target (the scene, or a texture with its depth),
+//             clears, copies from the scene, occlusion queries; records packets into the open frame
+//             of a present::Display: the pipelines (made at first use), the bindless table, the
 //             frame's rings, the uploads (in the frame's upload pass when nothing drew with the
 //             resource yet this frame, inline otherwise: the rendering is ended, copied into,
 //             resumed)
 //
-// Main thread only. The programs are the renderer's own (shaders/glsl/): D3D9's fixed function
-// for stages 0 and 1, and the client's interface programs "UI" and "Desaturate" by name; the
-// client's other programs are not translated at this step (V3) and a draw that binds one is not
-// recorded.
+// Main thread only (the translation cache's worker aside).
 
 #pragma once
 
@@ -30,8 +31,12 @@
 #include "gx/vk/resources/Bindless.hpp"
 #include "gx/vk/resources/Resources.hpp"
 #include "gx/vk/resources/Ring.hpp"
+#include "gx/vk/shaders/Cache.hpp"
+#include "gx/vk/shaders/Interface.hpp"
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace wxl::vk::draw
@@ -76,22 +81,33 @@ namespace wxl::vk::draw
 
     /// The engine's blend modes (EGxBlend), the fork's BlendAdd included.
     constexpr uint32_t kBlendModes = 13;
+    constexpr uint32_t kStages     = shaders::kStages;
 
-    /// The data block of a draw, as the programs read it (shaders/glsl/engine.glsl, DrawData).
+    /// The data block of a draw the renderer's own programs read (shaders/glsl/engine.glsl, DrawData).
     struct DrawData
     {
         float   worldView[16];
         float   projection[16];
         float   texMatrix[2][16];
         float   constants[4][4];
-        float   material[4];
         float   fog[4];
-        float   fogColor[4];
         int32_t ops[4];
         int32_t texgen[4];
         int32_t inputs[4];
+        float   lightPosition[4][4];
+        float   lightDiffuse[4][4];
+        float   lightAmbient[4][4];
+        float   lightSpecular[4][4];
+        float   lightAttenuation[4][4];
+        float   matDiffuse[4];
+        float   matAmbient[4];
+        float   matEmissive[4];
+        float   matSpecular[4];
+        float   globalAmbient[4];
+        int32_t lighting[4];
+        int32_t sources[4];
     };
-    static_assert(sizeof(DrawData) == 416, "DrawData is the shaders' block, std430");
+    static_assert(sizeof(DrawData) == 816, "DrawData is the shaders' block, std430");
 
     // --- Resources ---------------------------------------------------------------------------------
 
@@ -102,7 +118,7 @@ namespace wxl::vk::draw
         uint32_t height = 1;
         uint32_t levels = 1;
         bool     cube = false;
-        bool     target = false;        ///< a render target (drawn into from V3; cleared until then)
+        bool     target = false;        ///< a render target
         bool     generate_mips = false; ///< the engine's AUTOGENMIPMAP: levels made from the first
     };
 
@@ -112,7 +128,9 @@ namespace wxl::vk::draw
         FormatInfo          info;
         resources::Image    image;
         VkImageView         flat = VK_NULL_HANDLE; ///< a cube's first face as a 2D view, what a 2D sampler reads
-        uint32_t            slot = resources::Bindless::kNoSlot;
+        VkImageView         attach[6] = {};        ///< a target's level 0 (each face of a cube), as an attachment
+        uint32_t            slot = resources::Bindless::kNoSlot;      ///< sampled as 2D
+        uint32_t            cube_slot = resources::Bindless::kNoSlot; ///< a cube sampled as a cube
         uint64_t            used = 0;     ///< the last frame a draw read it in
         uint64_t            opened = 0;   ///< the frame whose upload pass holds it open (TRANSFER_DST)
         bool                defined = false; ///< it went through an upload pass once: SHADER_READ_ONLY since
@@ -165,8 +183,8 @@ namespace wxl::vk::draw
 
     struct Packet
     {
-        pipelines::VertexProgram vertex = pipelines::VertexProgram::Fixed;
-        pipelines::PixelProgram  pixel = pipelines::PixelProgram::Fixed;
+        uint16_t  vertex = 0;        ///< a vertex program's id (pipelines::VertexProgram for the own ones)
+        uint16_t  pixel = 0;         ///< a pixel program's id
 
         uint32_t  primitive = kTriangles;
         bool      indexed = false;
@@ -192,15 +210,20 @@ namespace wxl::vk::draw
         float    viewport[6] = {};   ///< x, y, width, height in pixels (D3D9's), min and max depth
         int32_t  scissor[4] = {};    ///< x, y, width, height in pixels
 
-        Texture*                  textures[2] = {};
-        resources::SamplerKey     samplers[2];
+        Texture*              textures[kStages] = {};
+        resources::SamplerKey samplers[kStages];
+
+        uint32_t flags = 0;          ///< shaders::kFlagFog, kFlagPointSprite, kFlagClip
+        float    clip_plane[4] = {}; ///< against D3D9's clip-space position
+        uint32_t fog_color = 0;      ///< 0xAARRGGBB
+        float    point_size = 1.0f;
 
         DrawData data = {};
     };
 
-    /// The renderer's program for a client shader, by the name its record has ("UI:0", "UI",
-    /// "Desaturate"); false for the client's others, which the renderer does not draw yet.
-    bool ProgramByName(bool vertex, const char* name, uint8_t& program);
+    /// The renderer's own program for a client shader, by the name its record has ("UI:0", "UI:1",
+    /// "UI", "Desaturate"); false for the others, which are translated.
+    bool ProgramByName(bool vertex, const char* name, uint16_t& program);
 
     // --- The renderer -----------------------------------------------------------------------------
 
@@ -215,7 +238,20 @@ namespace wxl::vk::draw
             uint64_t upload_bytes = 0; ///< copied to the device
             uint64_t textures = 0;     ///< alive
             uint64_t pools = 0;        ///< alive
-            uint64_t refused = 0;      ///< draws dropped for want of memory or a pipeline
+            uint64_t refused = 0;      ///< draws dropped for want of memory, a pipeline or a target
+            uint64_t programs = 0;     ///< client programs translated and made (each record once)
+            uint64_t programs_refused = 0; ///< client records the translator refused
+            uint64_t register_bytes = 0;   ///< register rows copied into the frames
+            uint64_t target_renderings = 0; ///< renderings begun into a texture
+            uint64_t copies = 0;       ///< copies from the scene into a texture
+            uint64_t queries = 0;      ///< occlusion queries issued
+        };
+
+        /// Where the renderer keeps what outlives a launch (empty: nothing is kept).
+        struct Paths
+        {
+            std::string pipeline_cache; ///< the VkPipelineCache's file
+            std::string shader_pack;    ///< the translated programs' pack (shaders::Cache)
         };
 
         Renderer() = default;
@@ -223,13 +259,29 @@ namespace wxl::vk::draw
         Renderer& operator=(const Renderer&) = delete;
         ~Renderer() { Destroy(); }
 
-        /// Draws into @p display's scene (its colour and depth formats). Registers itself as the
-        /// display's frame hook.
-        bool Create(device::Context& context, resources::Allocator& allocator, present::Display& display, char* why,
+        /// Draws into @p display's scene (its colour and depth formats) and into textures.
+        /// Registers itself as the display's frame hook.
+        bool Create(device::Context& context, resources::Allocator& allocator, present::Display& display, const Paths& paths, char* why,
                     uint32_t why_size);
         /// Its textures and pools must be destroyed first (or the device lost); waits for nothing.
         void Destroy();
         bool Ready() const { return pipelines_.Ready(); }
+
+        // --- Programs ---------------------------------------------------------------------------
+        /**
+         * @brief The program of a client shader: one of the renderer's own by @p name, or its DX9
+         *        record @p code (@p size bytes) translated (once per record, through the cache).
+         * @return its id, or -1 with @p why when the record cannot be translated.
+         */
+        int  Program(bool pixel, const char* name, const void* code, size_t size, std::string* why = nullptr);
+        /// The records of a shader's permutations, translated ahead on the cache's worker.
+        void Prewarm(std::vector<std::vector<uint8_t>> records);
+        shaders::Cache& ShaderCache() { return cache_; }
+
+        // --- The engine's registers --------------------------------------------------------------
+        /// Rows @p first.. of the vertex (@p pixel false) or pixel register file changed.
+        void Constants(bool pixel, uint32_t first, uint32_t rows, const float* values);
+        const float* Registers(bool pixel) const { return pixel ? pixel_regs_.rows : vertex_regs_.rows; }
 
         // --- Textures ---------------------------------------------------------------------------
         /// Null when the device cannot make it (its format, its size, the bindless table full).
@@ -262,6 +314,35 @@ namespace wxl::vk::draw
         /// pool keeps its bytes, copied whole to the next device at its next draw.
         void     Forget(Pool* pool);
 
+        // --- Where draws go ------------------------------------------------------------------------
+        /// The engine's render target: @p color's level 0 (its face @p face when a cube) and @p depth,
+        /// or the scene when both are null. A colour target without a depth texture draws with a
+        /// depth of the renderer's own, as D3D9 makes one for it.
+        void SetTarget(Texture* color, uint32_t face, Texture* depth);
+        bool TargetIsScene() const { return !target_.color && !target_.depth; }
+        /// The size of what draws go into now.
+        VkExtent2D TargetExtent() const;
+        /// Clears the target inside @p rect (pixels of the target): its colour to @p rgba when
+        /// @p color, its depth to @p z and its stencil to 0 when @p depth.
+        void Clear(bool color, bool depth, const float rgba[4], float z, VkRect2D rect);
+        /**
+         * @brief D3D9's StretchRect from the back buffer: the scene's @p from rectangle into @p to of
+         *        @p dest's @p level (@p face of a cube), filtered linearly when @p linear.
+         * @return false when it could not be (outside a frame, no such level).
+         */
+        bool CopyScene(Texture* dest, uint32_t level, uint32_t face, VkRect2D from, VkRect2D to, bool linear);
+
+        // --- Occlusion queries -----------------------------------------------------------------------
+        /// Whether the device counts samples (occlusionQueryPrecise).
+        bool QueriesSupported() const { return queries_supported_; }
+        uint32_t CreateQuery();
+        void     DestroyQuery(uint32_t query);
+        /// The samples of the draws between Begin and End are counted.
+        bool     BeginQuery(uint32_t query);
+        bool     EndQuery(uint32_t query);
+        /// Whether the query's count is known (true for one never issued, its count 0), and the count.
+        bool     QueryResult(uint32_t query, uint32_t& samples);
+
         // --- Draws ------------------------------------------------------------------------------
         /// Records @p packet into the open frame; false when it was not (no frame, no memory, no pipeline).
         bool Draw(const Packet& packet);
@@ -275,26 +356,65 @@ namespace wxl::vk::draw
         // present::FrameHook
         void FrameBegun(uint32_t slot, VkCommandBuffer upload) override;
         void FrameEnding(VkCommandBuffer upload) override;
+        void RenderingEnding(VkCommandBuffer cmd) override;
+        void RenderingEnded(VkCommandBuffer cmd) override;
 
     private:
+        struct RegisterFile
+        {
+            float           rows[shaders::kRegisterRows * 4] = {};
+            bool            dirty = true;
+            VkDeviceAddress address = 0;
+            uint32_t        copied = 0; ///< rows in the copy at address
+            uint64_t        frame = 0;  ///< the frame the copy is in
+        };
+        struct Target
+        {
+            Texture* color = nullptr;
+            uint32_t face = 0;
+            Texture* depth = nullptr;
+        };
+        struct Query
+        {
+            enum State : uint8_t
+            {
+                Idle,
+                Pending, ///< begun by the engine, waiting for a draw inside a rendering
+                Running,
+                Issued,
+            } state = Idle;
+            bool     alive = false;
+            uint32_t slot = 0;
+            uint32_t index = 0;
+            uint64_t frame = 0;
+            uint64_t epoch = 0;
+            uint32_t samples = 0;
+        };
+
         bool EnsureDevice(Pool* pool);
         bool FlushPool(Pool* pool);
         void OpenInUpload(Texture* texture);
         void CopyIntoImage(Texture* texture, VkCommandBuffer cmd, const resources::Ring::Span& span, uint32_t pitch);
         void GenerateMips(Texture* texture, VkCommandBuffer cmd);
         void Retire(resources::Buffer buffer);
-        void Retire(resources::Image image, VkImageView flat, uint32_t slot);
+        void Retire(resources::Image image, VkImageView flat, uint32_t slot, uint32_t cube_slot, const VkImageView* attach);
         VkCommandBuffer Inline();
-        uint16_t LayoutOf(const Packet& packet, int32_t& inputs);
+        uint16_t LayoutOf(const Packet& packet, uint32_t needed, uint32_t& carried);
         void Collect(bool all);
+        VkDeviceAddress Snapshot(RegisterFile& file, uint32_t rows);
+        /// The rendering draws go into now, begun when it is not open; its pipeline target id.
+        VkCommandBuffer Rendering(uint8_t& target_id);
+        VkImageView AttachView(Texture* texture, uint32_t face);
+        bool EnsureTargetDepth(VkExtent2D extent);
+        void EndQueries(VkCommandBuffer cmd);
 
         struct Dead
         {
             uint64_t frame; ///< released once this frame has completed
             resources::Buffer buffer;
             resources::Image  image;
-            VkImageView       flat;
-            uint32_t          slot;
+            VkImageView       views[7];
+            uint32_t          slots[2];
         };
         std::vector<Dead>     dead_;
 
@@ -306,11 +426,31 @@ namespace wxl::vk::draw
         resources::Ring       staging_;
         resources::Ring       data_;
         pipelines::Pipelines  pipelines_;
+        shaders::Cache        cache_;
+        std::unordered_map<uint64_t, int> programs_; ///< a translated record's id (or -1), by its cache key
         resources::Image      black_;
+        resources::Image      black_cube_;
+        uint32_t              black_cube_slot_ = 0;
         resources::Buffer     zeros_;   ///< what a vertex input the vertex lacks reads
         bool                  black_ready_ = false;
         bool                  color_rgba_ = false; ///< no B8G8R8A8 vertex input: colours read in RGBA order
         std::vector<Texture*> opened_;  ///< open in the frame's upload pass
+
+        RegisterFile          vertex_regs_;
+        RegisterFile          pixel_regs_;
+
+        Target                target_;       ///< what the engine draws into
+        Target                open_;         ///< what the open target rendering draws into (color null: none)
+        resources::Image      target_depth_; ///< the depth of a colour target without one
+        bool                  target_depth_ready_ = false;
+        uint8_t               scene_target_id_ = 0;
+
+        bool                  queries_supported_ = false;
+        VkQueryPool           query_pool_ = VK_NULL_HANDLE;
+        static constexpr uint32_t kQueriesPerFrame = 64;
+        uint32_t              query_next_ = 0; ///< the next free query of the frame's slot
+        uint32_t              slot_ = 0;
+        std::vector<Query>    queries_;
 
         // What the current rendering has bound.
         uint64_t   epoch_ = 0;
@@ -328,8 +468,9 @@ namespace wxl::vk::draw
         Attribute  last_attributes_[14] = {};
         uint32_t   last_strides_[14] = {};
         uint32_t   last_stream_count_ = 0;
+        uint32_t   last_needed_ = 0;
         uint16_t   last_layout_ = 0;
-        int32_t    last_inputs_ = 0;
+        uint32_t   last_carried_ = 0;
         Stats      stats_;
     };
 }

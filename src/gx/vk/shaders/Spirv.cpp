@@ -9,13 +9,26 @@
 
 namespace wxl::vk::spirv
 {
-    Module::Module(SpvExecutionModel model) : model_(model)
+    namespace
     {
-        Emit(capabilities_, SpvOpCapability, {SpvCapabilityShader});
+        // Keys of the cache that are not types or constants: a capability declared, an array decorated.
+        constexpr uint32_t kCapabilityKey = 0xFFFFFFFEu;
+        constexpr uint32_t kDecoratedKey  = 0xFFFFFFFFu;
+        constexpr uint32_t kExtensionKey  = 0xFFFFFFFDu;
     }
+
+    Module::Module(SpvExecutionModel model) : model_(model) { Capability(SpvCapabilityShader); }
 
     void Module::Emit(std::vector<uint32_t>& to, SpvOp op, std::initializer_list<uint32_t> head,
                       std::initializer_list<uint32_t> tail)
+    {
+        const uint32_t count = 1 + static_cast<uint32_t>(head.size() + tail.size());
+        to.push_back((count << SpvWordCountShift) | static_cast<uint32_t>(op));
+        to.insert(to.end(), head.begin(), head.end());
+        to.insert(to.end(), tail.begin(), tail.end());
+    }
+
+    void Module::Emit(std::vector<uint32_t>& to, SpvOp op, std::initializer_list<uint32_t> head, const std::vector<uint32_t>& tail)
     {
         const uint32_t count = 1 + static_cast<uint32_t>(head.size() + tail.size());
         to.push_back((count << SpvWordCountShift) | static_cast<uint32_t>(op));
@@ -30,6 +43,23 @@ namespace wxl::vk::spirv
         const size_t at    = to.size();
         to.resize(at + words, 0);
         std::memcpy(&to[at], text.data(), text.size());
+    }
+
+    void Module::Capability(SpvCapability capability)
+    {
+        if (!cache_.emplace(std::vector<uint32_t>{kCapabilityKey, static_cast<uint32_t>(capability)}, 0).second) return;
+        Emit(capabilities_, SpvOpCapability, {static_cast<uint32_t>(capability)});
+    }
+
+    void Module::Extension(std::string_view name)
+    {
+        std::vector<uint32_t> words;
+        EmitString(words, name);
+        std::vector<uint32_t> key{kExtensionKey};
+        key.insert(key.end(), words.begin(), words.end());
+        if (!cache_.emplace(std::move(key), 0).second) return;
+        extensions_.push_back(((1 + static_cast<uint32_t>(words.size())) << SpvWordCountShift) | SpvOpExtension);
+        extensions_.insert(extensions_.end(), words.begin(), words.end());
     }
 
     Id Module::Cached(std::vector<uint32_t> key, SpvOp op, std::initializer_list<uint32_t> operands, bool type)
@@ -65,14 +95,30 @@ namespace wxl::vk::spirv
         const Id size = ConstUint(length);
         const Id id   = Cached({element, size, stride}, SpvOpTypeArray, {element, size}, true);
         // Decorated once: a second request answers the same, already decorated, type.
-        const std::vector<uint32_t> mark = {0xFFFFFFFFu, id};
+        const std::vector<uint32_t> mark = {kDecoratedKey, id};
         if (cache_.emplace(mark, id).second) Decorate(id, SpvDecorationArrayStride, {stride});
         return id;
     }
 
+    Id Module::PlainArray(Id element, uint32_t length)
+    {
+        const Id size = ConstUint(length);
+        // Its own key: an array of the same element and length made with a stride is another type.
+        return Cached({element, size, kDecoratedKey}, SpvOpTypeArray, {element, size}, true);
+    }
+
+    Id Module::RuntimeArray(Id element) { return Cached({element}, SpvOpTypeRuntimeArray, {element}, true); }
+
     Id Module::Struct(std::initializer_list<Id> members)
     {
         // Every struct is its own type: each carries its own member offsets.
+        const Id id = NewId();
+        Emit(globals_, SpvOpTypeStruct, {id}, members);
+        return id;
+    }
+
+    Id Module::Struct(const std::vector<Id>& members)
+    {
         const Id id = NewId();
         Emit(globals_, SpvOpTypeStruct, {id}, members);
         return id;
@@ -95,12 +141,16 @@ namespace wxl::vk::spirv
         return id;
     }
 
-    Id Module::Image2D(Id sampled)
+    Id Module::Image2D(Id sampled) { return Image(sampled, SpvDim2D); }
+
+    Id Module::Image(Id sampled, SpvDim dim)
     {
-        // Dim 2D, not depth, not arrayed, single-sampled, used with a sampler, format unknown.
-        return Cached({sampled, SpvDim2D, 0, 0, 0, 1, SpvImageFormatUnknown}, SpvOpTypeImage,
-                      {sampled, SpvDim2D, 0, 0, 0, 1, SpvImageFormatUnknown}, true);
+        // Not depth, not arrayed, single-sampled, used with a sampler, format unknown.
+        return Cached({sampled, static_cast<uint32_t>(dim), 0, 0, 0, 1, SpvImageFormatUnknown}, SpvOpTypeImage,
+                      {sampled, static_cast<uint32_t>(dim), 0, 0, 0, 1, SpvImageFormatUnknown}, true);
     }
+
+    Id Module::Sampler() { return Cached({}, SpvOpTypeSampler, {}, true); }
 
     Id Module::SampledImage(Id image) { return Cached({image}, SpvOpTypeSampledImage, {image}, true); }
 
@@ -124,11 +174,25 @@ namespace wxl::vk::spirv
         return Cached({type, bits}, SpvOpConstant, {type, bits}, false);
     }
 
-    Id Module::ConstComposite(Id type, std::initializer_list<Id> parts)
+    Id Module::ConstBool(bool value)
     {
-        std::vector<uint32_t> key{type};
+        const Id type = Bool();
+        const SpvOp op = value ? SpvOpConstantTrue : SpvOpConstantFalse;
+        std::vector<uint32_t> key{static_cast<uint32_t>(op), type};
+        auto found = cache_.find(key);
+        if (found != cache_.end()) return found->second;
+        const Id id = NewId();
+        Emit(globals_, op, {type, id});
+        cache_.emplace(std::move(key), id);
+        return id;
+    }
+
+    Id Module::ConstComposite(Id type, std::initializer_list<Id> parts) { return ConstComposite(type, std::vector<Id>(parts)); }
+
+    Id Module::ConstComposite(Id type, const std::vector<Id>& parts)
+    {
+        std::vector<uint32_t> key{static_cast<uint32_t>(SpvOpConstantComposite), type};
         key.insert(key.end(), parts.begin(), parts.end());
-        key.insert(key.begin(), static_cast<uint32_t>(SpvOpConstantComposite));
         auto found = cache_.find(key);
         if (found != cache_.end()) return found->second;
         const Id id = NewId();
@@ -137,10 +201,28 @@ namespace wxl::vk::spirv
         return id;
     }
 
+    Id Module::ConstNull(Id type)
+    {
+        std::vector<uint32_t> key{static_cast<uint32_t>(SpvOpConstantNull), type};
+        auto found = cache_.find(key);
+        if (found != cache_.end()) return found->second;
+        const Id id = NewId();
+        Emit(globals_, SpvOpConstantNull, {type, id});
+        cache_.emplace(std::move(key), id);
+        return id;
+    }
+
     Id Module::Variable(Id pointer, SpvStorageClass storage)
     {
         const Id id = NewId();
         Emit(globals_, SpvOpVariable, {pointer, id, static_cast<uint32_t>(storage)});
+        return id;
+    }
+
+    Id Module::Variable(Id pointer, SpvStorageClass storage, Id initializer)
+    {
+        const Id id = NewId();
+        Emit(globals_, SpvOpVariable, {pointer, id, static_cast<uint32_t>(storage), initializer});
         return id;
     }
 
@@ -180,23 +262,30 @@ namespace wxl::vk::spirv
         const Id voidType = Void();
         const Id fnType   = Function(voidType);
         main_             = NewId();
-
-        std::vector<uint32_t> name;
-        EmitString(name, "main");
-        entry_.push_back(((3 + static_cast<uint32_t>(name.size() + interface.size())) << SpvWordCountShift) | SpvOpEntryPoint);
-        entry_.push_back(static_cast<uint32_t>(model_));
-        entry_.push_back(main_);
-        entry_.insert(entry_.end(), name.begin(), name.end());
-        entry_.insert(entry_.end(), interface.begin(), interface.end());
+        interface_.assign(interface.begin(), interface.end());
         Name(main_, "main");
 
-        Emit(code_, SpvOpFunction, {voidType, main_, SpvFunctionControlMaskNone, fnType});
-        Emit(code_, SpvOpLabel, {NewId()});
+        Emit(head_, SpvOpFunction, {voidType, main_, SpvFunctionControlMaskNone, fnType});
+        Emit(head_, SpvOpLabel, {NewId()});
+    }
+
+    void Module::AddInterface(Id variable)
+    {
+        for (uint32_t id : interface_)
+            if (id == variable) return;
+        interface_.push_back(variable);
     }
 
     void Module::ExecutionMode(SpvExecutionMode mode, std::initializer_list<uint32_t> operands)
     {
         Emit(modes_, SpvOpExecutionMode, {main_, static_cast<uint32_t>(mode)}, operands);
+    }
+
+    Id Module::Local(Id pointer)
+    {
+        const Id id = NewId();
+        Emit(locals_, SpvOpVariable, {pointer, id, static_cast<uint32_t>(SpvStorageClassFunction)});
+        return id;
     }
 
     Id Module::Op(SpvOp op, Id type, std::initializer_list<uint32_t> operands)
@@ -206,7 +295,16 @@ namespace wxl::vk::spirv
         return id;
     }
 
+    Id Module::Op(SpvOp op, Id type, const std::vector<uint32_t>& operands)
+    {
+        const Id id = NewId();
+        Emit(code_, op, {type, id}, operands);
+        return id;
+    }
+
     void Module::OpVoid(SpvOp op, std::initializer_list<uint32_t> operands) { Emit(code_, op, operands); }
+
+    void Module::OpVoid(SpvOp op, const std::vector<uint32_t>& operands) { Emit(code_, op, {}, operands); }
 
     Id Module::Ext(Id type, uint32_t instruction, std::initializer_list<Id> operands)
     {
@@ -226,24 +324,37 @@ namespace wxl::vk::spirv
 
     std::vector<uint32_t> Module::Words() const
     {
+        std::vector<uint32_t> name;
+        EmitString(name, "main");
+
         std::vector<uint32_t> out;
-        out.reserve(5 + capabilities_.size() + imports_.size() + 3 + entry_.size() + modes_.size() + names_.size() +
-                    annotations_.size() + globals_.size() + code_.size());
+        out.reserve(5 + capabilities_.size() + extensions_.size() + imports_.size() + 3 + 3 + name.size() + interface_.size() +
+                    modes_.size() + names_.size() + annotations_.size() + globals_.size() + head_.size() + locals_.size() + code_.size());
         out.push_back(SpvMagicNumber);
-        out.push_back(kVersion);
+        out.push_back(version_);
         out.push_back(0);     // generator: none registered
         out.push_back(next_); // the bound: every id is below it
         out.push_back(0);
         out.insert(out.end(), capabilities_.begin(), capabilities_.end());
+        out.insert(out.end(), extensions_.begin(), extensions_.end());
         out.insert(out.end(), imports_.begin(), imports_.end());
         out.push_back((3u << SpvWordCountShift) | SpvOpMemoryModel);
-        out.push_back(SpvAddressingModelLogical);
+        out.push_back(static_cast<uint32_t>(addressing_));
         out.push_back(SpvMemoryModelGLSL450);
-        out.insert(out.end(), entry_.begin(), entry_.end());
+        if (main_)
+        {
+            out.push_back(((3 + static_cast<uint32_t>(name.size() + interface_.size())) << SpvWordCountShift) | SpvOpEntryPoint);
+            out.push_back(static_cast<uint32_t>(model_));
+            out.push_back(main_);
+            out.insert(out.end(), name.begin(), name.end());
+            out.insert(out.end(), interface_.begin(), interface_.end());
+        }
         out.insert(out.end(), modes_.begin(), modes_.end());
         out.insert(out.end(), names_.begin(), names_.end());
         out.insert(out.end(), annotations_.begin(), annotations_.end());
         out.insert(out.end(), globals_.begin(), globals_.end());
+        out.insert(out.end(), head_.begin(), head_.end());
+        out.insert(out.end(), locals_.begin(), locals_.end());
         out.insert(out.end(), code_.begin(), code_.end());
         return out;
     }

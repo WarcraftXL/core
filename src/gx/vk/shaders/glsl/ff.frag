@@ -6,7 +6,8 @@
 // s_colorOp/s_colorArgs). Adapted from the legacy mod's ff.frag. CURRENT starts as the diffuse
 // colour; a stage with a texture combines its texel with CURRENT by its colour op (rgb) and its
 // alpha op (a), saturated; a stage without one ends the cascade (D3D's DISABLE, ops -1). Then the
-// alpha test, then the vertex fog on rgb.
+// specular colour is added when the draw lights it with a specular, the alpha test, and D3D9's
+// fog when the draw asks for it.
 //
 //   0 Mod       MODULATE (TEXTURE, CURRENT)           t * c
 //   1 Mod2x     MODULATE2X                            2 * t * c
@@ -18,6 +19,8 @@
 #extension GL_GOOGLE_include_directive : require
 #include "engine.glsl"
 #include "interface.frag.glsl"
+
+layout(location = 1) in vec4 vSpecular;
 
 /// A stage's 2D coordinate: divided by its last counted component when its transform is PROJECTED.
 vec2 StageUV(vec4 t, int flags)
@@ -48,15 +51,15 @@ void main()
     vec4     cur = vColor;
     if (d.ops.x >= 0)
     {
-        vec4 t = Sample0(StageUV(vTex0, d.texgen.y));
+        vec4 t = Sample0(StageUV(StageCoord0(), d.texgen.y));
         cur    = clamp(vec4(Op(d.ops.x, t, cur, vColor.a).rgb, Op(d.ops.y, t, cur, vColor.a).a), 0.0, 1.0);
         if (d.ops.z >= 0)
         {
-            vec4 t1 = Sample1(StageUV(vTex1, d.texgen.w));
+            vec4 t1 = Sample1(StageUV(StageCoord1(), d.texgen.w));
             cur     = clamp(vec4(Op(d.ops.z, t1, cur, vColor.a).rgb, Op(d.ops.w, t1, cur, vColor.a).a), 0.0, 1.0);
         }
     }
+    if (d.lighting.y != 0 && d.lighting.z != 0) cur.rgb = clamp(cur.rgb + vSpecular.rgb, 0.0, 1.0);
     if (AlphaRejected(cur.a)) discard;
-    cur.rgb  = mix(d.fogColor.rgb, cur.rgb, vFog);
-    outColor = cur;
+    outColor = Fogged(cur, vFog.x);
 }

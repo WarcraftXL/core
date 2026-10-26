@@ -3,7 +3,7 @@
 //
 // The engine's small Gx records the Vulkan renderer reads besides the SDK's engine headers
 // (wxl/engine/gx.hpp): an element of CGxDevice::m_appRenderStates, a CGxVertexAttrib, the viewport
-// (a CBoundingBox) and a CGxBatch. CGxDevice holds the first three as an untyped array and as
+// (a CBoundingBox), a CGxBatch and a light of CGxDevice::m_lights (a CGxApiLight). CGxDevice holds the first three as an untyped array and as
 // bytes in the engine headers, which keep its published layout hash; their layout is written here
 // once, the same declarations as the client fork's, so it is the same on both architectures. The
 // recompiled client holds its own types to these (static_assert in CGxDeviceVk.cpp), a capture
@@ -66,6 +66,19 @@ typedef struct wxl_gx_batch
     uint16_t min_index;
     uint16_t max_index;
 } wxl_gx_batch;
+
+/// CGxApiLight: one of the four lights the engine hands its fixed-function lighting, in world space.
+typedef struct wxl_gx_light
+{
+    float    dir[4];        ///< w 1: a point light at xyz; otherwise a directional light shining along xyz
+    float    ambient[3];
+    float    diffuse[3];
+    float    specular[3];
+    float    attenuation[3]; ///< constant, linear, quadratic
+    int32_t  enable;
+    uint16_t flags;
+    uint16_t reserved;
+} wxl_gx_light;
 
 #ifdef __cplusplus
 } // extern "C"

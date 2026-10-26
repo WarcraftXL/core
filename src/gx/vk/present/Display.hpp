@@ -51,6 +51,9 @@ namespace wxl::vk::present
     public:
         virtual void FrameBegun(uint32_t slot, VkCommandBuffer upload) = 0;
         virtual void FrameEnding(VkCommandBuffer upload)               = 0;
+        /// A rendering of the frame is about to end (its queries end inside it), then has ended.
+        virtual void RenderingEnding(VkCommandBuffer cmd) { (void)cmd; }
+        virtual void RenderingEnded(VkCommandBuffer cmd) { (void)cmd; }
 
     protected:
         ~FrameHook() = default;
@@ -65,6 +68,16 @@ namespace wxl::vk::present
     };
 
     const char* FrameEndName(FrameEnd end);
+
+    /// A rendering into images other than the scene (a texture the engine draws into).
+    struct TargetRendering
+    {
+        VkImageView color = VK_NULL_HANDLE;
+        VkImageView depth = VK_NULL_HANDLE;
+        VkFormat    depth_format = VK_FORMAT_UNDEFINED;
+        VkExtent2D  extent{0, 0};
+        uint64_t    key = 0; ///< the caller's identity of the target: the open rendering is kept while it is the same
+    };
 
     class Display
     {
@@ -155,9 +168,20 @@ namespace wxl::vk::present
         /// A rendering into the scene's colour and depth (their contents kept), the engine's draws;
         /// the one already open when it is. Null outside a frame.
         VkCommandBuffer BeginSceneRendering();
+        /// A rendering into @p target (its images in their attachment layouts already, contents
+        /// kept); the one already open when it has the same key. Null outside a frame.
+        VkCommandBuffer BeginTargetRendering(const TargetRendering& target);
         void            EndRendering();
         /// Whether a rendering is open in the frame's command buffer.
         bool            InRendering() const { return rendering_ != Rendering::None; }
+        /// Whether the open rendering draws into a target, and its key; 0 for the scene or none.
+        uint64_t        TargetKey() const { return rendering_ == Rendering::Target ? target_key_ : 0; }
+        /// The size of the open rendering's images (the scene's when none is open).
+        VkExtent2D      RenderingExtent() const { return rendering_ == Rendering::Target ? target_extent_ : scene_extent_; }
+        /// The scene made (at the size wanted) and in COLOR_ATTACHMENT_OPTIMAL for this frame,
+        /// outside any rendering: what a copy from it starts from. False outside a frame.
+        bool            PrepareScene();
+        const resources::Image& SceneImage() const { return scene_; }
         /// Grows at each rendering begun: what a recorder bound inside the previous one (its
         /// pipeline, its descriptor set, its dynamic states) is to be set again.
         uint64_t        RenderingEpoch() const { return epoch_; }
@@ -191,8 +215,9 @@ namespace wxl::vk::present
         enum class Rendering
         {
             None,
-            Full,  ///< colour and depth
-            Color, ///< colour only
+            Full,   ///< colour and depth
+            Color,  ///< colour only
+            Target, ///< another colour image (and depth)
         };
 
         bool EnsureScene();
@@ -227,6 +252,8 @@ namespace wxl::vk::present
         VkExtent2D        scene_wanted_{0, 0};
         bool              touched_ = false;
         Rendering         rendering_ = Rendering::None;
+        uint64_t          target_key_ = 0;
+        VkExtent2D        target_extent_{0, 0};
 
         bool              offscreen_ = false;
         resources::Image  target_;
