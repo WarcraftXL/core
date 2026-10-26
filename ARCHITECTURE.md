@@ -371,6 +371,25 @@ checked against the composite's length before anything is drawn. The recompiled 
 renderer for it yet: `supported` answers false with the reason, and its Vulkan renderer's render
 points are where it will be drawn.
 
+### The game's selection circles
+
+`wxl.selectioncircle` (`src/services/SelectionCircleService.cpp`) keeps the looks mods give the
+circles the game projects on the ground: hidden, or with a texture, colour or scale of their own,
+per kind and reaction (a cell each) or per object. Every circle is drawn by one of four members,
+between the device's `RsPush` and `RsPop`: `CGUnit_C::RenderTargetSelection` and
+`CGCorpse_C::RenderTargetSelection` (called by `CGWorldFrame::ClearTrackedObjects` for the target
+`CGObject_C::PreAnimate` noted), `CGUnit_C::RenderPetTargetSelection` and `RenderAutoTrackCursor`.
+Each binds the static `CGObject_C::s_selectionTexture` (`SetCircleRenderStates`) and calls
+`ProjectTex::Render2d` with a box and a colour of its own. The four drawers' seams open and close a
+circle: Before chooses its look (an object's own, then its kind's and reaction's, the last set
+among mods; the reaction is read only when some look is set) and puts a mod's texture in the
+static, After puts the game's back. `ProjectTex.Render2d`'s gate, which every ground projection
+passes, does nothing outside a circle; inside one it skips a hidden circle, or points the box and
+colour arguments at the service's own, scaled around their centre and recoloured with the game's
+alpha kept as a factor, so the game's own fades still play. Textures are made with the client's
+`CreateTexture` once per path and closed with their last look. With no look set, a circle costs
+the drawer's two calls and one load at the gate.
+
 ### The profiler
 
 WarcraftXL.dll carries the process's one Tracy client (`deps/tracy`, v0.14.1), compiled with
@@ -539,7 +558,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its looks of the selection circles, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.

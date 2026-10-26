@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.27-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.28-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -232,6 +232,7 @@ What a mod can reach **today**, by build:
 | `wxl.pose` (heads) | yes: after `CGUnit_C::PreAnimate`, the head key bone's procedural transform (`CM2Model::SetBoneFlags`, `SetBoneProceduralTransform`) | the same |
 | `wxl.imgui` (Dear ImGui, ImPlot) | yes: one context, drawn at the present with the D3D9 device (the SDK's copy and its Win32 and DX9 backends), the window's messages fed at the window procedure's gate | the same |
 | `wxl.highlight` (outline and glow) | yes: the batches of a highlighted object kept at `M2.DrawBatch` (bindings, vertex program, first texture and alpha test, and constants read from the engine's copy, the device being pure), drawn again after the world into two masks against the scene's depth with the game's alpha test, the device's bindings and registers put back as the engine believes them, the glow blurred at half size and the outline found in a full-screen pass, with programs compiled at build time (`src/gx/d3d9/`) | not yet: `supported` false, its reason the Vulkan renderer's render points to come |
+| `wxl.selectioncircle` (the game's circles) | yes: around each drawer of a circle (the target's, a corpse's, the pet's target's, the move marker's) a mod's texture is put in `CGObject_C::s_selectionTexture`, and `ProjectTex::Render2d`'s gate skips a hidden circle or points the projection at a scaled box and another colour; textures made with the client's `CreateTexture` | the same, the calls in the fork |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -349,6 +350,8 @@ source. Everything else observes.
 | `InputControl.SetControlBit` (gated) | `CGInputControl::SetControlBit(uint32_t bit, uint32_t time)` | while a mod blocks the mouse look, its look bits are kept from the game and the press noted |
 | `InputControl.UnsetControlBit` (gated) | `CGInputControl::UnsetControlBit(uint32_t bit, uint32_t time, int32_t keep_smoothing)` | the release of a look bit kept out, with the default action of a short click |
 | `Unit.PreAnimate` | `CGUnit_C::PreAnimate(void* frame)` | After applies the head turns of `wxl.pose` |
+| `Unit.RenderTargetSelection`, `Unit.RenderPetTargetSelection`, `Unit.RenderAutoTrackCursor`, `Corpse.RenderTargetSelection` | `CGUnit_C::RenderTargetSelection()`, `RenderPetTargetSelection()`, `RenderAutoTrackCursor()`, `CGCorpse_C::RenderTargetSelection()`: the circles under the target, the pet's target and the move marker | nothing: before, `wxl.selectioncircle` picks the look of the circle that comes and puts a mod's texture in the game's place; after, the game's goes back |
+| `ProjectTex.Render2d` (gated) | `ProjectTex::Render2d(box, color, matrix, fade, a5, a6, polygon_offset)`, a texture projected onto the ground | nothing: inside a circle, one a mod hid is not drawn, and one it restyled is drawn with a scaled box and its colour; elsewhere (a spell's cursor, a trajectory) one load |
 | `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
 | `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world. Before, `wxl.highlight` starts keeping its objects' batches; after, before `WorldRenderEnd`, it draws them |
 | `WorldFrame.PerformDefaultAction` (gated) | `CGWorldFrame::PerformDefaultAction(MOUSEBUTTON button)` | `WorldClickRequest` with what the click met (a name plate, a model, the ground, a map object, nothing) and whether a spell waits for its target; a mod that refuses it keeps the game from acting on the click |
