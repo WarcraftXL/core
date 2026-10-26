@@ -26,6 +26,7 @@
 #include "services/ImGuiService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
 #include <imgui.h>
 #include <implot.h>
 #include "services/DataService.hpp"
@@ -83,6 +84,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <deque>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1722,6 +1724,29 @@ namespace
         ++g_headBone.writes;
     }
 
+    // The circles' texture static and the textures mods give (wxl.selectioncircle).
+    struct FakeCircleTexture
+    {
+        std::string path;
+    };
+    FakeCircleTexture             g_gameCircleTexture{"Textures\\UnitSelectTexture.blp"};
+    void*                   g_circleTexture = &g_gameCircleTexture;
+    std::deque<FakeCircleTexture> g_openedTextures;
+    int                     g_texturesClosed = 0;
+    void* WXL_CALL FakeSwapCircleTexture(void* texture)
+    {
+        void* held      = g_circleTexture;
+        g_circleTexture = texture;
+        return held;
+    }
+    void* WXL_CALL FakeTextureOpen(const char* path)
+    {
+        if (!path || std::strstr(path, "Missing")) return nullptr;
+        g_openedTextures.push_back(FakeCircleTexture{path});
+        return &g_openedTextures.back();
+    }
+    void WXL_CALL FakeTextureClose(void*) { ++g_texturesClosed; }
+
     void* WXL_CALL FakeCameraWorld() { return g_worldCamera; }
 
     wxl_bool WXL_CALL FakeCameraRead(const void* camera, wxl_core_camera* out)
@@ -1920,6 +1945,9 @@ namespace
         init.gameobject_can_use     = &FakeCanUse;
         init.model_bone_flags       = &FakeBoneFlags;
         init.model_bone_transform   = &FakeBoneTransform;
+        init.circle_swap_texture    = &FakeSwapCircleTexture;
+        init.texture_open           = &FakeTextureOpen;
+        init.texture_close          = &FakeTextureClose;
         init.camera_read            = &FakeCameraRead;
         init.camera_write           = &FakeCameraWrite;
         init.world_trace            = &FakeTrace;
@@ -4005,6 +4033,140 @@ namespace
         Check(fromThread == WXL_E_INVALID, "off the main thread a head is refused");
         wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
         wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
+    }
+
+    // --- wxl.selectioncircle: the game's circles hidden and restyled -----------------------------
+
+    void CheckSelectionCircle()
+    {
+        namespace circles = wxl::core::services::selectioncircle;
+        const wxl_selectioncircle_api& api = wxl::core::services::SelectionCircleApi();
+        FakeObject                     boar;
+        boar.guid     = 0x791;
+        boar.typeId   = WXL_OBJECT_UNIT;
+        boar.reaction = WXL_REACTION_HOSTILE;
+        FakeObject friendBear;
+        friendBear.guid     = 0x792;
+        friendBear.typeId   = WXL_OBJECT_UNIT;
+        friendBear.reaction = WXL_REACTION_FRIENDLY;
+        FakeObject corpse;
+        corpse.guid   = 0x793;
+        corpse.typeId = WXL_OBJECT_CORPSE;
+        wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&friendBear, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&corpse, nullptr, 100u);
+        const wxl_handle boarHandle = wxl::core::objects::HandleOf(&boar);
+        const wxl_handle bearHandle = wxl::core::objects::HandleOf(&friendBear);
+
+        // One projection as a drawer makes it: a box 1 yard around the origin, a colour; the
+        // gate is handed the addresses of the arguments, as both runtimes hand them.
+        float          gameBox[6] = {-1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
+        uint32_t       gameColor  = 0xFF00FF00u;
+        const void*    box        = gameBox;
+        const void*    color      = &gameColor;
+        const void*    matrix     = nullptr;
+        float          fade = 0.5f, offset = 0.4f;
+        uint32_t       a5 = 0x200122, a6 = 1;
+        const auto project = [&] {
+            box   = gameBox;
+            color = &gameColor;
+            return wxl::seam::ProjectTex::Render2d::Gate(&box, &color, &matrix, &fade, &a5, &a6, &offset);
+        };
+        const auto drawTarget = [&](FakeObject& unit) {
+            wxl::seam::Unit::RenderTargetSelection::Before(&unit);
+            const bool taken = project();
+            wxl::seam::Unit::RenderTargetSelection::After(&unit);
+            return taken;
+        };
+        const auto boxOf = [&] { return static_cast<const float*>(box); };
+        const auto colorOf = [&] { return *static_cast<const uint32_t*>(color); };
+
+        Check(!project() && box == gameBox && color == &gameColor, "a projection outside a circle (a spell's cursor) is left alone");
+        Check(!drawTarget(boar) && box == gameBox && color == &gameColor, "with no mod's look, the target's circle is the game's");
+        circles::WorldEnd();
+        Check(api.drawn() == 1 && api.hidden() == 0, "and counted drawn");
+
+        Check(api.hide(0x8u, 0) == WXL_E_INVALID && api.hide(0, 0x200u) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, 9.0f) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, std::numeric_limits<float>::quiet_NaN()) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, -1.0f) == WXL_E_INVALID,
+              "a bit that names nothing, or a scale out of range, is refused");
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, 0, wxl_str{"Textures\\Missing.blp", 20}, 0, 1.0f) == WXL_E_NOT_FOUND &&
+                  api.hide_object(0xDEAD) == WXL_E_NOT_FOUND && api.reset_object(boarHandle) == WXL_E_NOT_FOUND,
+              "a texture the client makes nothing of is not found, and so is an object gone or one never changed");
+
+        Check(api.hide(WXL_SELECTIONCIRCLE_TARGET, 0) == WXL_OK, "the target's circles are hidden");
+        Check(drawTarget(boar) && drawTarget(friendBear), "a hidden circle is not projected, whatever the reaction");
+        wxl::seam::Unit::RenderPetTargetSelection::Before(&boar);
+        Check(!project(), "the pet's target is another kind, still drawn");
+        wxl::seam::Unit::RenderPetTargetSelection::After(&boar);
+        circles::WorldEnd();
+        Check(api.drawn() == 1 && api.hidden() == 2, "the frame counts two hidden and one drawn");
+
+        const char kRing[] = "Interface\\Mod\\Ring.blp";
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, WXL_SELECTIONCIRCLE_REACTION(WXL_REACTION_HOSTILE),
+                            wxl_str{kRing, static_cast<uint32_t>(sizeof kRing - 1)}, 0x80FF0000u, 2.0f) == WXL_OK,
+              "hostile targets get a look of their own");
+        wxl::seam::Unit::RenderTargetSelection::Before(&boar);
+        const bool swapped = g_circleTexture != &g_gameCircleTexture &&
+                             static_cast<FakeCircleTexture*>(g_circleTexture)->path == kRing;
+        Check(swapped, "the mod's texture is in the game's place while the circle is drawn");
+        Check(!project() && box != gameBox && boxOf()[0] == -2.0f && boxOf()[4] == 2.0f && boxOf()[5] == 2.0f &&
+                  gameBox[0] == -1.0f && colorOf() == 0x80FF0000u && gameColor == 0xFF00FF00u,
+              "the later look wins over the hide: drawn twice as large in the mod's colour, the game's box and colour untouched");
+        gameColor = 0x80123456u;
+        Check(!project() && colorOf() == 0x40FF0000u, "a fading ring of the game's keeps its fade over the mod's alpha");
+        gameColor = 0xFF00FF00u;
+        wxl::seam::Unit::RenderTargetSelection::After(&boar);
+        Check(g_circleTexture == &g_gameCircleTexture, "and the game's texture is back after it");
+        Check(drawTarget(friendBear), "a friendly target is still hidden");
+
+        Check(api.set_object_style(boarHandle, wxl_str{nullptr, 0}, 0, 0.5f) == WXL_OK, "the boar gets a look of its own");
+        Check(!drawTarget(boar) && boxOf()[0] == -0.5f && boxOf()[2] == -1.0f && color == &gameColor &&
+                  g_circleTexture == &g_gameCircleTexture,
+              "an object's look wins over its kind's: half the size across, never lower, in the game's colour and texture");
+        Check(api.hide_object(bearHandle) == WXL_OK && drawTarget(friendBear), "an object's circles are hidden");
+        wxl::seam::Unit::RenderAutoTrackCursor::Before(&friendBear);
+        Check(project(), "every circle of it, the move marker of the unit moving too");
+        wxl::seam::Unit::RenderAutoTrackCursor::After(&friendBear);
+
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, WXL_SELECTIONCIRCLE_NO_REACTION, wxl_str{nullptr, 0}, 0xFF0000FFu, 0.0f) ==
+                  WXL_OK,
+              "circles under no unit get a colour");
+        wxl::seam::Corpse::RenderTargetSelection::Before(&corpse);
+        Check(!project() && colorOf() == 0xFF0000FFu && box == gameBox, "a corpse's circle has no reaction, and keeps its size");
+        wxl::seam::Corpse::RenderTargetSelection::After(&corpse);
+
+        Check(api.reset_object(boarHandle) == WXL_OK && api.reset_object(bearHandle) == WXL_OK &&
+                  api.reset(WXL_SELECTIONCIRCLE_TARGET, 0) == WXL_OK,
+              "the looks are given back");
+        Check(!drawTarget(boar) && box == gameBox && color == &gameColor && !drawTarget(friendBear) && g_texturesClosed == 1,
+              "the game's circles again, and the mod's texture let go with its last look");
+
+        // Two looks of one texture share it; it goes with the mod.
+        g_texturesClosed = 0;
+        const size_t opened = g_openedTextures.size();
+        api.set_style(WXL_SELECTIONCIRCLE_PET_TARGET, 0, wxl_str{kRing, static_cast<uint32_t>(sizeof kRing - 1)}, 0, 0.0f);
+        api.set_object_style(boarHandle, wxl_str{"interface/mod/RING.blp", 22}, 0, 0.0f);
+        Check(g_openedTextures.size() == opened + 1, "one texture made for one path, however it is spelt");
+        api.hide(WXL_SELECTIONCIRCLE_MOVE_MARKER, 0);
+        circles::ForgetMod(0);
+        Check(g_texturesClosed == 1 && !drawTarget(boar), "a mod's looks and its texture go with it");
+        wxl::seam::Unit::RenderAutoTrackCursor::Before(&boar);
+        Check(!project(), "the move marker is the game's again");
+        wxl::seam::Unit::RenderAutoTrackCursor::After(&boar);
+
+        api.hide(0, 0);
+        circles::Clear();
+        Check(!drawTarget(boar) && g_circleTexture == &g_gameCircleTexture, "the client's end forgets everything");
+        circles::WorldEnd();
+        circles::WorldEnd();
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.hide(0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID && api.drawn() == 0, "off the main thread a change is refused");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&friendBear);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&corpse);
     }
 
     // --- wxl.imgui: the contexts, with no device --------------------------------------------------
@@ -11581,6 +11743,7 @@ int main(int argc, char** argv)
     CheckWorldTrace();
     CheckMouseLookBlock();
     CheckPose();
+    CheckSelectionCircle();
     CheckHighlight();
     CheckImGuiService();
     CheckStorage();
