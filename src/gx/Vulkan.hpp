@@ -47,6 +47,11 @@ namespace wxl::core::gx
     /// Whether the client renders through the runtime's Vulkan device.
     bool VulkanActive();
 
+    /// The engine enters (true) or leaves its world's pass (CGWorldFrame::RenderWorld): the draws
+    /// in between are the world's, which the Vulkan device does not draw yet.
+    void WorldPass(bool inside);
+    bool InWorldPass();
+
     /// The Vulkan device and its open frame, for what draws into the frame beside the engine (Dear ImGui).
     struct VulkanFrame
     {

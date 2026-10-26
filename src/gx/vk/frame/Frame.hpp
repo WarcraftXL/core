@@ -8,8 +8,9 @@
 //
 //   Timeline   the queue's serials: submit, wait for a serial within a bound, what has completed
 //   Submitter  one command buffer for work outside the frames (a check at start, a test)
-//   Frames     the frames in flight: each slot a command pool and buffer and the semaphore its
-//              swapchain image is acquired with; a slot is reused once its last serial completed
+//   Frames     the frames in flight: each slot a command pool, its two command buffers (the upload
+//              pass, submitted first, and the frame's main one) and the semaphore its swapchain image
+//              is acquired with; a slot is reused once its last serial completed
 
 #pragma once
 
@@ -143,6 +144,10 @@ namespace wxl::vk::frame
         /// The open slot's command buffer, null outside Begin..Submit.
         VkCommandBuffer Current() const { return open_ ? slots_[index_].buffer : VK_NULL_HANDLE; }
 
+        /// The open slot's upload command buffer: copies into what the frame's draws have not named
+        /// yet, submitted before Current() in the same submission. Null outside Begin..Submit.
+        VkCommandBuffer Upload() const { return open_ ? slots_[index_].upload : VK_NULL_HANDLE; }
+
         /// The semaphore the open slot acquires its swapchain image with.
         VkSemaphore Acquire() const { return slots_[index_].acquired; }
 
@@ -154,7 +159,7 @@ namespace wxl::vk::frame
          */
         VkSemaphore RenewAcquire();
 
-        /// Ends and submits the open slot; its serial, or 0 when the queue refused it.
+        /// Ends and submits the open slot, its upload buffer first; its serial, or 0 when the queue refused it.
         uint64_t Submit(const Timeline::WaitOn* waits = nullptr, uint32_t wait_count = 0,
                         const VkSemaphore* signals = nullptr, uint32_t signal_count = 0);
 
@@ -166,6 +171,7 @@ namespace wxl::vk::frame
         {
             VkCommandPool   pool = VK_NULL_HANDLE;
             VkCommandBuffer buffer = VK_NULL_HANDLE;
+            VkCommandBuffer upload = VK_NULL_HANDLE;
             VkSemaphore     acquired = VK_NULL_HANDLE;
             uint64_t        serial = 0;
         };

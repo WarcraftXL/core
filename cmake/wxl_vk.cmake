@@ -1,11 +1,13 @@
 # The Vulkan renderer's modules (src/gx/vk/, namespace wxl::vk), one static library each, in the
-# order they may depend on each other: device; resources; shaders; frame; present (which sees all
-# of them); imgui. None knows the engine or the runtime: they build for Windows inside
+# order they may depend on each other: device; resources; shaders; pipelines; frame; present; draw
+# (the engine's draws in Vulkan); engine (the engine's device read through the SDK's engine
+# layouts, into draws); imgui. None knows the runtime or Windows: they build for Windows inside
 # WarcraftXL.dll (x86 and x64) and natively for Linux in the test tree of tests/vk/, from these
 # same rules. The libraries they stand on are vendored in deps/, each with its licence and VERSION:
-# Vulkan-Headers, volk (the loader, found at run time), VMA (memory) and SPIRV-Headers (what the
-# renderer writes its own shaders against). Dear ImGui and its Vulkan backend come from the SDK's
-# deps/imgui.
+# Vulkan-Headers, volk (the loader, found at run time), VMA (memory), SPIRV-Headers (what the
+# renderer writes its own shaders against) and glslang (cmake/wxl_glsl.cmake: the renderer's GLSL
+# compiled when it is built). Dear ImGui and its Vulkan backend come from the SDK's deps/imgui; the
+# engine layouts from the SDK's engine/include (WXL_SDK_DIR).
 # Copyright (c) 2026 WarcraftXL. MIT (see LICENSE).
 #
 # Needs C and C++ enabled. Defines wxl-vk, which links every module. The imgui module is defined
@@ -47,7 +49,10 @@ _wxl_vk_warnings(wxl-vk-device)
 add_library(wxl-vk-vma STATIC "${WXL_VK_ROOT}/src/gx/vk/resources/Vma.cpp")
 target_include_directories(wxl-vk-vma SYSTEM PUBLIC "${WXL_VK_ROOT}/deps/vma/include")
 target_link_libraries(wxl-vk-vma PUBLIC wxl-vk-device)
-add_library(wxl-vk-resources STATIC "${WXL_VK_ROOT}/src/gx/vk/resources/Resources.cpp")
+add_library(wxl-vk-resources STATIC
+    "${WXL_VK_ROOT}/src/gx/vk/resources/Resources.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/resources/Ring.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/resources/Bindless.cpp")
 target_link_libraries(wxl-vk-resources PUBLIC wxl-vk-device PRIVATE wxl-vk-vma)
 _wxl_vk_warnings(wxl-vk-resources)
 
@@ -61,6 +66,22 @@ add_library(wxl-vk-shaders STATIC
     "${WXL_VK_ROOT}/src/gx/vk/shaders/Own.cpp")
 target_link_libraries(wxl-vk-shaders PUBLIC wxl-vk-device wxl-vk-spirv-headers)
 _wxl_vk_warnings(wxl-vk-shaders)
+
+# --- pipelines: the renderer's programs (GLSL compiled at build time) and the pipelines of the engine's draws
+include("${CMAKE_CURRENT_LIST_DIR}/wxl_glsl.cmake")
+set(WXL_VK_SPIRV_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/vk_spirv")
+wxl_vk_glsl(wxl-vk-programs "${WXL_VK_SPIRV_DIR}"
+    ff_vert=ff.vert
+    ui_vert=ui.vert
+    ui_stereo_vert=ui.vert:WXL_STEREO
+    ff_frag=ff.frag
+    ui_frag=ui.frag
+    desaturate_frag=desaturate.frag)
+add_library(wxl-vk-pipelines STATIC "${WXL_VK_ROOT}/src/gx/vk/pipelines/Pipelines.cpp")
+target_include_directories(wxl-vk-pipelines PRIVATE "${WXL_VK_SPIRV_DIR}")
+target_link_libraries(wxl-vk-pipelines PUBLIC wxl-vk-device)
+add_dependencies(wxl-vk-pipelines wxl-vk-programs)
+_wxl_vk_warnings(wxl-vk-pipelines)
 
 # --- frame: the timeline, bounded waits, the frames in flight ---------------------------------------
 add_library(wxl-vk-frame STATIC "${WXL_VK_ROOT}/src/gx/vk/frame/Frame.cpp")
@@ -76,13 +97,33 @@ add_library(wxl-vk-present STATIC
 target_link_libraries(wxl-vk-present PUBLIC wxl-vk-device wxl-vk-resources wxl-vk-frame wxl-vk-shaders)
 _wxl_vk_warnings(wxl-vk-present)
 
-add_library(wxl-vk INTERFACE)
-target_link_libraries(wxl-vk INTERFACE wxl-vk-device wxl-vk-resources wxl-vk-shaders wxl-vk-frame wxl-vk-present)
+# --- draw: the engine's textures, pools and draws on the device -------------------------------------
+add_library(wxl-vk-draw STATIC
+    "${WXL_VK_ROOT}/src/gx/vk/draw/Formats.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/draw/Draw.cpp")
+target_link_libraries(wxl-vk-draw PUBLIC wxl-vk-device wxl-vk-resources wxl-vk-pipelines wxl-vk-present)
+_wxl_vk_warnings(wxl-vk-draw)
 
-# --- capture: a frame of the D3D9 device recorded by the client (wxl/core/gx_capture.h), read back --
-add_library(wxl-vk-capture STATIC "${WXL_VK_ROOT}/src/gx/capture/Capture.cpp")
+# --- engine: the engine's device read through the SDK's engine layouts, into draws --------------------
+if(NOT WXL_VK_ENGINE_INCLUDE)
+    set(WXL_VK_ENGINE_INCLUDE "${WXL_SDK_DIR}/engine/include")
+endif()
+add_library(wxl-vk-engine STATIC "${WXL_VK_ROOT}/src/gx/vk/gxfront/Engine.cpp")
+target_include_directories(wxl-vk-engine PUBLIC "${WXL_VK_ROOT}/include")
+target_include_directories(wxl-vk-engine SYSTEM PUBLIC "${WXL_VK_ENGINE_INCLUDE}")
+target_link_libraries(wxl-vk-engine PUBLIC wxl-vk-draw)
+_wxl_vk_warnings(wxl-vk-engine)
+
+add_library(wxl-vk INTERFACE)
+target_link_libraries(wxl-vk INTERFACE wxl-vk-device wxl-vk-resources wxl-vk-shaders wxl-vk-pipelines wxl-vk-frame wxl-vk-present
+    wxl-vk-draw wxl-vk-engine)
+
+# --- capture: a frame of the D3D9 device recorded by the client (wxl/core/gx_capture.h), read back
+# and drawn again through the renderer -------------------------------------------------------------
+add_library(wxl-vk-capture STATIC "${WXL_VK_ROOT}/src/gx/capture/Capture.cpp" "${WXL_VK_ROOT}/src/gx/capture/Replay.cpp")
 target_include_directories(wxl-vk-capture PUBLIC "${WXL_VK_ROOT}/src" "${WXL_VK_ROOT}/include")
 target_compile_features(wxl-vk-capture PUBLIC cxx_std_20)
+target_link_libraries(wxl-vk-capture PUBLIC wxl-vk-engine)
 _wxl_vk_warnings(wxl-vk-capture)
 target_link_libraries(wxl-vk INTERFACE wxl-vk-capture)
 

@@ -25,14 +25,6 @@ namespace wxl::vk::gxfront
 
         engine::CGxDevice* Engine(void* device) { return static_cast<engine::CGxDevice*>(device); }
 
-        /// What a texture holds until it has an image: its size and format, for the next step to make it.
-        struct TexRecord
-        {
-            uint32_t width;
-            uint32_t height;
-            uint32_t format;
-        };
-
         VkSurfaceKHR MakeSurface(VkInstance instance, void* user, char* why, uint32_t why_size)
         {
             return present::CreateWindowSurface(instance, static_cast<Front*>(user)->Window(), why, why_size);
@@ -123,7 +115,9 @@ namespace wxl::vk::gxfront
         present::Display::Options display;
         display.frames = options_.frames;
         display.filter = options_.filter;
-        if (!display_.Create(context_, allocator_, timeline_, display, why, why_size)) return false;
+        if (!display_.Create(context_, allocator_, timeline_, display, why, why_size) ||
+            !renderer_.Create(context_, allocator_, display_, why, why_size))
+            return false;
         const VkExtent2D extent = ClientExtent(window_);
         display_.SetWindowExtent(extent);
         display_.SetSceneExtent(extent);
@@ -159,6 +153,20 @@ namespace wxl::vk::gxfront
 
     void Front::ReleaseDevice()
     {
+        if (renderer_.Ready())
+        {
+            // The textures and the pools lose what they had on this device; their records stay, the
+            // engine makes them again (its textures recreated, its pools written again) on the next.
+            WaitIdle();
+            for (void* tex : textures_)
+            {
+                TexRecord* record = static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData);
+                renderer_.DestroyTexture(record->texture);
+                record->texture = nullptr;
+            }
+            for (void* pool : pools_) renderer_.Forget(static_cast<draw::Pool*>(static_cast<engine::CGxPool*>(pool)->m_apiSpecific));
+        }
+        renderer_.Destroy();
         display_.Destroy();
         timeline_.Destroy();
         allocator_.Destroy();
@@ -172,7 +180,7 @@ namespace wxl::vk::gxfront
         for (void* pool : pools_)
         {
             engine::CGxPool* p = static_cast<engine::CGxPool*>(pool);
-            std::free(p->m_apiSpecific);
+            delete static_cast<draw::Pool*>(p->m_apiSpecific);
             p->m_apiSpecific = nullptr;
         }
         pools_.clear();
@@ -183,6 +191,8 @@ namespace wxl::vk::gxfront
             t->m_apiSpecificData = nullptr;
         }
         textures_.clear();
+        programs_[0].clear();
+        programs_[1].clear();
         device_ = nullptr;
         window_ = nullptr;
         stats_  = Stats{};
@@ -257,8 +267,8 @@ namespace wxl::vk::gxfront
         caps.m_texNonPow2        = 0;
         // EGxTexFormat 1..12: Abgr8888, Argb8888, Argb4444, Argb1555, Rgb565, Dxt1, Dxt3, Dxt5, Uv88, Gr1616F, R32F, D24X8.
         caps.m_texFmt[0] = 0;
-        for (int i = 1; i < 13; ++i) caps.m_texFmt[i] = 1;
-        if (!f.textureCompressionBC) caps.m_texFmt[6] = caps.m_texFmt[7] = caps.m_texFmt[8] = 0;
+        for (uint32_t i = 1; i < 13; ++i) caps.m_texFmt[i] = renderer_.TextureFormats().Of(i).format != VK_FORMAT_UNDEFINED ? 1 : 0;
+        (void)f.textureCompressionBC;
         for (int& rt : caps.m_rttFormat) rt = 0;
         caps.m_rttFormat[2]  = renders(VK_FORMAT_B8G8R8A8_UNORM);
         caps.m_rttFormat[5]  = renders(VK_FORMAT_R5G6B5_UNORM_PACK16);
@@ -323,7 +333,23 @@ namespace wxl::vk::gxfront
                        VkRect2D{{x, y}, {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}});
     }
 
-    void Front::Draw(const void*, int32_t) { ++stats_.draws; }
+    void Front::Draw(const wxl_gx_batch* batch, int32_t count, bool world)
+    {
+        ++stats_.draws;
+        if (!batch || !display_.InFrame() || !renderer_.Ready()) return;
+        engine::CGxDevice* dev = Engine(device_);
+        EngineView         view;
+        view.device           = dev;
+        view.states           = static_cast<const wxl_gx_app_state*>(dev->m_appRenderStates.m_data);
+        view.vertex_constants = vertex_constants_;
+        view.world            = world;
+        if (!view.states || dev->m_appRenderStates.m_count < kRenderStates) return;
+        Live           live(*this);
+        draw::Packet   packet;
+        const Verdict  verdict = BuildDraw(view, *batch, count, live, packet);
+        ++stats_.left_out[static_cast<int>(verdict)];
+        if (verdict == Verdict::Draw) renderer_.Draw(packet);
+    }
 
     void Front::UpdateSync()
     {
@@ -434,43 +460,137 @@ namespace wxl::vk::gxfront
         ::SetCursor(dev->m_hwCursor && dev->m_cursorVisible && cursor_ ? static_cast<HCURSOR>(cursor_) : nullptr);
     }
 
+    draw::Pool* Front::Live::Pool(const void* pool)
+    {
+        if (!pool || !front_.pools_.count(const_cast<void*>(pool))) return nullptr;
+        return static_cast<draw::Pool*>(static_cast<const engine::CGxPool*>(pool)->m_apiSpecific);
+    }
+
+    draw::Texture* Front::Live::Texture(const void* texture, const engine::CGxTex*& fields)
+    {
+        fields = static_cast<const engine::CGxTex*>(texture);
+        if (!texture || !front_.textures_.count(const_cast<void*>(texture))) return nullptr;
+        return static_cast<TexRecord*>(fields->m_apiSpecificData)->texture;
+    }
+
+    int Front::Live::Program(const void* shader, bool vertex)
+    {
+        const auto& programs = front_.programs_[vertex ? 1 : 0];
+        const auto  found    = programs.find(shader);
+        return found == programs.end() ? -1 : found->second;
+    }
+
     char* Front::PoolMemory(void* pool)
     {
         engine::CGxPool* p = static_cast<engine::CGxPool*>(pool);
-        if (p->m_apiSpecific) return pools_.count(pool) ? static_cast<char*>(p->m_apiSpecific) : nullptr;
-        if (p->m_size <= 0) return nullptr;
-        void* block = std::malloc(static_cast<size_t>(p->m_size));
-        if (!block) return nullptr;
-        p->m_apiSpecific = block;
-        pools_.insert(pool);
-        return static_cast<char*>(block);
+        if (!renderer_.Ready() || p->m_size <= 0) return nullptr;
+        if (!pools_.count(pool))
+        {
+            if (p->m_apiSpecific) return nullptr; // not ours
+            p->m_apiSpecific = renderer_.CreatePool(p->m_target, p->m_usage, static_cast<uint32_t>(p->m_size));
+            pools_.insert(pool);
+        }
+        return reinterpret_cast<char*>(renderer_.PoolMemory(static_cast<draw::Pool*>(p->m_apiSpecific)));
     }
 
-    void Front::PoolResize(void* pool) { PoolDestroy(pool); }
+    void Front::PoolResize(void* pool)
+    {
+        if (!pools_.count(pool)) return;
+        engine::CGxPool* p = static_cast<engine::CGxPool*>(pool);
+        renderer_.ResizePool(static_cast<draw::Pool*>(p->m_apiSpecific), static_cast<uint32_t>(std::max(p->m_size, 0)));
+    }
 
     void Front::PoolDestroy(void* pool)
     {
         if (!pools_.erase(pool)) return;
         engine::CGxPool* p = static_cast<engine::CGxPool*>(pool);
-        std::free(p->m_apiSpecific);
+        renderer_.DestroyPool(static_cast<draw::Pool*>(p->m_apiSpecific));
         p->m_apiSpecific = nullptr;
     }
 
-    bool Front::TexCreate(void* tex)
+    void Front::PoolDiscard(void* pool)
+    {
+        if (pools_.count(pool)) renderer_.DiscardPool(static_cast<draw::Pool*>(static_cast<engine::CGxPool*>(pool)->m_apiSpecific));
+    }
+
+    void Front::PoolWritten(void* pool, uint32_t offset, uint32_t size)
+    {
+        if (pools_.count(pool))
+            renderer_.PoolWritten(static_cast<draw::Pool*>(static_cast<engine::CGxPool*>(pool)->m_apiSpecific), offset, size);
+    }
+
+    bool Front::TexCreate(void* tex, uint32_t width, uint32_t height, uint32_t levels)
     {
         engine::CGxTex* t = static_cast<engine::CGxTex*>(tex);
-        if (textures_.count(tex)) return true;
-        t->m_apiSpecificData = new TexRecord{t->m_width, t->m_height, t->m_format};
-        textures_.insert(tex);
+        if (!renderer_.Ready()) return false;
+        TexRecord* record = nullptr;
+        if (textures_.count(tex))
+        {
+            record = static_cast<TexRecord*>(t->m_apiSpecificData);
+            if (record->texture) return true;
+        }
+        draw::TextureDesc desc;
+        desc.format        = t->m_format;
+        desc.width         = width;
+        desc.height        = height;
+        desc.levels        = levels;
+        desc.cube          = t->m_target == 1; // GxTex_CubeMap
+        desc.target        = t->m_flags.m_renderTarget != 0;
+        desc.generate_mips = t->m_flags.m_generateMipMaps != 0;
+        draw::Texture* made = renderer_.CreateTexture(desc);
+        if (!made) return false;
+        if (!record)
+        {
+            record               = new TexRecord();
+            t->m_apiSpecificData = record;
+            textures_.insert(tex);
+        }
+        record->texture = made;
         return true;
     }
 
     void Front::TexDestroy(void* tex)
     {
         if (!textures_.erase(tex)) return;
-        engine::CGxTex* t = static_cast<engine::CGxTex*>(tex);
-        delete static_cast<TexRecord*>(t->m_apiSpecificData);
+        engine::CGxTex* t      = static_cast<engine::CGxTex*>(tex);
+        TexRecord*      record = static_cast<TexRecord*>(t->m_apiSpecificData);
+        renderer_.DestroyTexture(record->texture);
+        delete record;
         t->m_apiSpecificData = nullptr;
+    }
+
+    char* Front::TexLock(void* tex, uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t& pitch)
+    {
+        if (!textures_.count(tex)) return nullptr;
+        TexRecord* record = static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData);
+        return reinterpret_cast<char*>(renderer_.LockTexture(record->texture, face, level, x, y, width, height, pitch));
+    }
+
+    void Front::TexUnlock(void* tex)
+    {
+        if (!textures_.count(tex)) return;
+        renderer_.UnlockTexture(static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData)->texture);
+    }
+
+    bool Front::ShaderCreate(void* shader, bool vertex, const char* name)
+    {
+        uint8_t program = 0;
+        if (!shader || !draw::ProgramByName(vertex, name, program)) return false;
+        programs_[vertex ? 1 : 0][shader] = program;
+        return true;
+    }
+
+    void Front::ShaderDestroy(void* shader)
+    {
+        programs_[0].erase(shader);
+        programs_[1].erase(shader);
+    }
+
+    void Front::ShaderConstants(int32_t target, uint32_t first, uint32_t rows, const float* values)
+    {
+        if (!values || first >= 256) return;
+        rows = std::min(rows, 256 - first);
+        std::memcpy((target == 0 ? vertex_constants_ : pixel_constants_) + first * 4, values, rows * 4 * sizeof(float));
     }
 
     void Front::WaitIdle()
@@ -493,10 +613,14 @@ namespace wxl::vk::gxfront
             return;
         }
         const present::Display::Stats& s = display_.Counters();
-        std::snprintf(out, size, "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %llu draws not drawn yet, %llu losses%s",
-                      context_.Chosen().name, static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.presented),
-                      static_cast<unsigned long long>(s.dropped), static_cast<unsigned long long>(s.rebuilds),
-                      static_cast<unsigned long long>(stats_.draws), static_cast<unsigned long long>(stats_.losses),
-                      context_.Lost() ? ", the device is lost" : "");
+        const draw::Renderer::Stats&   r = renderer_.Counters();
+        auto n = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+        std::snprintf(out, size,
+                      "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %llu draws (%llu drawn; left out: "
+                      "%llu into targets, %llu in the world's pass, %llu 3D, %llu client programs, %llu not ready), %llu pipelines, "
+                      "%llu pass breaks, %llu textures, %llu losses%s",
+                      context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), n(stats_.draws), n(r.draws),
+                      n(stats_.left_out[1]), n(stats_.left_out[2]), n(stats_.left_out[3]), n(stats_.left_out[4]), n(stats_.left_out[5]),
+                      n(r.pipelines), n(r.pass_breaks), n(r.textures), n(stats_.losses), context_.Lost() ? ", the device is lost" : "");
     }
 }

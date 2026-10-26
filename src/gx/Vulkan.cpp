@@ -5,10 +5,11 @@
 // (wxl/core/gx_vk.h), the Vulkan device made from WarcraftXL.ini's [gx] section, and on the stock
 // client, which has no Vulkan adapter, the same device made once its own D3D9 device is up.
 //
-// On the recompiled client the device renders: frames are cleared to the engine's colour, Dear
-// ImGui is drawn into them and they are shown through the present pass. The engine's draws are
-// accepted and counted, not drawn yet. The stock client's device is made, checked and released:
-// it keeps rendering through D3D9.
+// On the recompiled client the device renders: frames are cleared to the engine's colour, the
+// engine's interface is drawn into them (its textures, pools and programs on the device), Dear
+// ImGui over it, and they are shown through the present pass. The world is not drawn yet: its
+// draws are counted and left out (gxfront/Engine.hpp says which). The stock client's device is
+// made, checked and released: it keeps rendering through D3D9.
 //
 // The runtime's part around the device lives here: the log, the events a device's resources going
 // raises (SwapchainLost; SwapchainRestored comes from the engine's own NotifyOnDeviceRestored), how
@@ -55,6 +56,7 @@ namespace
 
     vk::gxfront::Front*  g_front   = nullptr;
     bool                 g_tried   = false; ///< a device was asked for in this launch
+    bool                 g_world   = false; ///< inside CGWorldFrame::RenderWorld
     bool                 g_renders = false; ///< the client renders through it (the recompiled client)
     std::deque<uint64_t> g_losses;          ///< when the last losses came, in milliseconds
 
@@ -253,8 +255,8 @@ namespace
         g_renders = true;
         g_losses.clear();
         const wxl::core::settings::Settings& s = wxl::core::session::CurrentSettings();
-        WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling). The engine's draws are "
-                        "not drawn at this step: the screen shows its clear colour, Dear ImGui and the pointer",
+        WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling). At this step it draws the "
+                        "interface; the world's draws are left out and counted",
                   s.gx_frames, s.gx_nearest ? "nearest" : "bilinear");
         return WXL_OK;
     }
@@ -312,9 +314,9 @@ namespace
         if (Mine(device)) g_front->Clear(mask, argb, x, y, width, height);
     }
 
-    void WXL_CALL DrawRow(void* device, const void* batch, int32_t count)
+    void WXL_CALL DrawRow(void* device, const wxl_gx_batch* batch, int32_t count)
     {
-        if (Mine(device)) g_front->Draw(batch, count);
+        if (Mine(device)) g_front->Draw(batch, count, g_world);
     }
 
     int32_t WXL_CALL ScenePresentRow(void* device)
@@ -389,7 +391,10 @@ namespace
         if (Mine(device) && pool) g_front->PoolDestroy(pool);
     }
 
-    int32_t WXL_CALL TexCreateRow(void* device, void* tex) { return Mine(device) && tex && g_front->TexCreate(tex) ? 1 : 0; }
+    int32_t WXL_CALL TexCreateRow(void* device, void* tex, uint32_t width, uint32_t height, uint32_t levels)
+    {
+        return Mine(device) && tex && g_front->TexCreate(tex, width, height, levels) ? 1 : 0;
+    }
 
     void WXL_CALL TexDestroyRow(void* device, void* tex)
     {
@@ -408,6 +413,45 @@ namespace
         if (!out || !out_size) return;
         if (g_front && g_front->Owner() == device) g_front->Describe(out, out_size);
         else std::snprintf(out, out_size, "Vulkan: no device");
+    }
+
+    void WXL_CALL ShaderConstantsRow(void* device, int32_t target, uint32_t first, uint32_t rows, const float* values)
+    {
+        if (Mine(device)) g_front->ShaderConstants(target, first, rows, values);
+    }
+
+    int32_t WXL_CALL ShaderCreateRow(void* device, void* shader, int32_t vertex, const char* name)
+    {
+        return Mine(device) && g_front->ShaderCreate(shader, vertex != 0, name) ? 1 : 0;
+    }
+
+    void WXL_CALL ShaderDestroyRow(void* device, void* shader)
+    {
+        if (Mine(device)) g_front->ShaderDestroy(shader);
+    }
+
+    char* WXL_CALL TexLockRow(void* device, void* tex, uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t width,
+                              uint32_t height, uint32_t* pitch)
+    {
+        uint32_t stride = 0;
+        char*    bytes  = Mine(device) && tex ? g_front->TexLock(tex, face, level, x, y, width, height, stride) : nullptr;
+        if (pitch) *pitch = stride;
+        return bytes;
+    }
+
+    void WXL_CALL TexUnlockRow(void* device, void* tex)
+    {
+        if (Mine(device) && tex) g_front->TexUnlock(tex);
+    }
+
+    void WXL_CALL PoolDiscardRow(void* device, void* pool)
+    {
+        if (Mine(device) && pool) g_front->PoolDiscard(pool);
+    }
+
+    void WXL_CALL PoolWrittenRow(void* device, void* pool, uint32_t offset, uint32_t size)
+    {
+        if (Mine(device) && pool) g_front->PoolWritten(pool, offset, size);
     }
 
     const wxl_gx_vk_backend kBackend = {
@@ -435,6 +479,13 @@ namespace
         TexDestroyRow,
         SimulateLossRow,
         DescribeRow,
+        ShaderConstantsRow,
+        ShaderCreateRow,
+        ShaderDestroyRow,
+        TexLockRow,
+        TexUnlockRow,
+        PoolDiscardRow,
+        PoolWrittenRow,
     };
 }
 
@@ -459,6 +510,10 @@ namespace wxl::core::gx
     }
 
     bool VulkanActive() { return g_front && g_renders; }
+
+    void WorldPass(bool inside) { g_world = inside; }
+
+    bool InWorldPass() { return g_world; }
 
     bool VulkanOpenFrame(VulkanFrame& out)
     {

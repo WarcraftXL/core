@@ -235,8 +235,11 @@ namespace wxl::vk::frame
                 allocate.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
                 allocate.commandPool        = slot.pool;
                 allocate.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-                allocate.commandBufferCount = 1;
-                result                      = vkAllocateCommandBuffers(c.Device(), &allocate, &slot.buffer);
+                allocate.commandBufferCount = 2;
+                VkCommandBuffer buffers[2]  = {};
+                result                      = vkAllocateCommandBuffers(c.Device(), &allocate, buffers);
+                slot.upload                 = buffers[0];
+                slot.buffer                 = buffers[1];
             }
             if (result == VK_SUCCESS)
             {
@@ -296,7 +299,8 @@ namespace wxl::vk::frame
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (!c.Check(vkBeginCommandBuffer(slot.buffer, &begin), "vkBeginCommandBuffer"))
+        if (!c.Check(vkBeginCommandBuffer(slot.upload, &begin), "vkBeginCommandBuffer") ||
+            !c.Check(vkBeginCommandBuffer(slot.buffer, &begin), "vkBeginCommandBuffer"))
         {
             wait = c.Lost() ? Wait::Lost : Wait::Failed;
             return VK_NULL_HANDLE;
@@ -323,8 +327,10 @@ namespace wxl::vk::frame
         open_                 = false;
         Slot&            slot = slots_[index_];
         device::Context& c    = timeline_->Context();
-        if (!c.Check(vkEndCommandBuffer(slot.buffer), "vkEndCommandBuffer")) return 0;
-        const uint64_t serial = timeline_->Submit(&slot.buffer, 1, waits, wait_count, signals, signal_count);
+        if (!c.Check(vkEndCommandBuffer(slot.upload), "vkEndCommandBuffer") || !c.Check(vkEndCommandBuffer(slot.buffer), "vkEndCommandBuffer"))
+            return 0;
+        const VkCommandBuffer buffers[2] = {slot.upload, slot.buffer};
+        const uint64_t        serial     = timeline_->Submit(buffers, 2, waits, wait_count, signals, signal_count);
         if (serial) slot.serial = serial;
         return serial;
     }
@@ -333,6 +339,7 @@ namespace wxl::vk::frame
     {
         if (!open_) return;
         open_ = false;
+        vkEndCommandBuffer(slots_[index_].upload);
         vkEndCommandBuffer(slots_[index_].buffer);
     }
 }

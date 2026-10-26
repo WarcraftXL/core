@@ -6,23 +6,26 @@
 // siblings) and nothing else of the engine; the engine's own logic around each call stays with
 // the caller (the recompiled client's CGxDeviceVk), as it does in the D3D9 device.
 //
-// What it does at this step: the device, the window's surface and swapchain, the scene cleared to
-// the engine's colour and shown through the present pass (stretched, the gamma ramp in
-// fullscreen, the software cursor), vsync and its emulated intervals, the hardware cursor, the
-// loss and its recovery, the engine's capabilities, and memory for the engine's vertex and index
-// pools. The engine's draws are accepted and counted, not drawn yet; its textures get a record and
-// no image yet.
+// What it does: the device, the window's surface and swapchain, the scene cleared to the engine's
+// colour and shown through the present pass (stretched, the gamma ramp in fullscreen, the software
+// cursor), vsync and its emulated intervals, the hardware cursor, the loss and its recovery, the
+// engine's capabilities; the engine's pools and textures on the device, its interface programs, and
+// its draws read out of its state (Engine.hpp) and recorded by the renderer (draw/). At this step
+// the interface is drawn; the draws Engine.hpp leaves out are counted by reason.
 //
 // Windows only (the window, the cursor), built into WarcraftXL.dll. Main thread only.
 
 #pragma once
 
 #include "gx/vk/device/Device.hpp"
+#include "gx/vk/draw/Draw.hpp"
 #include "gx/vk/frame/Frame.hpp"
+#include "gx/vk/gxfront/Engine.hpp"
 #include "gx/vk/present/Display.hpp"
 #include "gx/vk/resources/Resources.hpp"
 
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace wxl::vk::gxfront
@@ -40,7 +43,8 @@ namespace wxl::vk::gxfront
     public:
         struct Stats
         {
-            uint64_t draws = 0;  ///< the engine's draws, accepted and not drawn
+            uint64_t draws = 0;     ///< the engine's draws
+            uint64_t left_out[6] = {}; ///< by Verdict: [0] the ones drawn, the others left out
             uint64_t clears = 0;
             uint64_t losses = 0;
         };
@@ -75,7 +79,8 @@ namespace wxl::vk::gxfront
         bool BeginScene();
         /// Clears the scene inside (x, y, width, height), the colour 0xAARRGGBB when mask has 1, the depth when 2.
         void Clear(uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height);
-        void Draw(const void* batch, int32_t count);
+        /// A draw of the engine; @p world: inside the world's pass.
+        void Draw(const wxl_gx_batch* batch, int32_t count, bool world);
         /// Shows the open frame; false when the device is lost.
         bool Present();
 
@@ -90,8 +95,15 @@ namespace wxl::vk::gxfront
         char* PoolMemory(void* pool);
         void  PoolResize(void* pool);
         void  PoolDestroy(void* pool);
-        bool  TexCreate(void* tex);
+        void  PoolDiscard(void* pool);
+        void  PoolWritten(void* pool, uint32_t offset, uint32_t size);
+        bool  TexCreate(void* tex, uint32_t width, uint32_t height, uint32_t levels);
         void  TexDestroy(void* tex);
+        char* TexLock(void* tex, uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t& pitch);
+        void  TexUnlock(void* tex);
+        bool  ShaderCreate(void* shader, bool vertex, const char* name);
+        void  ShaderDestroy(void* shader);
+        void  ShaderConstants(int32_t target, uint32_t first, uint32_t rows, const float* values);
 
         /// Waits (bounded) for the frames submitted; a GPU that does not finish them is marked lost.
         void WaitIdle();
@@ -104,12 +116,33 @@ namespace wxl::vk::gxfront
         resources::Allocator& Allocator() { return allocator_; }
         present::Display&     Screen() { return display_; }
         frame::Timeline&      Timeline() { return timeline_; }
+        draw::Renderer&       Renderer() { return renderer_; }
         /// Grows each time the device is made again: what was made on the previous one is gone.
         uint64_t              Generation() const { return generation_; }
         const Stats&          Counters() const { return stats_; }
         void*                 Window() const { return window_; }
 
     private:
+        /// What the engine's pointers name on the live client.
+        class Live final : public Resolver
+        {
+        public:
+            explicit Live(Front& front) : front_(front) {}
+            const engine::CGxBuf* Buffer(const void* buf) override { return static_cast<const engine::CGxBuf*>(buf); }
+            draw::Pool*           Pool(const void* pool) override;
+            draw::Texture*        Texture(const void* texture, const engine::CGxTex*& fields) override;
+            int                   Program(const void* shader, bool vertex) override;
+
+        private:
+            Front& front_;
+        };
+
+        /// What a CGxTex's m_apiSpecificData points at: the texture, null while the device is made again.
+        struct TexRecord
+        {
+            draw::Texture* texture = nullptr;
+        };
+
         bool MakeDevice(char* why, uint32_t why_size);
         void ReleaseDevice();
         void ReadRefresh();
@@ -124,6 +157,7 @@ namespace wxl::vk::gxfront
         resources::Allocator  allocator_;
         frame::Timeline       timeline_;
         present::Display      display_;
+        draw::Renderer        renderer_;
         uint64_t              generation_ = 0;
         Stats                 stats_;
 
@@ -131,7 +165,10 @@ namespace wxl::vk::gxfront
         void*    cursor_ = nullptr;       ///< the hardware cursor (HCURSOR) made from the engine's pixels
         bool     cursor_pixels_ = false;  ///< the software cursor's pixels were handed to the present pass
 
-        std::unordered_set<void*> pools_;    ///< pools whose m_apiSpecific is a block of ours
-        std::unordered_set<void*> textures_; ///< textures whose m_apiSpecificData is a record of ours
+        std::unordered_set<void*> pools_;    ///< pools whose m_apiSpecific is a draw::Pool of ours
+        std::unordered_set<void*> textures_; ///< textures whose m_apiSpecificData is a TexRecord of ours
+        std::unordered_map<const void*, uint8_t> programs_[2]; ///< [pixel, vertex]: the client's shaders the renderer draws
+        float vertex_constants_[256 * 4] = {};
+        float pixel_constants_[256 * 4] = {};
     };
 }

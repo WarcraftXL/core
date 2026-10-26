@@ -44,6 +44,18 @@ namespace wxl::vk::present
         ~TimestampSink() = default;
     };
 
+    /// What records into a frame besides the display: told when a frame's command buffers begin and
+    /// before they are submitted, with the frame's upload command buffer (draw::Renderer).
+    class FrameHook
+    {
+    public:
+        virtual void FrameBegun(uint32_t slot, VkCommandBuffer upload) = 0;
+        virtual void FrameEnding(VkCommandBuffer upload)               = 0;
+
+    protected:
+        ~FrameHook() = default;
+    };
+
     enum class FrameEnd
     {
         Presented, ///< shown
@@ -118,8 +130,18 @@ namespace wxl::vk::present
         bool BeginFrame(frame::Wait& wait);
         bool InFrame() const { return frames_.Open(); }
         VkCommandBuffer Cmd() const { return frames_.Current(); }
+        /// The open frame's upload command buffer (submitted before Cmd()); null outside a frame.
+        VkCommandBuffer Upload() const { return frames_.Upload(); }
         uint32_t Slot() const { return frames_.Index(); }
         uint32_t FrameCount() const { return frames_.Count(); }
+
+        /// The frame's hook (null for none).
+        void SetFrameHook(FrameHook* hook) { hook_ = hook; }
+
+        /// The number of the open frame (or of the last one): 1 for the first frame begun, then one more each.
+        uint64_t FrameNumber() const { return stats_.frames; }
+        /// The last frame number whose submission has completed on the GPU (or was never submitted).
+        uint64_t FramesCompleted();
 
         /**
          * @brief Clears the scene's colour (when @p color, to @p rgba) and its depth (when @p depth,
@@ -130,7 +152,15 @@ namespace wxl::vk::present
         /// A rendering into the scene's colour alone (its contents kept), for an overlay; ended by
         /// EndRendering or by whatever comes next. Null outside a frame.
         VkCommandBuffer BeginColorRendering();
+        /// A rendering into the scene's colour and depth (their contents kept), the engine's draws;
+        /// the one already open when it is. Null outside a frame.
+        VkCommandBuffer BeginSceneRendering();
         void            EndRendering();
+        /// Whether a rendering is open in the frame's command buffer.
+        bool            InRendering() const { return rendering_ != Rendering::None; }
+        /// Grows at each rendering begun: what a recorder bound inside the previous one (its
+        /// pipeline, its descriptor set, its dynamic states) is to be set again.
+        uint64_t        RenderingEpoch() const { return epoch_; }
 
         /// Runs @p release once the open frame has completed (at once when there is none).
         void AfterFrame(std::function<void()> release);
@@ -203,6 +233,15 @@ namespace wxl::vk::present
         resources::Buffer readback_;
 
         CursorDraw cursor_;
+        FrameHook* hook_ = nullptr;
+        uint64_t   epoch_ = 0;
+        struct Submitted
+        {
+            uint64_t frame;
+            uint64_t serial;
+        };
+        std::vector<Submitted> submitted_;
+        uint64_t   completed_frame_ = 0;
         std::vector<std::function<void()>> after_;
         uint64_t   last_serial_ = 0;
         Stats      stats_;

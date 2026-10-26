@@ -27,6 +27,8 @@ namespace wxl::vk::device
     X(descriptorBindingPartiallyBound, "1.2", true, v12)                                            \
     X(shaderSampledImageArrayNonUniformIndexing, "1.2", true, v12)                                  \
     X(descriptorBindingSampledImageUpdateAfterBind, "1.2", true, v12)                               \
+    X(descriptorBindingUpdateUnusedWhilePending, "1.2", true, v12)                                  \
+    X(shaderSampledImageArrayDynamicIndexing, "1.0", true, core10)                                  \
     X(dynamicRendering, "1.3", true, v13)                                                           \
     X(synchronization2, "1.3", true, v13)                                                           \
     X(samplerAnisotropy, "1.0", false, core10)                                                      \

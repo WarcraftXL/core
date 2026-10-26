@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 
+#include "wxl/core/gx_state.h"
 #include "wxl/core/init.h"
 
 #ifdef __cplusplus
@@ -94,8 +95,15 @@ typedef struct wxl_gx_vk_backend
     /// when @p mask has 1, its depth when it has 2.
     void(WXL_CALL* scene_clear)(void* device, uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height);
 
-    /// A draw of the engine (CGxDevice::Draw): accepted; not drawn by this runtime yet.
-    void(WXL_CALL* draw)(void* device, const void* batch, int32_t count);
+    /**
+     * @brief A draw of the engine (CGxDevice::Draw, @p batch a CGxBatch, indexed when @p count is
+     *        not 0), its render states synced (IRsSync) and its constants flushed
+     *        (shader_constants): drawn from the device's state as the D3D9 device's IStateSync
+     *        reads it. At this step the interface is drawn; a draw into a texture target, inside
+     *        the world's pass, testing depth, or binding a client program the renderer has none of
+     *        is counted and left out.
+     */
+    void(WXL_CALL* draw)(void* device, const wxl_gx_batch* batch, int32_t count);
 
     /// Shows the open frame: WXL_GX_VK_FRAME_OK, or _LOST when the device was lost.
     int32_t(WXL_CALL* scene_present)(void* device);
@@ -126,8 +134,12 @@ typedef struct wxl_gx_vk_backend
     /// A pool goes: its memory with it.
     void(WXL_CALL* pool_destroy)(void* device, void* pool);
 
-    /// A texture (CGxTex) is made on the device: its m_apiSpecificData set. 1 when made.
-    int32_t(WXL_CALL* tex_create)(void* device, void* tex);
+    /**
+     * @brief A texture (CGxTex) is made on the device, @p width x @p height at its first level
+     *        with @p levels levels (CGxDevice::ITexWHDStartEnd), its format, target and flags read
+     *        from it: its m_apiSpecificData set. 1 when made.
+     */
+    int32_t(WXL_CALL* tex_create)(void* device, void* tex, uint32_t width, uint32_t height, uint32_t levels);
 
     /// A texture goes, or is to be made again: what tex_create made goes, m_apiSpecificData is null.
     void(WXL_CALL* tex_destroy)(void* device, void* tex);
@@ -137,6 +149,38 @@ typedef struct wxl_gx_vk_backend
 
     /// One line on the device for the client's crash report.
     void(WXL_CALL* describe)(void* device, char* out, uint32_t out_size);
+
+    /// The rows @p first.. of the vertex (@p target 0) or pixel (1) program registers changed
+    /// (CGxDevice::s_shadowConstants' dirty range, as the D3D9 device's IShaderConstantsFlush sends it).
+    void(WXL_CALL* shader_constants)(void* device, int32_t target, uint32_t first, uint32_t rows, const float* values);
+
+    /**
+     * @brief A client shader (CGxShader) is made on the device, by the name of its record ("UI:0",
+     *        "Desaturate"): 1 when the renderer has a program for it (the client marks it valid), 0
+     *        otherwise (it stays invalid, as one D3D9 refuses).
+     */
+    int32_t(WXL_CALL* shader_create)(void* device, void* shader, int32_t vertex, const char* name);
+
+    /// A client shader goes.
+    void(WXL_CALL* shader_destroy)(void* device, void* shader);
+
+    /**
+     * @brief Where the texels of @p width x @p height at (@p x, @p y) of @p level of @p face of a
+     *        texture are written, in the layout of its format (rows of 4x4 blocks when compressed,
+     *        the rectangle on block edges), @p pitch bytes per row; null when they cannot be. One
+     *        lock at a time per texture, closed by tex_unlock.
+     */
+    char*(WXL_CALL* tex_lock)(void* device, void* tex, uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t width,
+                              uint32_t height, uint32_t* pitch);
+
+    /// What was written since tex_lock goes to the texture.
+    void(WXL_CALL* tex_unlock)(void* device, void* tex);
+
+    /// A stream pool starts again from 0 (its DISCARD): what the frame drew from it stays.
+    void(WXL_CALL* pool_discard)(void* device, void* pool);
+
+    /// @p size bytes at @p offset of a pool's memory were written (its buffer unlocked).
+    void(WXL_CALL* pool_written)(void* device, void* pool, uint32_t offset, uint32_t size);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

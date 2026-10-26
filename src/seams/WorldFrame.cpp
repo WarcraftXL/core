@@ -10,6 +10,7 @@
 #include "objects/Objects.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
+#include "gx/Vulkan.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
 
@@ -20,6 +21,8 @@ namespace wxl::seam::WorldFrame::RenderWorld
 {
     void WXL_CALL Before(void* param)
     {
+        // The world's draws begin: the Vulkan device leaves them out until it draws the world.
+        wxl::core::gx::WorldPass(true);
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 
@@ -33,6 +36,7 @@ namespace wxl::seam::WorldFrame::RenderWorld
 
     void WXL_CALL After(void* param)
     {
+        wxl::core::gx::WorldPass(false);
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 

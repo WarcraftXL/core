@@ -2,8 +2,8 @@
 // Copyright (c) 2026 WarcraftXL
 //
 // The renderer's memory: VMA (deps/vma) on the device, buffers and images made through it, and
-// what the driver says of its budget. Pools, rings, textures and the bindless table build on this
-// (step V2).
+// what the driver says of its budget. The rings (Ring.hpp) and the bindless table (Bindless.hpp)
+// build on this, and the engine's pools and textures on them (src/gx/vk/draw/).
 
 #pragma once
 
@@ -33,6 +33,7 @@ namespace wxl::vk::resources
         VmaAllocation_T* allocation = nullptr;
         VkDeviceSize     size = 0;
         void*            mapped = nullptr; ///< for Upload and Readback, for the buffer's life
+        VkDeviceAddress  address = 0;      ///< when made with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
     };
 
     struct Image
@@ -43,6 +44,21 @@ namespace wxl::vk::resources
         VkFormat         format = VK_FORMAT_UNDEFINED;
         uint32_t         width = 0;
         uint32_t         height = 0;
+        uint32_t         levels = 1;
+        uint32_t         layers = 1;
+    };
+
+    /// What an image is made with beyond its size and format.
+    struct ImageInfo
+    {
+        uint32_t           width = 1;
+        uint32_t           height = 1;
+        uint32_t           levels = 1;
+        bool               cube = false; ///< six layers, viewed as a cube
+        VkFormat           format = VK_FORMAT_UNDEFINED;
+        VkImageUsageFlags  usage = 0;
+        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        VkComponentMapping swizzle = {}; ///< the view's (identity by default)
     };
 
     struct Budget
@@ -71,11 +87,21 @@ namespace wxl::vk::resources
                          VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
         void Destroy(Image& image);
 
+        /// An image of @p info, its levels and layers, and its view (a cube's is a cube view).
+        bool CreateImage(const ImageInfo& info, Image& out);
+
+        /// A view of one layer of @p image as a 2D image (a cube's face, where a 2D view is wanted).
+        VkImageView CreateLayerView(const Image& image, uint32_t layer, const VkComponentMapping& swizzle);
+
         /// The number of allocations alive: what a test reads to see nothing leaked.
         uint32_t Allocations() const;
 
         /// Makes the CPU's reads of a Readback buffer see what the GPU wrote.
         void Invalidate(const Buffer& buffer);
+
+        /// Makes what the CPU wrote into @p size bytes at @p offset of an Upload buffer visible to the
+        /// GPU, where its memory is not coherent (nothing to do where it is).
+        void Flush(const Buffer& buffer, VkDeviceSize offset, VkDeviceSize size);
 
         Budget CurrentBudget() const;
 

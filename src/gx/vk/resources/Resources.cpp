@@ -75,6 +75,13 @@ namespace wxl::vk::resources
         }
         out.size   = size;
         out.mapped = allocated.pMappedData;
+        if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+        {
+            VkBufferDeviceAddressInfo address{};
+            address.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            address.buffer = out.buffer;
+            out.address    = vkGetBufferDeviceAddress(device_, &address);
+        }
         return true;
     }
 
@@ -125,6 +132,72 @@ namespace wxl::vk::resources
         out.width  = width;
         out.height = height;
         return true;
+    }
+
+    bool Allocator::CreateImage(const ImageInfo& info, Image& out)
+    {
+        out = Image{};
+        VkImageCreateInfo create{};
+        create.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        create.flags         = info.cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+        create.imageType     = VK_IMAGE_TYPE_2D;
+        create.format        = info.format;
+        create.extent        = {info.width, info.height, 1};
+        create.mipLevels     = info.levels ? info.levels : 1;
+        create.arrayLayers   = info.cube ? 6 : 1;
+        create.samples       = VK_SAMPLE_COUNT_1_BIT;
+        create.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        create.usage         = info.usage;
+        create.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+        create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo memory{};
+        memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+        VkResult result = vmaCreateImage(vma_, &create, &memory, &out.image, &out.allocation, nullptr);
+        if (result == VK_SUCCESS)
+        {
+            VkImageViewCreateInfo view{};
+            view.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view.image            = out.image;
+            view.viewType         = info.cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
+            view.format           = info.format;
+            view.components       = info.swizzle;
+            view.subresourceRange = {info.aspect, 0, create.mipLevels, 0, create.arrayLayers};
+            result                = vkCreateImageView(device_, &view, nullptr, &out.view);
+        }
+        if (result != VK_SUCCESS)
+        {
+            Log(LogLevel::Warn, "a %ux%u image (%u levels%s) could not be made: %s", info.width, info.height, create.mipLevels,
+                info.cube ? ", cube" : "", ResultName(result));
+            Destroy(out);
+            return false;
+        }
+        out.format = info.format;
+        out.width  = info.width;
+        out.height = info.height;
+        out.levels = create.mipLevels;
+        out.layers = create.arrayLayers;
+        return true;
+    }
+
+    VkImageView Allocator::CreateLayerView(const Image& image, uint32_t layer, const VkComponentMapping& swizzle)
+    {
+        VkImageViewCreateInfo view{};
+        view.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view.image            = image.image;
+        view.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+        view.format           = image.format;
+        view.components       = swizzle;
+        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, image.levels, layer, 1};
+        VkImageView made      = VK_NULL_HANDLE;
+        if (vkCreateImageView(device_, &view, nullptr, &made) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return made;
+    }
+
+    void Allocator::Flush(const Buffer& buffer, VkDeviceSize offset, VkDeviceSize size)
+    {
+        if (buffer.allocation && size) vmaFlushAllocation(vma_, buffer.allocation, offset, size);
     }
 
     void Allocator::Destroy(Image& image)

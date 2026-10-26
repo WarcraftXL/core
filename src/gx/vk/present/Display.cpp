@@ -121,6 +121,7 @@ namespace wxl::vk::present
         if (context_->Ready())
         {
             if (frames_.Open()) frames_.Abandon();
+            submitted_.clear();
             const frame::Wait wait = timeline_->Last() ? timeline_->WaitFor(timeline_->Last()) : frame::Wait::Done;
             if (wait != frame::Wait::Done && !context_->Lost())
                 context_->MarkLost("the last frame did not complete before the display was released");
@@ -288,6 +289,8 @@ namespace wxl::vk::present
         touched_   = false;
         rendering_ = Rendering::None;
         ++stats_.frames;
+        ++epoch_;
+        if (hook_) hook_->FrameBegun(frames_.Index(), frames_.Upload());
 
         if (sink_ && queries_)
         {
@@ -393,6 +396,7 @@ namespace wxl::vk::present
         }
         vkCmdBeginRendering(frames_.Current(), &info);
         rendering_ = kind;
+        ++epoch_;
     }
 
     void Display::EndRendering()
@@ -443,6 +447,28 @@ namespace wxl::vk::present
         return frames_.Current();
     }
 
+    VkCommandBuffer Display::BeginSceneRendering()
+    {
+        if (!frames_.Open() || !EnsureScene()) return VK_NULL_HANDLE;
+        Touch();
+        Begin(Rendering::Full);
+        return frames_.Current();
+    }
+
+    uint64_t Display::FramesCompleted()
+    {
+        if (!timeline_) return completed_frame_;
+        const uint64_t done = context_ && context_->Lost() ? UINT64_MAX : timeline_->Completed();
+        size_t         kept = 0;
+        for (const Submitted& s : submitted_)
+        {
+            if (s.serial <= done) completed_frame_ = std::max(completed_frame_, s.frame);
+            else submitted_[kept++] = s;
+        }
+        submitted_.resize(kept);
+        return completed_frame_;
+    }
+
     void Display::AfterFrame(std::function<void()> release)
     {
         if (!release) return;
@@ -461,6 +487,7 @@ namespace wxl::vk::present
         const uint64_t serial = frames_.Submit(waits, wait_count, signals, signal_count);
         // What this frame named goes once it completes; with no submission, once the last one has.
         const uint64_t at = serial ? serial : timeline_->Last();
+        submitted_.push_back(Submitted{stats_.frames, at});
         for (auto& release : after_) graveyard_.Bury(at, std::move(release));
         after_.clear();
         if (serial) last_serial_ = serial;
@@ -498,6 +525,7 @@ namespace wxl::vk::present
         if (!frames_.Open()) return context_ && context_->Lost() ? FrameEnd::Lost : FrameEnd::Dropped;
         const VkCommandBuffer cmd = frames_.Current();
         EndRendering();
+        if (hook_) hook_->FrameEnding(frames_.Upload());
 
         // A frame that never touched the scene still shows something defined: black.
         if (EnsureScene() && !touched_)
@@ -563,6 +591,7 @@ namespace wxl::vk::present
             if (acquire == Outcome::Lost)
             {
                 frames_.Abandon();
+                submitted_.push_back(Submitted{stats_.frames, timeline_->Last()});
                 for (auto& release : after_) graveyard_.Bury(timeline_->Last(), std::move(release));
                 after_.clear();
                 return FrameEnd::Lost;
