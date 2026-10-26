@@ -173,10 +173,11 @@ cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test
    `python3 tools/read_logs.py <game folder>` summarises the last launches.
 6. Optionally, Vulkan: `[gx] api = vulkan` in `WarcraftXL.ini` makes the Vulkan device beside the
    client's own D3D9 one once it is up, and logs which GPU it took and what it offers, or why the
-   machine has none (no loader, a driver below Vulkan 1.3, a missing feature). The runtime does not
-   draw through Vulkan yet: it releases the device and the client renders through D3D9 as before.
-   `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index or a
-   part of the name>` picks the device on a machine with several.
+   machine has none (no loader, a driver below Vulkan 1.3, a missing feature). The stock client is
+   not drawn through Vulkan yet: the device is released and the client renders through D3D9 as
+   before. `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
+   or a part of the name>` picks the device on a machine with several; `frames_in_flight = 1..3`
+   (2) and `present_filter = linear|nearest` (linear) serve the recompiled client.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own
@@ -196,9 +197,13 @@ executable, with `bin/x64/` binaries.
 Its Vulkan device, `CGxDeviceVk`, is an adapter over this runtime's renderer, reached through the
 table of [`include/wxl/core/gx_vk.h`](include/wxl/core/gx_vk.h). It is chosen by `gxApi Vulkan`,
 `-vulkan`, or `WarcraftXL.ini`'s `[gx] api = vulkan`, which also takes a D3D9Ex request
-(`[gx] api = d3d9` takes any Vulkan request back to D3D9). The device is made and logged, then
-released, and the client creates D3D9 in its place: the runtime does not draw through Vulkan yet.
-D3D9 stays the default.
+(`[gx] api = d3d9` takes any Vulkan request back to D3D9). The client then renders through Vulkan:
+its window, the swapchain, the frame's clear, Dear ImGui and the pointer; the engine's own draws are
+not drawn yet, so the screen shows the clear colour, the mods' ImGui windows and the pointer. A
+machine or a window Vulkan cannot serve keeps D3D9, with one line in the log. D3D9 stays the
+default. The console commands `gxVkSimulateLoss` (the device's loss and return, under Vulkan) and
+`gxCapture` (the next frame of the D3D9 device recorded to `WarcraftXL\captures\` in the format of
+[`include/wxl/core/gx_capture.h`](include/wxl/core/gx_capture.h)) are for testing the renderer.
 
 ## 🔌 What this runtime publishes
 
@@ -477,8 +482,10 @@ src/seams/                       the seam bodies, one file per domain (both); th
 src/objects/                     wxl.object over the binding
 src/services/                    wxl.script, wxl.storage, wxl.data (both); wxl.hook, wxl.hook.raw, wxl.patch (x86)
 src/profile/                     the Tracy profiler and wxl.profile (both)
-src/gx/vk/                       the Vulkan renderer, wxl::vk: device, resources, frame, present; no
-                                 engine, no runtime, also built natively for Linux (both)
+src/gx/vk/                       the Vulkan renderer, wxl::vk: device, resources, shaders, frame, present,
+                                 imgui; no engine, no runtime, also built natively for Linux (both)
+src/gx/vk/gxfront/               the Vulkan device behind one engine CGxDevice, through the engine layouts
+src/gx/capture/                  the reader of a frame capture (include/wxl/core/gx_capture.h)
 src/gx/                          the renderer in the runtime: [gx] api, the table of include/wxl/core/gx_vk.h
                                  for the recompiled client's CGxDeviceVk, the device on the stock client
 src/points/                      wxl.point: handlers and dispatch (both), the detours (x86), the client's bytes (x64)

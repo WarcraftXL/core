@@ -390,28 +390,48 @@ x64. Its modules are static libraries of `cmake/wxl_vk.cmake`, each seeing only 
 |---|---|
 | `device` | volk (`deps/volk`, the loader found at run time), the instance, the physical device chosen among those that meet the Vulkan 1.3 floor (`device/Floor.hpp`: the features and extensions as two tables, the refusal of a device by the first fact it lacks, the choice by type, version and memory, `[gx] gpu`), the logical device with its graphics queue, its loss |
 | `resources` | VMA (`deps/vma`) over volk's entry points, buffers and images, the driver's budget |
-| `frame` | command buffers, submissions as serials of one timeline semaphore, waits that always end (2 s) |
-| `present` | the window's side: the Win32 surface extensions and which queue family presents; headless elsewhere |
+| `shaders` | a SPIR-V writer over SPIRV-Headers (`shaders/Spirv.hpp`) and the renderer's own shaders made with it at run time (`shaders/Own.cpp`: the present pass's); no shader compiler ships or runs |
+| `frame` | the timeline (submissions as serials of one timeline semaphore, waits that always end, 2 s), a one-shot submitter, the frames in flight (`[gx] frames_in_flight`, 1-3) |
+| `present` | surfaces (Win32's; a headless one for the tests), the swapchain and the rules it is made by (present mode, format, extent, image count, every surface state read as a rebuild or a loss), the present pass (the scene stretched to the image shown, the gamma ramp, the alpha-keyed software cursor), the frame limiter, and `Display`: a frame from its first command to the image shown, the scene (colour and depth) at the engine's size |
+| `imgui` | Dear ImGui's Vulkan backend (the SDK's `deps/imgui/backends/imgui_impl_vulkan`) over the renderer's device, dynamic rendering into the scene, the font atlas uploaded in the frame |
+| `capture` | the reader of a frame capture (`include/wxl/core/gx_capture.h`), which the client records under D3D9 (`gxCapture`) |
 
 None knows the engine, the runtime or the log: they hand their lines to a sink (`gx/vk/Log.hpp`)
-and build natively for Linux in `tests/vk/` from the same rules. The runtime's side is `src/gx/`:
+and build natively for Linux in `tests/vk/` from the same rules. `gxfront` (`src/gx/vk/gxfront/`,
+Windows) is the Vulkan device behind one engine `CGxDevice`: it reads the engine's device through
+the generated engine layouts only (the caps it fills, the gamma ramp, the pointer, the format's
+vsync and window mode, the pools and textures it gives memory and records). The runtime's side is
+`src/gx/`:
 
 - **Which API.** `WarcraftXL.ini`'s `[gx] api` (`settings::GxApi`), applied by `gx::SelectApi`:
   `vulkan` takes a D3D9 or D3D9Ex request to Vulkan, `d3d9` a Vulkan one to D3D9; without the line
   the client's request stands. Numbers are the client's `EGxApi`, Vulkan appended as 6.
-- **The recompiled client.** Its `Gx/CGxDeviceVk` is an adapter whose overrides call through the
-  table of `include/wxl/core/gx_vk.h` (`WarcraftXLGxVulkan`): `select_api` from
-  `ConsoleDeviceInitialize`, after `gxApi` and the command line (`-vulkan`, id 40);
-  `device_create`, which the adapter calls only when the table's `device_layout_hash` is the
-  `CGxDevice` layout of its own engine headers; `device_destroy`. When the Vulkan device is not
-  made, `ConsoleDeviceInitialize` creates D3D9 with the same format.
+- **The recompiled client.** Its `Gx/CGxDeviceVk` keeps the engine's own logic of each device call,
+  as the D3D9 device does (the window and its procedure, the stream pools' offsets, the textures'
+  callbacks, the lost device's return), and calls through the table of
+  `include/wxl/core/gx_vk.h` (`WarcraftXLGxVulkan`) for the Vulkan work: `select_api` from
+  `ConsoleDeviceInitialize`; `device_create` on the window it made, which the adapter calls only
+  when the table's `device_layout_hash` is the `CGxDevice` layout of its own engine headers;
+  `device_set_window` when the format makes the window again; the frame (`scene_begin`,
+  `scene_clear`, `draw`, `scene_present`); the window (`window_size`, `cursor_set`); the pools and
+  textures; `device_restore` after a loss. When the device cannot be made (no Vulkan 1.3 device, a
+  window it cannot present to), `ConsoleDeviceInitialize` creates D3D9 with the same format and the
+  log has one line saying why.
 - **The stock client** has no Vulkan adapter: `ConsoleDevice.Initialize` After makes the device
-  (`gx::DeviceReady`), once per launch, when `[gx] api = vulkan`.
+  (`gx::DeviceReady`), once per launch, when `[gx] api = vulkan`, checks it with a frame and
+  releases it; the client keeps D3D9.
 
-The renderer does not draw yet. Selecting Vulkan makes the device, checks that a submission comes
-back, logs the device (`[gx]` lines: GPU, versions, memory, what it offers beyond the floor) or why
-there is none, releases it and unloads the loader; the client renders through D3D9. Without
-`[gx] api = vulkan` nothing of Vulkan is loaded.
+On the recompiled client the device renders: each frame's scene is cleared as the engine asks,
+Dear ImGui (`wxl.imgui`, `ImGuiFrame`) is drawn into it, and the present pass shows it. The
+engine's draws are accepted and counted, not drawn yet (step V2 on). Fullscreen is a borderless
+window over the monitor, minimised when it loses the focus; a resize rebuilds the swapchain and the
+scene, not the device. `gxVSync` 0 is MAILBOX (else IMMEDIATE), 1 FIFO, 2-4 FIFO and a frame
+limiter in fullscreen. The gamma ramp applies in fullscreen, as D3D9's. A loss (or the console
+command `gxVkSimulateLoss`) goes through the engine's own lost-device path: `m_context` 0, the
+device made again at the next scene, `SwapchainLost` before and the engine's restore callbacks
+(`SwapchainRestored`) after; three losses within a minute close the client with a message. With
+the profiler on, each frame is a GPU zone of a "Vulkan" context. Without `[gx] api = vulkan` (or
+`gxApi Vulkan`) nothing of Vulkan is loaded.
 
 ### The log and the crash report
 
@@ -425,8 +445,8 @@ a tab or a line break, as `\xNN` before the line reaches the sink. `src/runtime/
   `[log]`: `level`, `keep` (earlier launches kept, 30 by default) and `level.<tag>` for one tag's
   own level. `WXL_LOG_LEVEL` wins over the file's `level`. The log's gate is the lowest of all
   levels, which the host's `log_minimum` takes; the file sink then filters by tag. Section
-  `[profile]`: `enabled`, `port`, `listen` (above). Section `[gx]`: `api`, `validation`, `gpu` (the
-  Vulkan renderer, above). A key or value that does not read is warned in
+  `[profile]`: `enabled`, `port`, `listen` (above). Section `[gx]`: `api`, `validation`, `gpu`,
+  `frames_in_flight`, `present_filter` (the Vulkan renderer, above). A key or value that does not read is warned in
   the header with its line number. `session::CurrentSettings` hands the file to `Core::Start`.
 - **Files.** `log::OpenSession` renames the previous `WarcraftXL.log` after its first line's
   `launch YYYY-MM-DD HH:MM:SS` (or its last write) to `WarcraftXL-<time>.log` and prunes the oldest
@@ -532,7 +552,7 @@ folder, source or transform is registered: the gate's test is two loads.
 | `ctest` `stock` in `core/build/win-x86` (`WXL_WOW_EXE`) | the recompiled bodies of `src/deinlined/` against a stock Wow.exe's own code, on model files of its own: same answers, same bytes, the points fired |
 | `python core/tools/seams/check_conventions.py` | every `conv` column agrees with `Wow.exe`, the x86 points' and their parents' (`include/wxl/points/x86.def`), the x86 binding's calls (`include/wxl/core/binding/calls_x86.def`) and the stock functions the recompiled bodies of `src/deinlined/` call included; each body calls the functions and names the globals Wow.exe's own parent does. Reads a stock `Wow.exe` 12340 (`--binary` or `$WXL_WOW_EXE`) with llvm-objdump |
 | `python core/tools/fields/generate_update_fields.py --check` | the SDK's update-field table is what the fork gives; with `--binary`, what `Wow.exe`'s own tables hold. Runs in the fork's build |
-| `ctest` `vk` in `core/build/win-x64` and `core/build/win-x86`, and natively `core/tests/vk/` | the Vulkan renderer's lower modules on the machine's driver (Wine's winevulkan included): the floor and the choice among devices, a device made and refused, VMA, the timeline and a wait that runs out, an image cleared by dynamic rendering and read back |
+| `ctest` `vk` in `core/build/win-x64` and `core/build/win-x86`, and natively `core/tests/vk/` | the Vulkan renderer's lower modules on the machine's driver (Wine's winevulkan included): the floor and the choice among devices, a device made and refused, VMA, the timeline and a wait that runs out, an image cleared by dynamic rendering and read back; the swapchain's rules, the limiter, the graveyard, the own SPIR-V; the present pass read back (stretch, gamma, cursor), the frame loop with 1-3 frames in flight and a resized scene, a lost device, Dear ImGui drawn offscreen, a real swapchain on a headless surface where the driver has one (lavapipe natively); the capture reader |
 | `wxl-core-seam-harness --profile-live`, with Tracy's `tracy-capture -a 127.0.0.1` | the profiler's zones, plots, messages and frames reach a viewer, from a harness under Wine |
 | `sdk/tests/ingame/` in a client (`wxl-ingame` assembles it as a Mods folder) | in the real game, on each runtime: the test mods' functions called from the client's Lua, chat and CVar events, hot reload and handler order, a broken and repaired manifest, casts, a cooldown, an item use, an equipment change, `/reload` and a logout; `wxl.selftest` logs PASS or FAIL per check |
 | `python core/tools/dbs/generate_client_dbs.py --check` | `include/wxl/core/client_dbs.def` lists every client database the fork declares, with its file and row size |
