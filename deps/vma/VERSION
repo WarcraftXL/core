@@ -1,0 +1,3 @@
+Vulkan Memory Allocator v3.4.0 (https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator, commit
+3aa921224c154a0d2c43912bc88e1c42ce1f7607), MIT (LICENSE.txt). Kept: include/vk_mem_alloc.h, unmodified; its
+implementation is compiled once in src/gx/vk/resources/Vma.cpp, with the entry points volk loaded.
