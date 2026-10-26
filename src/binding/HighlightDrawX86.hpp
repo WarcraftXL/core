@@ -12,7 +12,8 @@
 // the index buffer it set at +0x3B60 and reads the vertex program from m_hwRenderStates.m_data
 // (+0x2900) + 0x4D0, the 77th CGxStateBom of 16 bytes; IShaderConstantsFlush (0x006A9FE0) sends
 // the vertex registers between dirtyMin (0x00C5FFEC) and dirtyMax (0x00C5FFE8), the end of
-// s_shadowConstants[1] (0x00C5DFE0 + 0x1008).
+// s_shadowConstants[1] (0x00C5DFE0 + 0x1008); GxRs_AlphaRef (7) and GxRs_Texture0 (21) are the
+// hardware render states CGxDeviceD3d::IRsSendToHw turns into the alpha test and SetTexture.
 
 #pragma once
 
@@ -27,12 +28,12 @@ namespace wxl::core::binding::x86::highlight_draw
 {
     constexpr uint32_t kApiD3d9         = 1;  // EGxApi
     constexpr uint32_t kApiD3d9Ex       = 2;
+    constexpr uint32_t kRsAlphaRef      = 7;  // EGxRenderState GxRs_AlphaRef: 0 no alpha test, else D3DRS_ALPHAREF
+    constexpr uint32_t kRsTexture0      = 21; // EGxRenderState GxRs_Texture0: its value is a CGxTex*
     constexpr uint32_t kRsVertexShader  = 77; // EGxRenderState GxRs_VertexShader: its value is a CGxShader*
     constexpr uint32_t kStreams         = 8;  // m_d3dVertexStreamBuf[8]
     constexpr uint32_t kRows            = 256; // ShadowConstants::constants: 256 float4 registers
     constexpr std::size_t kShadowSize   = kRows * 16 + 8; // ShadowConstants: constants, dirtyMax, dirtyMin
-    constexpr std::size_t kShadowMax    = kRows * 16;
-    constexpr std::size_t kShadowMin    = kRows * 16 + 4;
 
     /// What the device had bound for a draw.
     struct State
@@ -43,6 +44,8 @@ namespace wxl::core::binding::x86::highlight_draw
         uint32_t offsets[kStreams]{};
         uint32_t strides[kStreams]{};
         void*    vertexShader = nullptr; ///< IDirect3DVertexShader9*; null: the fixed pipeline
+        void*    texture0     = nullptr; ///< IDirect3DBaseTexture9* of the first stage, null for none
+        int32_t  alphaRef     = 0;       ///< the alpha test's reference, 1 to 255; 0 when the draw had none
     };
 
     template <class T>
@@ -77,39 +80,55 @@ namespace wxl::core::binding::x86::highlight_draw
     }
 
     /**
-     * @brief The bindings of the D3D9 device `device` (a CGxDevice*) as its last draw left them;
-     *        false on a device of another API, with no context, or lost.
-     *
-     * The declaration, the index buffer and the streams are what CGxDeviceD3d::IRsSendToHw last
-     * set (CGxDeviceD3d and CGxDeviceD3d9Ex each keep them, at their own offsets); the vertex
-     * program is the CGxShader the hardware render state GxRs_VertexShader holds, its Direct3D
-     * object in m_apiSpecific.
+     * @brief What the engine believes its D3D9 device (a CGxDevice*) has bound: the declaration,
+     *        the index buffer and the streams CGxDeviceD3d::IStateSync last set (CGxDeviceD3d and
+     *        CGxDeviceD3d9Ex each keep them, at their own offsets); false on a device of another API.
+     *        A pass that binds its own puts these back.
+     */
+    inline bool ReadBindings(const void* device, State& out)
+    {
+        if (!device) return false;
+        const uint32_t api = Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
+        if (api == kApiD3d9)
+            detail::ReadBindings<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"),
+                                 WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamOfs"),
+                                 WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamStride")>(device, out);
+        else if (api == kApiD3d9Ex)
+            detail::ReadBindings<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"),
+                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentIndexBuf"), WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"),
+                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamOfs"),
+                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamStride")>(device, out);
+        else
+            return false;
+        return true;
+    }
+
+    /**
+     * @brief The bindings of the D3D9 device `device` as its last draw left them, its vertex
+     *        program (the CGxShader the hardware render state GxRs_VertexShader holds, its Direct3D
+     *        object in m_apiSpecific), its first texture and its alpha test; false on a device of
+     *        another API, with no context, or lost, or with nothing bound.
      */
     inline bool ReadState(const void* device, State& out)
     {
         out = State{};
         if (!device) return false;
-        const uint32_t api = Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
-        if (api != kApiD3d9 && api != kApiD3d9Ex) return false;
         if (!Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_context")) || Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_intF5C")))
             return false;
-        if (api == kApiD3d9)
-            detail::ReadBindings<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"),
-                                 WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamOfs"),
-                                 WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamStride")>(device, out);
-        else
-            detail::ReadBindings<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"),
-                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentIndexBuf"), WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"),
-                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamOfs"),
-                                 WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamStride")>(device, out);
+        if (!ReadBindings(device, out)) return false;
 
         const uint32_t count  = Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_hwRenderStates.m_count"));
         const uint8_t* states = Read<const uint8_t*>(device, WXL_FIELD("CGxDevice", "m_hwRenderStates.m_data"));
         if (states && count > kRsVertexShader)
         {
-            // CGxStateBom: the value's first word is the pointer.
-            const void* shader = Read<const void*>(states, kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"));
+            // CGxStateBom: the value's first word is the pointer, or the number.
+            const std::size_t bom    = WXL_TYPE_SIZE("CGxStateBom");
+            const void*       shader = Read<const void*>(states, kRsVertexShader * bom);
             if (shader) out.vertexShader = Read<void*>(shader, WXL_FIELD("CGxShader", "m_apiSpecific"));
+            const void* texture = Read<const void*>(states, kRsTexture0 * bom);
+            if (texture) out.texture0 = Read<void*>(texture, WXL_FIELD("CGxTex", "m_apiSpecificData"));
+            const int32_t ref = Read<int32_t>(states, kRsAlphaRef * bom);
+            out.alphaRef      = ref > 255 ? 255 : (ref > 0 ? ref : 0);
         }
         return out.declaration && out.indices;
     }
@@ -119,20 +138,5 @@ namespace wxl::core::binding::x86::highlight_draw
     inline bool RowSet(const float* row)
     {
         return !(row[0] == FLT_MAX && row[1] == FLT_MAX && row[2] == FLT_MAX && row[3] == FLT_MAX);
-    }
-
-    /**
-     * @brief Marks registers [first, last] of the engine's vertex shadow (CGxDevice::
-     *        s_shadowConstants[1]) as changed, so that its next flush sends them to the device
-     *        again: what CGxDevice::ShaderConstantsUnlock does.
-     */
-    inline void MarkDirty(uint8_t* shadow, uint32_t first, uint32_t last)
-    {
-        uint32_t dirtyMax = Read<uint32_t>(shadow, kShadowMax);
-        uint32_t dirtyMin = Read<uint32_t>(shadow, kShadowMin);
-        if (dirtyMin > first) dirtyMin = first;
-        if (dirtyMax < last) dirtyMax = last;
-        std::memcpy(shadow + kShadowMax, &dirtyMax, sizeof dirtyMax);
-        std::memcpy(shadow + kShadowMin, &dirtyMin, sizeof dirtyMin);
     }
 }

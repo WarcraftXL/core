@@ -7,8 +7,8 @@
 # for none); <samplers> how many samplers it may use. A compiled program that reads any other
 # register (its own `def` literals aside), or another sampler, fails the build.
 
-HighlightMaskPs3     highlight.hlsl  ps_3_0  MaskPs3       c200-c201  0
-HighlightMaskPs2     highlight.hlsl  ps_2_0  MaskPs2       c30-c31    0
-HighlightFullscreen  highlight.hlsl  vs_3_0  FullscreenVs  c0-c0      0
+HighlightMaskPs3     highlight.hlsl  ps_3_0  MaskPs3       c200-c202  1
+HighlightMaskPs2     highlight.hlsl  ps_2_0  MaskPs2       c29-c31    1
+HighlightFullscreen  highlight.hlsl  vs_3_0  FullscreenVs  c250-c250  0
 HighlightBlur        highlight.hlsl  ps_3_0  BlurPs        c200-c200  1
 HighlightComposite   highlight.hlsl  ps_3_0  CompositePs   c200-c201  3

@@ -12,34 +12,44 @@
 //   BlurPs             nine taps of a Gaussian along one direction: the glow, downsampled then blurred
 //   CompositePs        the outline found around the mask, over the blurred glow, onto the scene
 //
-// Constants: the pixel programs read c200 and up (ps_3_0) or c28 and up (ps_2_0), which no program
-// of the game reads (its pixel programs stop at c14), so the game's pixel constants are never
-// touched. The vertex program reads c0 only, which the runtime marks for the game to send again.
+// Constants: the pixel programs read c200 and up (ps_3_0) or c29 and up (ps_2_0), which no program
+// of the game reads (its pixel programs stop at c14), and the vertex program c250, above every
+// register the game's vertex programs read (c235): the game's constants are never touched by the
+// full-screen passes.
 
 // --- The masks ----------------------------------------------------------------------------------
 
 struct MaskOut
 {
     float4 color : COLOR0; ///< rgb the colour, a 1: covered
-    float4 extra : COLOR1; ///< rgb the glow (colour times strength), a the outline width / 16 px
+    float4 extra : COLOR1; ///< rgb the glow (colour times strength), a the outline width / 32 px
 };
+
+// The batch's first texture and its alpha test, as the game drew it: a texel under the reference
+// (hair, a mane, leaves, a cloak's cut) is no part of the silhouette. The reference is below 0 for
+// a batch drawn without the test, which then keeps every texel.
+sampler2D maskTexture : register(s0);
 
 float4 maskColor3 : register(c200);
 float4 maskExtra3 : register(c201);
+float4 maskAlpha3 : register(c202); ///< x: the alpha test's reference, 0 to 1, or -1
 
-MaskOut MaskPs3()
+MaskOut MaskPs3(float2 uv : TEXCOORD0)
 {
+    clip(tex2D(maskTexture, uv).a - maskAlpha3.x);
     MaskOut o;
     o.color = maskColor3;
     o.extra = maskExtra3;
     return o;
 }
 
+float4 maskAlpha2 : register(c29);
 float4 maskColor2 : register(c30);
 float4 maskExtra2 : register(c31);
 
-MaskOut MaskPs2()
+MaskOut MaskPs2(float2 uv : TEXCOORD0)
 {
+    clip(tex2D(maskTexture, uv).a - maskAlpha2.x);
     MaskOut o;
     o.color = maskColor2;
     o.extra = maskExtra2;
@@ -48,7 +58,7 @@ MaskOut MaskPs2()
 
 // --- The full-screen quad -----------------------------------------------------------------------
 
-float4 halfPixel : register(c0); ///< xy: -1 / width, 1 / height, in clip space
+float4 halfPixel : register(c250); ///< xy: -1 / width, 1 / height, in clip space
 
 struct QuadOut
 {
@@ -91,7 +101,7 @@ sampler2D glow      : register(s2); ///< the other mask blurred at half the size
 float4    screen    : register(c200); ///< xy: one pixel in uv; z: the widest outline this frame, in pixels; w: 1 with a glow
 float4    glowGain  : register(c201); ///< x: how strong the glow is overall
 
-static const float kWidthCode = 16.0; ///< the mask's width code is the width over this many pixels
+static const float kWidthCode = 32.0; ///< the mask's width code is the width over this many pixels
 
 // One sample of the search: the covered pixel at `distance` along `direction`, kept when its own
 // object's outline reaches this far and it reaches further than the best so far.

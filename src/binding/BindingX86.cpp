@@ -694,7 +694,7 @@ namespace wxl::core::binding
 
     namespace
     {
-        template <std::size_t Decl, std::size_t Streams, std::size_t StreamsSize, std::size_t States,
+        template <std::size_t Decl, std::size_t Index, std::size_t Streams, std::size_t StreamsSize, std::size_t States,
                   std::size_t StatesSize>
         void SpoilD3d(void* device)
         {
@@ -702,7 +702,12 @@ namespace wxl::core::binding
             std::memset(bytes + States, 0xA5, StatesSize);
             std::memset(bytes + Decl, 0, sizeof(void*));
             std::memset(bytes + Streams, 0, StreamsSize);
+            // The index buffer is bound again only when the engine marks its own as changed
+            // (CGxDeviceD3d::IStateSync tests m_primIndexDirty first): both, or a draw that keeps
+            // the engine's buffer would draw with the one set behind its back.
+            std::memset(bytes + Index, 0, sizeof(void*));
             const int32_t dirty = 1;
+            std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_primIndexDirty"), &dirty, sizeof dirty);
             std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_viewportDirty"), &dirty, sizeof dirty);
             std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_scissorRectDirty"), &dirty, sizeof dirty);
         }
@@ -717,11 +722,12 @@ namespace wxl::core::binding
         // CGxDevice::IRsForceUpdate(), the overload taking nothing: __thiscall, `ret` (0x00685B4D).
         x86::CallMember<void>(WXL_SITE_AT("CGxDevice::IRsForceUpdate", 0x00685A70, 0), device);
         if (api == 1)
-            SpoilD3d<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"),
+            SpoilD3d<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"),
+                     WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"),
                      WXL_MEMBER_SIZE("CGxDeviceD3d", "m_d3dVertexStreamBuf"), WXL_FIELD("CGxDeviceD3d", "m_deviceStates"),
                      WXL_MEMBER_SIZE("CGxDeviceD3d", "m_deviceStates")>(device);
         else
-            SpoilD3d<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"),
+            SpoilD3d<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentIndexBuf"),
                      WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"), WXL_MEMBER_SIZE("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"),
                      WXL_FIELD("CGxDeviceD3d9Ex", "m_deviceStates"), WXL_MEMBER_SIZE("CGxDeviceD3d9Ex", "m_deviceStates")>(device);
     }

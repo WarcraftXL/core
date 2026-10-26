@@ -28,9 +28,13 @@ namespace
     namespace draw = wxl::core::binding::x86::highlight_draw;
 
     constexpr uint32_t kMaxBatches    = 512;  ///< kept per frame; a highlighted model has a few dozen
-    constexpr uint32_t kMaskRegister3 = 200;  ///< MaskPs3's c200, c201
-    constexpr uint32_t kMaskRegister2 = 30;   ///< MaskPs2's c30, c31
-    constexpr float    kWidthCode     = 16.0f; ///< the mask's width: its alpha times this many pixels
+    constexpr uint32_t kMaskRegister3 = 200;  ///< MaskPs3's c200 (colour), c201 (glow, width), c202 (alpha test)
+    constexpr uint32_t kMaskRegister2 = 29;   ///< MaskPs2's c29 (alpha test), c30 (colour), c31 (glow, width)
+    constexpr uint32_t kQuadRegister  = 250;  ///< FullscreenVs's c250: above every register the game's programs read
+    constexpr float    kWidthCode     = 32.0f; ///< the mask's width: its alpha times this many pixels
+    constexpr float    kMaxOutline    = 32.0f; ///< pixels, once scaled to the render's height
+    constexpr float    kMaxGlow       = 128.0f;
+    constexpr float    kReferenceHeight = 1080.0f; ///< widths are given for this many lines
     constexpr float    kGlowGain      = 2.0f;  ///< the blurred edge is half as bright as the object's
     constexpr D3DFORMAT kMaskFormat   = D3DFMT_A8R8G8B8;
 
@@ -227,7 +231,7 @@ namespace
     void Quad(Device& device, UINT width, UINT height)
     {
         const float halfPixel[4] = {-1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height), 0.0f, 0.0f};
-        device.SetVertexConstants(0, halfPixel, 1);
+        device.SetVertexConstants(kQuadRegister, halfPixel, 1);
         struct Vertex
         {
             float x, y, z, w, u, v;
@@ -256,6 +260,11 @@ namespace
         device.SetRenderState(D3DRS_FOGENABLE, FALSE);
         device.SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
         device.SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+        device.SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+        device.SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+        device.SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device.SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        device.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
 
         uint32_t drawn = 0, low = draw::kRows, high = 0;
         for (size_t i = 0; i < g_kept.size(); ++i)
@@ -293,21 +302,54 @@ namespace
                 row  = end;
             }
 
-            // The colour and coverage; the glow and the outline's width.
+            // The colour and coverage; the glow and the outline's width; the alpha test the game
+            // drew with, on its first texture (-1: none, every texel kept).
             const float r = Channel(style.color, 16), g = Channel(style.color, 8), b = Channel(style.color, 0);
-            const float mask[8] = {r, g, b, 1.0f, r * style.strength, g * style.strength, b * style.strength,
-                                   style.outline / kWidthCode};
+            const float alpha = s.alphaRef > 0 && s.texture0 ? static_cast<float>(s.alphaRef) / 255.0f : -1.0f;
+            const float color[4] = {r, g, b, 1.0f};
+            const float extra[4] = {r * style.strength, g * style.strength, b * style.strength, style.outline / kWidthCode};
+            const float test[4]  = {alpha, 0.0f, 0.0f, 0.0f};
+            device.SetTexture(0, static_cast<IDirect3DBaseTexture9*>(s.texture0));
             const bool model3 = Model3(device, program);
             device.SetPixelShader(model3 ? g_programs.mask3 : g_programs.mask2);
-            device.SetPixelConstants(model3 ? kMaskRegister3 : kMaskRegister2, mask, 2);
+            if (model3)
+            {
+                const float mask[12] = {color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3],
+                                        test[0],  test[1],  test[2],  test[3]};
+                device.SetPixelConstants(kMaskRegister3, mask, 3);
+            }
+            else
+            {
+                const float mask[12] = {test[0],  test[1],  test[2],  test[3],  color[0], color[1], color[2], color[3],
+                                        extra[0], extra[1], extra[2], extra[3]};
+                device.SetPixelConstants(kMaskRegister2, mask, 3);
+            }
 
             device.DrawIndexed(static_cast<D3DPRIMITIVETYPE>(kept.draw.primitive_type), kept.draw.base_vertex,
                                kept.draw.min_index, kept.draw.vertex_count, kept.draw.start_index,
                                kept.draw.primitive_count);
             ++drawn;
         }
-        // The registers set here hold the batches' values now: the engine sends its own again.
-        if (low <= high && g_source.vertexShadow) draw::MarkDirty(g_source.vertexShadow, low, high);
+        // The registers set here hold the batches' values now: each goes back to what the engine
+        // last set in it, its copy's (every one of them was set this frame, so its copy has it).
+        // Only those: a register the engine did not set this frame holds a value the device keeps
+        // from an earlier one, which no copy knows.
+        if (g_source.vertexShadow)
+        {
+            const float* now = reinterpret_cast<const float*>(g_source.vertexShadow);
+            for (uint32_t row = low; row <= high && row < draw::kRows;)
+            {
+                if (!draw::RowSet(now + row * 4))
+                {
+                    ++row;
+                    continue;
+                }
+                uint32_t end = row + 1;
+                while (end <= high && draw::RowSet(now + end * 4)) ++end;
+                device.SetVertexConstants(row, now + row * 4, end - row);
+                row = end;
+            }
+        }
         return drawn;
     }
 
@@ -356,16 +398,27 @@ namespace
         Quad(device, t.width, t.height);
     }
 
-    /// What the passes changed and the game does not keep a copy of goes back to what the game
-    /// left it as; the rest the game sends again.
-    void Restore(Device& device)
+    /**
+     * @brief Puts the device back as the engine believes it is.
+     *
+     * The engine keeps a copy of what it bound and sends only what differs from it; some of it
+     * (the index buffer) it does not even compare until it changes its own. So the declaration,
+     * the index buffer and the streams go back to what its copy holds, the states the engine never
+     * sets go back to their value, and the rest the engine is told to send again (its render
+     * states, its samplers and textures, the viewport and the scissor).
+     */
+    void Restore(Device& device, const draw::State& engine)
     {
         for (DWORD sampler = 0; sampler < 3; ++sampler) device.SetTexture(sampler, nullptr);
         device.SetRenderTarget(1, nullptr);
+        device.SetDeclaration(static_cast<IDirect3DVertexDeclaration9*>(engine.declaration));
+        for (UINT stream = 0; stream < draw::kStreams; ++stream)
+            device.SetStreamSource(stream, static_cast<IDirect3DVertexBuffer9*>(engine.streams[stream]), engine.offsets[stream],
+                                   engine.strides[stream]);
+        device.SetIndices(static_cast<IDirect3DIndexBuffer9*>(engine.indices));
         device.SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE); // CGxDeviceD3d::IStateSetD3DDefaults; never changed after
         device.SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF);
         device.SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
-        if (g_source.vertexShadow) draw::MarkDirty(g_source.vertexShadow, 0, 0); // the quad's c0
         binding::gx_invalidate_state();
     }
 
@@ -457,6 +510,10 @@ namespace wxl::core::gx::d3d9::highlight
             return 0;
         }
 
+        // What the engine believes is bound, read before anything changes it.
+        draw::State engine;
+        if (g_source.device) draw::ReadBindings(g_source.device(), engine);
+
         IDirect3DSurface9* scene = nullptr;
         IDirect3DSurface9* depth = nullptr;
         D3DSURFACE_DESC    sceneDesc{}, depthDesc{};
@@ -465,6 +522,16 @@ namespace wxl::core::gx::d3d9::highlight
             SUCCEEDED(device->SurfaceDesc(scene, sceneDesc)) && SUCCEEDED(device->SurfaceDesc(depth, depthDesc)) &&
             EnsureTargets(*device, sceneDesc.Width, sceneDesc.Height, depthDesc.MultiSampleType, depthDesc.MultiSampleQuality))
         {
+            // Widths are given for a render 1080 lines high, and drawn the same at any height.
+            const float scale = static_cast<float>(sceneDesc.Height) / kReferenceHeight;
+            std::vector<highlight::Style> scaled(styles, styles + count);
+            for (highlight::Style& style : scaled)
+            {
+                style.outline = std::min(style.outline * scale, kMaxOutline);
+                style.glow    = std::min(style.glow * scale, kMaxGlow);
+            }
+            styles = scaled.data();
+
             const Targets& t = g_targets;
             const bool multi = t.multiColor != nullptr;
             device->SetRenderTarget(0, multi ? t.multiColor : t.colorSurface);
@@ -502,7 +569,7 @@ namespace wxl::core::gx::d3d9::highlight
             device->SetRenderTarget(0, scene);
             device->SetDepthStencil(depth);
         }
-        Restore(*device);
+        Restore(*device, engine);
         device->Release(scene);
         device->Release(depth);
         ForgetFrame();
