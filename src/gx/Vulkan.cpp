@@ -83,6 +83,7 @@ namespace
             {c.extensions.vertex_input_dynamic_state, "dynamic vertex input"},
             {c.extensions.unified_image_layouts, "unified image layouts"},
             {c.extensions.calibrated_timestamps, "calibrated timestamps"},
+            {c.centre_samples != 0, "sample locations (multisampling off per draw)"},
         };
         size_t used = 0;
         out[0]      = '\0';

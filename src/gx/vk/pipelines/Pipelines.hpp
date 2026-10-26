@@ -8,7 +8,8 @@
 // pipeline's key never names another program.
 //
 // A pipeline is found by a 64-bit key of small ids (the programs, the vertex layout, the blend
-// mode, the colour mask, the topology's class, the fill, the target's formats and samples), kept in
+// mode, the colour mask, the topology's class, the fill, the target's formats and samples, whether
+// its samples sit on the pixel's centre: GxRs_Multisample 0 under multisampling), kept in
 // a hash map; whatever Vulkan 1.3 lets be dynamic is (viewport, scissor, cull, front face, topology
 // within its class, depth test, write, compare and bias, blend constants), so a state change outside
 // the key costs no pipeline. A missing pipeline is made in one of three ways:
@@ -96,12 +97,17 @@ namespace wxl::vk::pipelines
         TopologyClass topology = TopologyClass::Triangles;
         bool          wireframe = false;
         uint8_t       target = 0;   ///< TargetId(): the colour and depth formats drawn into, and their samples
+        /// Every sample on the pixel's centre (VK_EXT_sample_locations): D3D9's MULTISAMPLEANTIALIAS
+        /// off, where each sample takes the centre's coverage and depth. Only for a target of
+        /// several samples on a device that has CentreSamples() for them.
+        bool          centre = false;
 
         uint64_t Packed() const
         {
             return static_cast<uint64_t>(vertex) | static_cast<uint64_t>(pixel) << 16 | static_cast<uint64_t>(layout & 0xFFF) << 32 |
                    static_cast<uint64_t>(blend & 0xF) << 44 | static_cast<uint64_t>(color_mask & 0xF) << 48 |
-                   static_cast<uint64_t>(topology) << 52 | static_cast<uint64_t>(wireframe) << 54 | static_cast<uint64_t>(target & 0x1F) << 55;
+                   static_cast<uint64_t>(topology) << 52 | static_cast<uint64_t>(wireframe) << 54 | static_cast<uint64_t>(target & 0x1F) << 55 |
+                   static_cast<uint64_t>(centre) << 60;
         }
     };
 
@@ -192,6 +198,8 @@ namespace wxl::vk::pipelines
         /// The id of a colour format, a depth format (UNDEFINED: none) and their samples per pixel,
         /// given at its first sight.
         uint8_t TargetId(VkFormat color, VkFormat depth, uint32_t samples = 1);
+        /// Whether a pipeline into @p target can put all its samples on the pixel's centre (Key::centre).
+        bool CentreSamples(uint8_t target) const;
 
         /**
          * @brief The pipeline of @p key: there, linked from its parts, compiled now, or not yet.
@@ -239,6 +247,7 @@ namespace wxl::vk::pipelines
             uint8_t        color_mask = 0xF;
             TopologyClass  topology = TopologyClass::Triangles;
             bool           wireframe = false;
+            bool           centre = false;
         };
         enum class Part : uint8_t
         {
@@ -278,7 +287,7 @@ namespace wxl::vk::pipelines
             uint8_t      blend = 0;
             uint8_t      color_mask = 0xF;
             uint8_t      topology = 2;
-            uint8_t      wireframe = 0;
+            uint8_t      wireframe = 0; ///< bit 0 the fill in lines, bit 1 the samples on the pixel's centre
         };
 
         Recipe     RecipeOf(const Key& key) const;

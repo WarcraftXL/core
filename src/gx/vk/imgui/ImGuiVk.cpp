@@ -30,13 +30,14 @@ namespace
 
 namespace wxl::vk::imgui
 {
-    bool Renderer::Create(device::Context& context, resources::Allocator& allocator, VkFormat color, uint32_t frames,
+    bool Renderer::Create(device::Context& context, resources::Allocator& allocator, VkFormat color, uint32_t samples, uint32_t frames,
                           char* why, uint32_t why_size)
     {
         Destroy();
         context_   = &context;
         allocator_ = &allocator;
         format_    = color;
+        samples_   = samples ? samples : 1;
 
         ImGui_ImplVulkan_InitInfo info{};
         info.ApiVersion          = kFloorApi;
@@ -50,7 +51,7 @@ namespace wxl::vk::imgui
         // The backend keeps one vertex and index buffer per "image" and reuses them in turn: one per
         // frame in flight, so a buffer is written again only once the frame that read it completed.
         info.ImageCount          = frames < 2 ? 2 : frames;
-        info.MSAASamples         = VK_SAMPLE_COUNT_1_BIT;
+        info.MSAASamples         = static_cast<VkSampleCountFlagBits>(samples_);
         info.UseDynamicRendering = true;
         info.PipelineRenderingCreateInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         info.PipelineRenderingCreateInfo.colorAttachmentCount    = 1;

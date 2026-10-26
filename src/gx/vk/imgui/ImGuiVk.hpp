@@ -28,8 +28,9 @@ namespace wxl::vk::imgui
         Renderer& operator=(const Renderer&) = delete;
         ~Renderer() { Destroy(); }
 
-        /// For a colour target of @p color, with @p frames frames in flight.
-        bool Create(device::Context& context, resources::Allocator& allocator, VkFormat color, uint32_t frames,
+        /// For a colour target of @p color with @p samples per pixel (the scene's: Dear ImGui is
+        /// drawn into it as into D3D9's back buffer, before the cursor), @p frames frames in flight.
+        bool Create(device::Context& context, resources::Allocator& allocator, VkFormat color, uint32_t samples, uint32_t frames,
                     char* why, uint32_t why_size);
 
         /// Releases the backend. Its work must be complete (or the device lost), and the context
@@ -37,6 +38,7 @@ namespace wxl::vk::imgui
         void Destroy();
         bool Ready() const { return ready_; }
         VkFormat Format() const { return format_; }
+        uint32_t Samples() const { return samples_; }
 
         /**
          * @brief Before ImGui::NewFrame, in a frame, outside any rendering: builds the font atlas and
@@ -45,13 +47,14 @@ namespace wxl::vk::imgui
          */
         void NewFrame(VkCommandBuffer cmd, const std::function<void(std::function<void()>)>& after_frame);
 
-        /// Inside a rendering of the colour format given at Create: draws @p data.
+        /// Inside a rendering of the colour format and samples given at Create: draws @p data.
         void Record(VkCommandBuffer cmd, ImDrawData* data);
 
     private:
         device::Context*      context_ = nullptr;
         resources::Allocator* allocator_ = nullptr;
         VkFormat              format_ = VK_FORMAT_UNDEFINED;
+        uint32_t              samples_ = 1;
         bool                  ready_ = false;
         resources::Image      font_;
         VkSampler             sampler_ = VK_NULL_HANDLE;

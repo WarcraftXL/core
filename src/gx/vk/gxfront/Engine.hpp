@@ -87,6 +87,7 @@ namespace wxl::vk::gxfront
         kColorWrite       = 16,
         kCulling          = 17,
         kClipPlaneMask    = 18,
+        kMultisample      = 19,
         kScissorTest      = 20,
         kTexture0         = 21,
         kColorOp0         = 37,

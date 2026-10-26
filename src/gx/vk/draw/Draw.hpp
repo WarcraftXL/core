@@ -206,6 +206,9 @@ namespace wxl::vk::draw
         float    depth_bias = 0.0f;  ///< D3D9's DEPTHBIAS, in depth units
         VkCullModeFlags cull = VK_CULL_MODE_NONE;
         bool     wireframe = false;
+        /// GxRs_Multisample 0 (D3D9's MULTISAMPLEANTIALIAS off): in a multisampled scene, every
+        /// sample of a pixel takes what its centre takes (coverage, depth, colour).
+        bool     multisample_off = false;
 
         float    viewport[6] = {};   ///< x, y, width, height in pixels (D3D9's), min and max depth
         int32_t  scissor[4] = {};    ///< x, y, width, height in pixels
@@ -247,6 +250,8 @@ namespace wxl::vk::draw
             uint64_t copies = 0;       ///< copies from the scene into a texture
             uint64_t queries = 0;      ///< occlusion queries issued
             uint64_t skipped = 0;      ///< draws left out while their pipeline compiled on a worker
+            uint64_t centred = 0;      ///< draws with multisampling off, their samples on the pixel's centre
+            uint64_t antialiased = 0;  ///< draws with multisampling off drawn multisampled (the device has no sample locations)
         };
 
         /// Where the renderer keeps what outlives a launch (empty: nothing is kept), and how it makes

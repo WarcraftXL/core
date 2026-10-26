@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The present pass: two pipelines per target format (the scene, the alpha-keyed cursor) over one
-// layout, a descriptor set of each per frame in flight, the gamma ramp in a mapped buffer per frame.
+// The present pass: a pipeline per target format over one layout, a descriptor set per frame in
+// flight, the gamma ramp in a mapped buffer per frame.
 
 #include "gx/vk/present/Pass.hpp"
 
@@ -93,31 +93,25 @@ namespace wxl::vk::present
         }
         if (result == VK_SUCCESS)
         {
-            VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * slot_count_},
-                                             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * slot_count_}};
+            VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, slot_count_},
+                                             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, slot_count_}};
             VkDescriptorPoolCreateInfo pool{};
             pool.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            pool.maxSets       = 2 * slot_count_;
+            pool.maxSets       = slot_count_;
             pool.poolSizeCount = 2;
             pool.pPoolSizes    = sizes;
             result             = vkCreateDescriptorPool(dev, &pool, nullptr, &pool_);
         }
         for (uint32_t i = 0; result == VK_SUCCESS && i < slot_count_; ++i)
         {
-            VkDescriptorSetLayout       layouts[2] = {set_layout_, set_layout_};
-            VkDescriptorSet             sets[2]    = {};
             VkDescriptorSetAllocateInfo allocate{};
             allocate.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             allocate.descriptorPool     = pool_;
-            allocate.descriptorSetCount = 2;
-            allocate.pSetLayouts        = layouts;
-            result                      = vkAllocateDescriptorSets(dev, &allocate, sets);
-            slots_[i].scene             = sets[0];
-            slots_[i].cursor            = sets[1];
-            if (result == VK_SUCCESS &&
-                (!allocator.CreateBuffer(shaders::kGammaRows * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, resources::Access::Upload,
-                                         slots_[i].gamma) ||
-                 !allocator.CreateBuffer(32 * 32 * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, resources::Access::Upload, slots_[i].staging)))
+            allocate.descriptorSetCount = 1;
+            allocate.pSetLayouts        = &set_layout_;
+            result                      = vkAllocateDescriptorSets(dev, &allocate, &slots_[i].scene);
+            if (result == VK_SUCCESS && !allocator.CreateBuffer(shaders::kGammaRows * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                                                resources::Access::Upload, slots_[i].gamma))
                 result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
         }
         if (result != VK_SUCCESS)
@@ -128,13 +122,12 @@ namespace wxl::vk::present
         }
 
         vertex_   = Module(dev, shaders::PresentVertex());
-        fragment_ = Module(dev, shaders::PresentFragment(false));
+        fragment_ = Module(dev, shaders::PresentFragment());
         linear_   = Sampler(dev, VK_FILTER_LINEAR);
         nearest_  = Sampler(dev, VK_FILTER_NEAREST);
-        if (!vertex_ || !fragment_ || !linear_ || !nearest_ ||
-            !allocator.CreateImage(32, 32, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, cursor_))
+        if (!vertex_ || !fragment_ || !linear_ || !nearest_)
         {
-            std::snprintf(why, why_size, "the present pass's shaders, samplers or cursor image could not be made");
+            std::snprintf(why, why_size, "the present pass's shaders or samplers could not be made");
             Destroy();
             return false;
         }
@@ -150,16 +143,8 @@ namespace wxl::vk::present
         {
             const VkDevice dev = context_->Device();
             for (Pipelines& p : pipelines_)
-            {
                 if (p.opaque) vkDestroyPipeline(dev, p.opaque, nullptr);
-                if (p.keyed) vkDestroyPipeline(dev, p.keyed, nullptr);
-            }
-            for (Slot& slot : slots_)
-            {
-                allocator_->Destroy(slot.gamma);
-                allocator_->Destroy(slot.staging);
-            }
-            allocator_->Destroy(cursor_);
+            for (Slot& slot : slots_) allocator_->Destroy(slot.gamma);
             if (vertex_) vkDestroyShaderModule(dev, vertex_, nullptr);
             if (fragment_) vkDestroyShaderModule(dev, fragment_, nullptr);
             if (linear_) vkDestroySampler(dev, linear_, nullptr);
@@ -177,8 +162,6 @@ namespace wxl::vk::present
         layout_            = VK_NULL_HANDLE;
         set_layout_        = VK_NULL_HANDLE;
         slot_count_        = 0;
-        cursor_ready_      = false;
-        cursor_dirty_      = false;
     }
 
     void Pass::SetGamma(const GammaRamp* ramp)
@@ -203,14 +186,7 @@ namespace wxl::vk::present
         ++ramp_version_;
     }
 
-    void Pass::SetCursor(const uint32_t* argb)
-    {
-        if (!argb) return;
-        std::memcpy(cursor_pixels_, argb, sizeof cursor_pixels_);
-        cursor_dirty_ = true;
-    }
-
-    void Pass::Prepare(VkCommandBuffer cmd, uint32_t slot)
+    void Pass::Prepare(uint32_t slot)
     {
         Slot& s = slots_[slot % slot_count_];
         if (s.gamma_version != ramp_version_ && s.gamma.mapped)
@@ -219,42 +195,6 @@ namespace wxl::vk::present
             std::memcpy(s.gamma.mapped, ramp_, sizeof ramp_);
             s.gamma_version = ramp_version_;
         }
-        if (!cursor_dirty_ || !s.staging.mapped) return;
-
-        // 0xAARRGGBB in memory is B, G, R, A: B8G8R8A8 as it is.
-        std::memcpy(s.staging.mapped, cursor_pixels_, sizeof cursor_pixels_);
-        VkImageMemoryBarrier2 toCopy{};
-        toCopy.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        toCopy.srcStageMask     = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        toCopy.srcAccessMask    = VK_ACCESS_2_NONE;
-        toCopy.dstStageMask     = VK_PIPELINE_STAGE_2_COPY_BIT;
-        toCopy.dstAccessMask    = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toCopy.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED; // the whole image is written
-        toCopy.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toCopy.image            = cursor_.image;
-        toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkDependencyInfo dependency{};
-        dependency.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dependency.imageMemoryBarrierCount = 1;
-        dependency.pImageMemoryBarriers    = &toCopy;
-        vkCmdPipelineBarrier2(cmd, &dependency);
-
-        VkBufferImageCopy region{};
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent      = {32, 32, 1};
-        vkCmdCopyBufferToImage(cmd, s.staging.buffer, cursor_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-        VkImageMemoryBarrier2 toRead = toCopy;
-        toRead.srcStageMask          = VK_PIPELINE_STAGE_2_COPY_BIT;
-        toRead.srcAccessMask         = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toRead.dstStageMask          = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        toRead.dstAccessMask         = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-        toRead.oldLayout             = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toRead.newLayout             = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        dependency.pImageMemoryBarriers = &toRead;
-        vkCmdPipelineBarrier2(cmd, &dependency);
-        cursor_dirty_ = false;
-        cursor_ready_ = true;
     }
 
     const Pass::Pipelines* Pass::PipelinesFor(VkFormat format)
@@ -264,8 +204,7 @@ namespace wxl::vk::present
         for (VkFormat f : refused_)
             if (f == format) return nullptr;
 
-        const VkDevice dev       = context_->Device();
-        VkShaderModule alphaKey  = Module(dev, shaders::PresentFragment(true));
+        const VkDevice dev = context_->Device();
         Pipelines      made;
         made.format              = format;
 
@@ -327,18 +266,10 @@ namespace wxl::vk::present
         info.pDynamicState       = &dynamic;
         info.layout              = layout_;
 
-        VkResult result = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &info, nullptr, &made.opaque);
-        if (result == VK_SUCCESS && alphaKey)
-        {
-            stages[1].module = alphaKey;
-            result           = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &info, nullptr, &made.keyed);
-        }
-        if (alphaKey) vkDestroyShaderModule(dev, alphaKey, nullptr);
-        if (result != VK_SUCCESS || !alphaKey)
+        const VkResult result = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &info, nullptr, &made.opaque);
+        if (result != VK_SUCCESS)
         {
             Log(LogLevel::Warn, "the present pass has no pipeline for format %d: %s", static_cast<int>(format), ResultName(result));
-            if (made.opaque) vkDestroyPipeline(dev, made.opaque, nullptr);
-            if (made.keyed) vkDestroyPipeline(dev, made.keyed, nullptr);
             refused_.push_back(format);
             return nullptr;
         }
@@ -347,7 +278,7 @@ namespace wxl::vk::present
     }
 
     bool Pass::Record(VkCommandBuffer cmd, uint32_t slot, VkImageView source, VkImageView target, VkFormat target_format,
-                      VkExtent2D target_extent, const CursorDraw* cursor)
+                      VkExtent2D target_extent)
     {
         const Pipelines* pipelines = PipelinesFor(target_format);
         if (!pipelines) return false;
@@ -355,9 +286,8 @@ namespace wxl::vk::present
 
         // The slot's sets are not in use (its previous frame is complete): written every frame.
         VkDescriptorImageInfo  sceneImage{filter_ == Filter::Nearest ? nearest_ : linear_, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkDescriptorImageInfo  cursorImage{nearest_, cursor_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorBufferInfo gamma{s.gamma.buffer, 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet   writes[4]{};
+        VkWriteDescriptorSet   writes[2]{};
         for (VkWriteDescriptorSet& w : writes)
         {
             w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -371,12 +301,7 @@ namespace wxl::vk::present
         writes[1].dstBinding     = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         writes[1].pBufferInfo    = &gamma;
-        writes[2]                = writes[0];
-        writes[2].dstSet         = s.cursor;
-        writes[2].pImageInfo     = &cursorImage;
-        writes[3]                = writes[1];
-        writes[3].dstSet         = s.cursor;
-        vkUpdateDescriptorSets(context_->Device(), 4, writes, 0, nullptr);
+        vkUpdateDescriptorSets(context_->Device(), 2, writes, 0, nullptr);
 
         VkRenderingAttachmentInfo color{};
         color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -402,29 +327,6 @@ namespace wxl::vk::present
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof whole_rect, whole_rect);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
-        if (cursor && cursor->visible && cursor_ready_ && cursor->size)
-        {
-            // The part of the square inside the target.
-            const int32_t right  = std::min<int32_t>(cursor->x + static_cast<int32_t>(cursor->size), static_cast<int32_t>(target_extent.width));
-            const int32_t bottom = std::min<int32_t>(cursor->y + static_cast<int32_t>(cursor->size), static_cast<int32_t>(target_extent.height));
-            const int32_t left   = std::max(cursor->x, 0);
-            const int32_t top    = std::max(cursor->y, 0);
-            if (right > left && bottom > top)
-            {
-                // The square in clip space over the whole target's viewport; the scissor keeps it in.
-                const float w      = static_cast<float>(target_extent.width);
-                const float h      = static_cast<float>(target_extent.height);
-                const float rect[4] = {2.0f * static_cast<float>(cursor->x) / w - 1.0f, 2.0f * static_cast<float>(cursor->y) / h - 1.0f,
-                                       2.0f * static_cast<float>(cursor->x + static_cast<int32_t>(cursor->size)) / w - 1.0f,
-                                       2.0f * static_cast<float>(cursor->y + static_cast<int32_t>(cursor->size)) / h - 1.0f};
-                VkRect2D clip{{left, top}, {static_cast<uint32_t>(right - left), static_cast<uint32_t>(bottom - top)}};
-                vkCmdSetScissor(cmd, 0, 1, &clip);
-                vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof rect, rect);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->keyed);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &s.cursor, 0, nullptr);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-            }
-        }
         vkCmdEndRendering(cmd);
         return true;
     }

@@ -363,19 +363,33 @@ namespace wxl::vk::present
         const bool              multi = samples > VK_SAMPLE_COUNT_1_BIT;
         const VkImageUsageFlags shown = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // A draw with its samples on the pixel's centre (GxRs_Multisample 0) needs a depth made for
+        // sample locations other than the standard ones.
+        centre_samples_ = false;
+        if (multi && (context_->Chosen().centre_samples & samples))
+        {
+            VkImageFormatProperties properties{};
+            centre_samples_ = vkGetPhysicalDeviceImageFormatProperties(context_->Physical(), depth_format_, VK_IMAGE_TYPE_2D,
+                                                                       VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                                                       VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT,
+                                                                       &properties) == VK_SUCCESS &&
+                              (properties.sampleCounts & samples);
+        }
         bool made = allocator_->CreateImage(want.width, want.height, kSceneFormat,
                                             multi ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : shown, scene_,
                                             VK_IMAGE_ASPECT_COLOR_BIT, samples) &&
                     allocator_->CreateImage(want.width, want.height, depth_format_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, depth_,
-                                            DepthAspect(depth_format_), samples);
+                                            DepthAspect(depth_format_), samples,
+                                            centre_samples_ ? VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT : 0);
         if (made && multi) made = allocator_->CreateImage(want.width, want.height, kSceneFormat, shown, resolve_);
         if (!made)
         {
             allocator_->Destroy(scene_);
             allocator_->Destroy(depth_);
             allocator_->Destroy(resolve_);
-            scene_extent_ = {0, 0};
-            samples_      = VK_SAMPLE_COUNT_1_BIT;
+            scene_extent_   = {0, 0};
+            samples_        = VK_SAMPLE_COUNT_1_BIT;
+            centre_samples_ = false;
             return false;
         }
         scene_extent_ = want;
@@ -407,13 +421,13 @@ namespace wxl::vk::present
     {
         if (rendering_ == kind) return;
         EndRendering();
-        const bool multi = samples_ > VK_SAMPLE_COUNT_1_BIT;
-        // An overlay (Dear ImGui) goes over the image shown: a multisampled scene is resolved first.
-        if (kind == Rendering::Color && multi) ResolveScene();
-        if (kind == Rendering::Full && multi) msaa_dirty_ = true;
+        // Both kinds draw into the scene, multisampled or not, as D3D9 draws an overlay (Dear
+        // ImGui) into its back buffer: what is drawn after it (the software cursor) lies over it,
+        // and the resolve for the image shown or a readback carries both.
+        if (samples_ > VK_SAMPLE_COUNT_1_BIT) msaa_dirty_ = true;
         VkRenderingAttachmentInfo color{};
         color.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color.imageView   = kind == Rendering::Color && multi ? resolve_.view : scene_.view;
+        color.imageView   = scene_.view;
         color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
@@ -742,7 +756,7 @@ namespace wxl::vk::present
         Barrier(cmd, Shown().image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        pass_.Prepare(cmd, frames_.Index());
+        pass_.Prepare(frames_.Index());
 
         const uint64_t delay = limiter_.Delay(NowNs());
         if (delay) Sleep(delay);
@@ -751,7 +765,7 @@ namespace wxl::vk::present
         {
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_NONE, kColorStage, kColorWrite);
-            pass_.Record(cmd, frames_.Index(), Shown().view, target_.view, kSceneFormat, {target_.width, target_.height}, &cursor_);
+            pass_.Record(cmd, frames_.Index(), Shown().view, target_.view, kSceneFormat, {target_.width, target_.height});
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -814,7 +828,7 @@ namespace wxl::vk::present
         const VkImage image = swapchain_.Image(index);
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kColorStage,
                 VK_ACCESS_2_NONE, kColorStage, kColorWrite);
-        pass_.Record(cmd, frames_.Index(), Shown().view, swapchain_.View(index), swapchain_.Format(), swapchain_.Extent(), &cursor_);
+        pass_.Record(cmd, frames_.Index(), Shown().view, swapchain_.View(index), swapchain_.Format(), swapchain_.Extent());
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
         EndTimestamp();
@@ -860,5 +874,12 @@ namespace wxl::vk::present
         pixels.resize(static_cast<size_t>(target_.width) * target_.height);
         std::memcpy(pixels.data(), readback_.mapped, pixels.size() * 4);
         return true;
+    }
+
+    bool Display::WaitSubmitted()
+    {
+        if (!timeline_) return false;
+        const uint64_t last = timeline_->Last();
+        return !last || timeline_->WaitFor(last) == frame::Wait::Done;
     }
 }

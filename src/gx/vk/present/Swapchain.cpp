@@ -255,6 +255,9 @@ namespace wxl::vk::present
         if (context_ && context_->Ready())
         {
             const VkDevice dev = context_->Device();
+            // The last presents still wait on their semaphores after every submission completed:
+            // the queue going idle is what ends them (the timeline does not see a present).
+            if (!rendered_.empty() && !context_->Lost()) vkQueueWaitIdle(context_->Queue());
             for (VkImageView v : views_)
                 if (v) vkDestroyImageView(dev, v, nullptr);
             for (VkSemaphore s : rendered_)

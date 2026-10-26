@@ -54,7 +54,8 @@ namespace wxl::vk::device
     X(extended_dynamic_state3, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false)               \
     X(vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, false)          \
     X(unified_image_layouts, VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false)                    \
-    X(calibrated_timestamps, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME, false)
+    X(calibrated_timestamps, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME, false)                    \
+    X(sample_locations, VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME, true)
 
     struct Features
     {
@@ -88,6 +89,10 @@ namespace wxl::vk::device
         bool                 presents = false;          ///< that family can present to a window
         Features             features;
         Extensions           extensions;
+        /// The sample counts whose samples can all be put on the pixel's centre, pipeline by
+        /// pipeline inside one rendering (VK_EXT_sample_locations with variableSampleLocations, a
+        /// 1x1 grid and a coordinate range holding 0.5): D3D9's MULTISAMPLEANTIALIAS off.
+        VkSampleCountFlags   centre_samples = 0;
         char                 reject[192] = {};          ///< why it does not qualify; empty when it does
     };
 

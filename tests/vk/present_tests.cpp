@@ -8,7 +8,7 @@
 //     limiter and the graveyard, without a device;
 //   - the renderer's own SPIR-V turned into modules and pipelines;
 //   - the present pass into an offscreen image read back: the scene stretched (nearest exactly,
-//     bilinear inside), the gamma ramp, the alpha-keyed software cursor and its clipping;
+//     bilinear inside), the gamma ramp;
 //   - the frame loop with 1, 2 and 3 frames in flight, clears of a part of the scene, the scene
 //     resized, GPU timestamps, nothing left allocated after;
 //   - a lost device: the frame says so at once and the display goes without waiting;
@@ -218,10 +218,9 @@ namespace
     void SpirvCases()
     {
         const std::vector<uint32_t> vs = vk::shaders::PresentVertex();
-        const std::vector<uint32_t> fs = vk::shaders::PresentFragment(false);
-        const std::vector<uint32_t> ks = vk::shaders::PresentFragment(true);
+        const std::vector<uint32_t> fs = vk::shaders::PresentFragment();
         Check(vs.size() > 5 && vs[0] == 0x07230203u && vs[1] == 0x00010300u && vs[3] > 1, "the vertex module has a SPIR-V 1.3 header and a bound");
-        Check(fs.size() > vs.size() && ks.size() > fs.size(), "the fragment modules are written, the alpha-keyed one longer");
+        Check(fs.size() > vs.size(), "the fragment module is written");
         // Every instruction's word count adds up to the module's length.
         auto walk = [](const std::vector<uint32_t>& m) {
             size_t at = 5;
@@ -233,7 +232,7 @@ namespace
             }
             return at == m.size();
         };
-        Check(walk(vs) && walk(fs) && walk(ks), "every instruction's length adds up");
+        Check(walk(vs) && walk(fs), "every instruction's length adds up");
     }
 
     // --- Live cases ------------------------------------------------------------------------------------
@@ -355,42 +354,9 @@ namespace
         display.ReadOffscreen(pixels);
         Check(!pixels.empty() && pixels[0] == Argb(200, 100, 50), "no ramp leaves the colour exactly as it was");
 
-        // The cursor: an opaque left half, a transparent right half, a column at the key exactly.
-        uint32_t cursor[32 * 32];
-        for (uint32_t y = 0; y < 32; ++y)
-            for (uint32_t x = 0; x < 32; ++x)
-                cursor[y * 32 + x] = x < 16 ? Argb(255, 0, 255) : x == 16 ? Argb(255, 255, 0, 224) : x == 17 ? Argb(0, 255, 255, 223)
-                                                                                               : Argb(255, 255, 255, 0);
-        display.PresentPass().SetCursor(cursor);
         display.SetSceneExtent({64, 32});
-        vk::present::CursorDraw draw;
-        draw.visible = true;
-        draw.x       = 10;
-        draw.y       = 4;
-        display.SetCursor(draw);
         const uint32_t grey = Argb(90, 90, 90);
         Frame(display, grey);
-        display.ReadOffscreen(pixels);
-        Save("present-cursor", pixels, 64, 32);
-        Check(!pixels.empty() && pixels[4 * 64 + 10] == Argb(255, 0, 255) && pixels[31 * 64 + 25] == Argb(255, 0, 255) &&
-                  pixels[3 * 64 + 10] == grey && pixels[4 * 64 + 9] == grey && pixels[31 * 64 + 63] == grey,
-              "the cursor's opaque half is drawn where it is, its corner at (10,4)");
-        Check(!pixels.empty() && pixels[10 * 64 + 26] == Argb(255, 255, 0, 224) && pixels[10 * 64 + 27] == grey &&
-                  pixels[10 * 64 + 30] == grey,
-              "alpha 224 is kept, 223 and below are keyed out, as the engine's alpha key");
-        draw.x = -8;
-        draw.y = 20;
-        display.SetCursor(draw);
-        Frame(display, grey);
-        display.ReadOffscreen(pixels);
-        Check(!pixels.empty() && pixels[20 * 64 + 0] == Argb(255, 0, 255) && pixels[20 * 64 + 7] == Argb(255, 0, 255) &&
-                  pixels[20 * 64 + 9] == grey && pixels[19 * 64 + 0] == grey,
-              "a cursor half off the target is clipped, not dropped");
-        draw.visible = false;
-        display.SetCursor(draw);
-        Frame(display, grey);
-        display.ReadOffscreen(pixels);
-        Check(!pixels.empty() && pixels[20 * 64 + 0] == grey, "a hidden cursor is not drawn");
 
         // The scene made again at a new size, between frames and inside one.
         const uint64_t scenes = display.Counters().scenes;
@@ -569,7 +535,7 @@ namespace
         io.DeltaTime        = 1.0f / 60.0f;
 
         vk::imgui::Renderer renderer;
-        Check(renderer.Create(d.context, d.allocator, Display::kSceneFormat, 2, why, sizeof why),
+        Check(renderer.Create(d.context, d.allocator, Display::kSceneFormat, 1, 2, why, sizeof why),
               "Dear ImGui's Vulkan backend starts on the renderer's device");
 
         std::vector<uint32_t> pixels;

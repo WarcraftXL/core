@@ -86,7 +86,8 @@ namespace wxl::vk::resources
         /// A 2D image with one mip and one layer, and its view of @p aspect (colour unless said),
         /// of @p samples samples per pixel (a multisampled attachment when more than one).
         bool CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
-                         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
+                         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+                         VkImageCreateFlags flags = 0);
         void Destroy(Image& image);
 
         /// An image of @p info, its levels and layers, and its view (a cube's is a cube view).

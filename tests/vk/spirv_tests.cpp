@@ -60,10 +60,8 @@ namespace wxl::vk::test
         }
         const std::vector<uint32_t> present = shaders::PresentVertex();
         validate(present.data(), present.size(), "the present pass's vertex shader");
-        const std::vector<uint32_t> scene = shaders::PresentFragment(false);
+        const std::vector<uint32_t> scene = shaders::PresentFragment();
         validate(scene.data(), scene.size(), "the present pass's fragment shader");
-        const std::vector<uint32_t> cursor = shaders::PresentFragment(true);
-        validate(cursor.data(), cursor.size(), "the present pass's cursor fragment shader");
         return true;
 #else
         return false;

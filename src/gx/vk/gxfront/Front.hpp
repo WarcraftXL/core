@@ -7,8 +7,8 @@
 // the caller (the recompiled client's CGxDeviceVk), as it does in the D3D9 device.
 //
 // What it does: the device, the window's surface and swapchain, the scene cleared to the engine's
-// colour and shown through the present pass (stretched, the gamma ramp in fullscreen, the software
-// cursor), vsync and its emulated intervals, the hardware cursor, the loss and its recovery, the
+// colour and shown through the present pass (stretched, the gamma ramp in fullscreen), vsync and
+// its emulated intervals, the hardware cursor (the software one is the engine's draw, as on D3D9), the loss and its recovery, the
 // engine's capabilities; the engine's pools, textures, render targets, programs (its own records
 // translated), registers and occlusion queries on the device, its draws read out of its state
 // (Engine.hpp) and recorded by the renderer (draw/), its copies from the back buffer. The draws
@@ -169,7 +169,6 @@ namespace wxl::vk::gxfront
         void ReleaseDevice();
         void ReadRefresh();
         void UpdateSync();
-        void UpdateSoftwareCursor();
         void ReleaseCursor();
 
         Options               options_;
@@ -185,7 +184,6 @@ namespace wxl::vk::gxfront
 
         uint32_t refresh_hz_ = 60;
         void*    cursor_ = nullptr;       ///< the hardware cursor (HCURSOR) made from the engine's pixels
-        bool     cursor_pixels_ = false;  ///< the software cursor's pixels were handed to the present pass
 
         std::unordered_set<void*> pools_;    ///< pools whose m_apiSpecific is a draw::Pool of ours
         std::unordered_set<void*> textures_; ///< textures whose m_apiSpecificData is a TexRecord of ours

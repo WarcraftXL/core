@@ -1206,6 +1206,11 @@ namespace wxl::vk::draw
             return false;
         }
         key.target = target_id;
+        // GxRs_Multisample 0 changes nothing in a target of one sample (a texture); in the
+        // multisampled scene its samples go on the pixel's centre where the device can put them
+        // there, else the draw stays antialiased.
+        const bool off = packet.multisample_off && display_->Samples() > 1 && TargetIsScene();
+        key.centre     = off && display_->CentreSamples() && pipelines_.CentreSamples(target_id);
         // A draw into the scene may be left out while its pipeline compiles (the next frames have
         // it); one into a texture may not: the engine keeps what it drew there (a portrait, the map).
         pipelines::Got   got      = pipelines::Got::Ready;
@@ -1216,6 +1221,7 @@ namespace wxl::vk::draw
             return false;
         }
         stats_.pipelines = pipelines_.Count();
+        if (off) ++(key.centre ? stats_.centred : stats_.antialiased);
 
         for (uint32_t i = 0; i < packet.stream_count; ++i) packet.streams[i].pool->used = frame;
         if (packet.indexed) packet.indices->used = frame;

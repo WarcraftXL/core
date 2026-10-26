@@ -155,7 +155,6 @@ namespace wxl::vk::gxfront
             return false;
         }
         ReadRefresh();
-        cursor_pixels_ = false;
         ++generation_;
         return true;
     }
@@ -384,35 +383,10 @@ namespace wxl::vk::gxfront
         display_.SetInterval(fullscreen && vsync >= 2 && vsync <= 4 ? vsync * 1'000'000'000ull / refresh_hz_ : 0);
     }
 
-    void Front::UpdateSoftwareCursor()
-    {
-        engine::CGxDevice*  dev = Engine(device_);
-        present::CursorDraw draw;
-        POINT               at{};
-        if (!dev->m_hwCursor && dev->m_cursorVisible && PointerInClient(window_, at))
-        {
-            if (!cursor_pixels_)
-            {
-                display_.PresentPass().SetCursor(dev->m_cursor);
-                cursor_pixels_ = true;
-            }
-            // The pointer is in window pixels; the image shown may be another size than the scene.
-            const VkExtent2D scene = display_.SceneExtent();
-            const VkExtent2D shown = display_.Chain().Ready() ? display_.Chain().Extent() : scene;
-            const float      sx    = scene.width ? static_cast<float>(shown.width) / static_cast<float>(scene.width) : 1.0f;
-            draw.visible           = true;
-            draw.x                 = at.x - static_cast<int32_t>(static_cast<float>(dev->m_cursorHotspotX) * sx);
-            draw.y                 = at.y - static_cast<int32_t>(static_cast<float>(dev->m_cursorHotspotY) * sx);
-            draw.size              = static_cast<uint32_t>(32.0f * sx + 0.5f);
-        }
-        display_.SetCursor(draw);
-    }
-
     bool Front::Present()
     {
         if (!context_.Ready() || !display_.InFrame()) return !context_.Lost();
         UpdateSync();
-        UpdateSoftwareCursor();
         const present::FrameEnd end = display_.EndFrame();
         if (end == present::FrameEnd::Lost) return false;
         // gxFixLag: the CPU waits for the frame it just sent, as the D3D9 device's event query does.
@@ -464,7 +438,6 @@ namespace wxl::vk::gxfront
     {
         if (!device_) return;
         engine::CGxDevice* dev = Engine(device_);
-        cursor_pixels_         = false; // the software cursor takes the new pixels at the next frame
         if (!dev->m_hwCursor) return;
         HCURSOR made = MakeCursor(dev->m_cursor, dev->m_cursorHotspotX, dev->m_cursorHotspotY);
         HCURSOR old  = static_cast<HCURSOR>(cursor_);
@@ -725,7 +698,9 @@ namespace wxl::vk::gxfront
                       "%llu linked ones replaced by their whole compile, %llu compiled on the main thread in %.0f ms and %llu parts in "
                       "%.0f ms; %llu hitches of %.0f ms or more, the longest %.1f ms; %llu failed), %llu programs translated (%llu "
                       "refused; %llu translated in %.0f ms, %llu from the cache, %llu ahead), %llu target renderings, %llu copies, %llu "
-                      "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures, %llu losses%s",
+                      "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures, %llu draws with multisampling off in a "
+                      "multisampled scene (%llu with their samples on the pixel's centre, %llu antialiased: no sample locations), "
+                      "%llu losses%s",
                       context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), display_.Samples(), n(stats_.draws),
                       n(r.draws), n(stats_.world), n(stats_.left_out[static_cast<int>(Verdict::Program)]),
                       n(stats_.left_out[static_cast<int>(Verdict::Target)]), n(stats_.left_out[static_cast<int>(Verdict::Unready)]),
@@ -737,7 +712,8 @@ namespace wxl::vk::gxfront
                       n(p.prewarm_known), n(p.optimized), n(p.compiled_main), p.compiled_main_ms, n(p.parts_main), p.parts_main_ms,
                       n(p.hitches), pipelines::Pipelines::kHitchMs, p.longest_ms, n(p.failed), n(r.programs), n(r.programs_refused),
                       n(c.translated), c.milliseconds, n(c.from_disk), n(c.prewarmed), n(r.target_renderings), n(r.copies), n(s.resolves),
-                      n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(stats_.losses),
+                      n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(r.centred + r.antialiased), n(r.centred),
+                      n(r.antialiased), n(stats_.losses),
                       context_.Lost() ? ", the device is lost" : "");
     }
 }

@@ -122,6 +122,19 @@ namespace wxl::vk::device
         // The 1.2 and 1.3 structures may only be chained for a device of that version; below the
         // floor the device is refused on its version anyway.
         if (out.api < kFloorApi) return;
+        if (out.extensions.sample_locations)
+        {
+            VkPhysicalDeviceSampleLocationsPropertiesEXT locations{};
+            locations.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT;
+            VkPhysicalDeviceProperties2 properties2{};
+            properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            properties2.pNext = &locations;
+            vkGetPhysicalDeviceProperties2(physical, &properties2);
+            const bool centre = locations.sampleLocationCoordinateRange[0] <= 0.5f && locations.sampleLocationCoordinateRange[1] >= 0.5f;
+            if (locations.variableSampleLocations && centre && locations.maxSampleLocationGridSize.width >= 1 &&
+                locations.maxSampleLocationGridSize.height >= 1)
+                out.centre_samples = locations.sampleLocationSampleCounts & ~static_cast<VkSampleCountFlags>(VK_SAMPLE_COUNT_1_BIT);
+        }
         FeatureChain chain(out.extensions.graphics_pipeline_library && out.extensions.pipeline_library);
         vkGetPhysicalDeviceFeatures2(physical, &chain.features2);
         out.features.graphicsPipelineLibrary = chain.gpl.graphicsPipelineLibrary == VK_TRUE;

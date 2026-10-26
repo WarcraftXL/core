@@ -203,6 +203,8 @@ namespace wxl::vk::gxfront
         // face, that is Vulkan's front; CCW its back.
         out.cull      = cull == 1 ? VK_CULL_MODE_FRONT_BIT : cull == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
         out.wireframe = (masters & kMasterFill) == 0;
+        // D3DRS_MULTISAMPLEANTIALIAS (IRsSendToHw); it changes nothing in a target of one sample.
+        out.multisample_off = I(kMultisample) == 0;
 
         // The viewport and scissor, in the target's pixels (IXformSetViewport, IStateSyncScissorRect);
         // a texture target's are not turned upside down.

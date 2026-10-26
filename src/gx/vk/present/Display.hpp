@@ -138,13 +138,14 @@ namespace wxl::vk::present
         void SetSamples(uint32_t count);
         /// The scene's samples per pixel (1 when not multisampled).
         uint32_t Samples() const { return static_cast<uint32_t>(samples_); }
+        /// Whether a draw into the multisampled scene may put its samples on the pixel's centre
+        /// (the device has the sample locations, the scene's depth was made for them).
+        bool CentreSamples() const { return centre_samples_; }
         /// The sample counts the device draws the scene's colour and depth with (VkSampleCountFlags).
         uint32_t SampleCounts() const;
         void SetSync(Sync sync);
         /// Frames shown at least @p interval_ns apart (0: no limit).
         void SetInterval(uint64_t interval_ns) { limiter_.SetInterval(interval_ns); }
-        /// The cursor drawn by the present pass this frame (the software cursor).
-        void SetCursor(const CursorDraw& cursor) { cursor_ = cursor; }
         Pass& PresentPass() { return pass_; }
 
         /// GPU timestamps of each frame to @p sink (null stops them); false when the queue has none.
@@ -247,6 +248,8 @@ namespace wxl::vk::present
 
         /// The offscreen image's pixels (B8G8R8A8) after the last frame, waited for within the bound.
         bool ReadOffscreen(std::vector<uint32_t>& pixels);
+        /// Waits (bounded) until everything submitted so far has completed; false when it did not.
+        bool WaitSubmitted();
 
         static constexpr VkFormat kSceneFormat = VK_FORMAT_B8G8R8A8_UNORM;
         /// How long an acquire may wait for an image before the frame is dropped.
@@ -290,6 +293,7 @@ namespace wxl::vk::present
         resources::Image  resolve_; ///< its one-sample copy, when multisampled
         resources::Image  depth_;
         VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
+        bool                  centre_samples_ = false; ///< CentreSamples()
         uint32_t          samples_wanted_ = 1;
         bool              msaa_dirty_ = false; ///< drawn into since the last resolve
         resources::Buffer pixels_; ///< what ReadScene copies into
@@ -305,7 +309,6 @@ namespace wxl::vk::present
         resources::Image  target_;
         resources::Buffer readback_;
 
-        CursorDraw cursor_;
         FrameHook* hook_ = nullptr;
         uint64_t   epoch_ = 0;
         struct Submitted

@@ -92,11 +92,12 @@ namespace wxl::vk::resources
     }
 
     bool Allocator::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
-                                VkImageAspectFlags aspect, VkSampleCountFlagBits samples)
+                                VkImageAspectFlags aspect, VkSampleCountFlagBits samples, VkImageCreateFlags flags)
     {
         out = Image{};
         VkImageCreateInfo info{};
         info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        info.flags         = flags;
         info.imageType     = VK_IMAGE_TYPE_2D;
         info.format        = format;
         info.extent        = {width, height, 1};

@@ -168,13 +168,22 @@ namespace
         }
         if (!g_window) return false;
         if (g_vk && g_vkGeneration != frame.generation) ReleaseVulkan(); // its device is gone: what it made went with it
+        // Its pipeline is made for the scene's samples (gxMultisample): a new count, a new backend.
+        if (g_vk && g_vk->Samples() != frame.display->Samples())
+        {
+            // The frames before may still draw with it.
+            if (!frame.display->WaitSubmitted()) return false;
+            ReleaseVulkan();
+            g_vkRefused = false;
+        }
         if (!g_vk)
         {
             if (g_vkRefused && g_vkGeneration == frame.generation) return false;
             g_vk           = new wxl::vk::imgui::Renderer();
             g_vkGeneration = frame.generation;
             char why[256]  = {};
-            if (!g_vk->Create(*frame.context, *frame.allocator, frame.display->SceneFormat(), frame.frames, why, sizeof why))
+            if (!g_vk->Create(*frame.context, *frame.allocator, frame.display->SceneFormat(), frame.display->Samples(), frame.frames, why,
+                              sizeof why))
             {
                 WLOG_WARN("core", "wxl.imgui: Dear ImGui's Vulkan backend was not made (%s); the mods' windows are not drawn", why);
                 delete g_vk;
@@ -199,7 +208,9 @@ namespace
     {
         g_vkFrame = false;
         wxl::core::gx::VulkanFrame frame;
-        if (!g_vk || !wxl::core::gx::VulkanOpenFrame(frame) || frame.generation != g_vkGeneration) return;
+        if (!g_vk || !wxl::core::gx::VulkanOpenFrame(frame) || frame.generation != g_vkGeneration ||
+            g_vk->Samples() != frame.display->Samples())
+            return;
         const VkCommandBuffer cmd = frame.display->BeginColorRendering();
         if (!cmd) return;
         g_vk->Record(cmd, ImGui::GetDrawData());

@@ -68,7 +68,7 @@ namespace wxl::vk::shaders
         return m.Words();
     }
 
-    std::vector<uint32_t> PresentFragment(bool alpha_key)
+    std::vector<uint32_t> PresentFragment()
     {
         spirv::Module m(SpvExecutionModelFragment);
         const spirv::Id i32   = m.Int();
@@ -112,19 +112,6 @@ namespace wxl::vk::shaders
         const spirv::Id texture = m.Op(SpvOpLoad, sampled, {source});
         const spirv::Id at      = m.Op(SpvOpLoad, vec2, {uv});
         const spirv::Id c       = m.Op(SpvOpImageSampleImplicitLod, vec4, {texture, at});
-        if (alpha_key)
-        {
-            // if (c.a < 224/255) discard;
-            const spirv::Id a     = m.Op(SpvOpCompositeExtract, f32, {c, 3});
-            const spirv::Id below = m.Op(SpvOpFOrdLessThan, m.Bool(), {a, m.ConstFloat(kAlphaKey)});
-            const spirv::Id kill  = m.NewId();
-            const spirv::Id keep  = m.NewId();
-            m.OpVoid(SpvOpSelectionMerge, {keep, SpvSelectionControlMaskNone});
-            m.OpVoid(SpvOpBranchConditional, {below, kill, keep});
-            m.Label(kill);
-            m.OpVoid(SpvOpKill, {});
-            m.Label(keep);
-        }
         const spirv::Id rgb     = m.Op(SpvOpVectorShuffle, vec3, {c, c, 0, 1, 2});
         const spirv::Id clamped = m.Ext(vec3, GLSLstd450FClamp, {rgb, zero3, one3});
         const spirv::Id x       = m.Op(SpvOpVectorTimesScalar, vec3, {clamped, top});

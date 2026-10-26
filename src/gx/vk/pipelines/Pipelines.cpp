@@ -377,6 +377,13 @@ namespace wxl::vk::pipelines
         return static_cast<uint8_t>(targets_.size() - 1);
     }
 
+    bool Pipelines::CentreSamples(uint8_t target) const
+    {
+        if (!context_ || target >= targets_.size()) return false;
+        const uint32_t samples = targets_[target].samples;
+        return samples > 1 && (context_->Chosen().centre_samples & samples) != 0;
+    }
+
     // --- Making a pipeline or a part ------------------------------------------------------------------------
 
     Pipelines::Recipe Pipelines::RecipeOf(const Key& key) const
@@ -390,6 +397,7 @@ namespace wxl::vk::pipelines
         r.color_mask = key.color_mask;
         r.topology   = key.topology;
         r.wireframe  = key.wireframe;
+        r.centre     = key.centre && CentreSamples(key.target);
         return r;
     }
 
@@ -400,8 +408,11 @@ namespace wxl::vk::pipelines
         {
         case Part::VertexInput: fields = key.layout | static_cast<uint64_t>(key.topology) << 16; break;
         case Part::PreRaster: fields = key.vertex | static_cast<uint64_t>(key.wireframe) << 16; break;
-        case Part::Fragment: fields = key.pixel | static_cast<uint64_t>(key.target) << 16; break;
-        case Part::Output: fields = key.blend | static_cast<uint64_t>(key.color_mask) << 8 | static_cast<uint64_t>(key.target) << 16; break;
+        case Part::Fragment: fields = key.pixel | static_cast<uint64_t>(key.target) << 16 | static_cast<uint64_t>(key.centre) << 24; break;
+        case Part::Output:
+            fields = key.blend | static_cast<uint64_t>(key.color_mask) << 8 | static_cast<uint64_t>(key.target) << 16 |
+                     static_cast<uint64_t>(key.centre) << 24;
+            break;
         default: break;
         }
         return static_cast<uint64_t>(part) << 56 | fields;
@@ -448,6 +459,23 @@ namespace wxl::vk::pipelines
         VkPipelineMultisampleStateCreateInfo multisample{};
         multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(target.samples ? target.samples : 1);
+        // D3D9's MULTISAMPLEANTIALIAS off: "the samples are all written with the same value, sampled
+        // at the pixel's centre". Every sample placed on the centre takes the centre's coverage and
+        // depth; the colour is computed once per pixel as for any draw here (no sample shading).
+        VkSampleLocationEXT                     centres[16];
+        VkPipelineSampleLocationsStateCreateInfoEXT locations{};
+        if (recipe.centre && multisample.rasterizationSamples > VK_SAMPLE_COUNT_1_BIT && multisample.rasterizationSamples <= 16)
+        {
+            for (VkSampleLocationEXT& c : centres) c = {0.5f, 0.5f};
+            locations.sType                                 = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
+            locations.sampleLocationsEnable                 = VK_TRUE;
+            locations.sampleLocationsInfo.sType             = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT;
+            locations.sampleLocationsInfo.sampleLocationsPerPixel = multisample.rasterizationSamples;
+            locations.sampleLocationsInfo.sampleLocationGridSize  = {1, 1};
+            locations.sampleLocationsInfo.sampleLocationsCount    = static_cast<uint32_t>(multisample.rasterizationSamples);
+            locations.sampleLocationsInfo.pSampleLocations        = centres;
+            multisample.pNext                               = &locations;
+        }
 
         VkPipelineDepthStencilStateCreateInfo depth{};
         depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -875,7 +903,7 @@ namespace wxl::vk::pipelines
         d.blend      = key.blend;
         d.color_mask = key.color_mask;
         d.topology   = static_cast<uint8_t>(key.topology);
-        d.wireframe  = key.wireframe ? 1 : 0;
+        d.wireframe  = static_cast<uint8_t>((key.wireframe ? 1 : 0) | (key.centre ? 2 : 0));
         std::string bytes(reinterpret_cast<const char*>(&d), sizeof d);
         if (!known_bytes_.insert(std::move(bytes)).second) return;
         fresh_.push_back(d);
@@ -898,7 +926,8 @@ namespace wxl::vk::pipelines
             key.blend      = d.blend;
             key.color_mask = d.color_mask;
             key.topology   = static_cast<TopologyClass>(std::min<uint8_t>(d.topology, 2));
-            key.wireframe  = d.wireframe != 0;
+            key.wireframe  = (d.wireframe & 1) != 0;
+            key.centre     = (d.wireframe & 2) != 0 && CentreSamples(key.target);
             const uint64_t packed = key.Packed();
             if (pipelines_.count(packed) || queued_.count(packed)) continue;
             Queue(Part::Whole, packed, RecipeOf(key), true);
