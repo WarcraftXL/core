@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The Unit seams: what the runtime does at a unit's death and aura changes, on both builds.
+// The Unit seams: what the runtime does at a unit's death and aura changes, and around the circles
+// drawn under it, on both builds.
 
 #include "wxl/seams/seams.h"
 
 #include "services/PoseService.hpp"
+#include "services/SelectionCircleService.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -169,4 +171,32 @@ namespace wxl::seam::Unit::PreAnimate
         // The game has set its own twist on the unit's head bone; a mod's turn goes over it.
         wxl::core::services::pose::PreAnimate(self);
     }
+}
+
+namespace wxl::seam::Unit::RenderTargetSelection
+{
+    // The target's circle (wxl.selectioncircle), for a unit of a reaction.
+    void WXL_CALL Before(const void* self) { wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_TARGET, self, true); }
+    void WXL_CALL After(const void*) { wxl::core::services::selectioncircle::End(); }
+}
+
+namespace wxl::seam::Unit::RenderPetTargetSelection
+{
+    // The ring closing on the pet's new target.
+    void WXL_CALL Before(const void* self)
+    {
+        wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_PET_TARGET, self, true);
+    }
+    void WXL_CALL After(const void*) { wxl::core::services::selectioncircle::End(); }
+}
+
+namespace wxl::seam::Unit::RenderAutoTrackCursor
+{
+    // The move marker, drawn by the active mover: under no unit, so of no reaction. Every unit
+    // passes here as it is drawn; only the mover projects anything.
+    void WXL_CALL Before(void* self)
+    {
+        wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_MOVE_MARKER, self, false);
+    }
+    void WXL_CALL After(void*) { wxl::core::services::selectioncircle::End(); }
 }

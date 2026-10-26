@@ -960,6 +960,21 @@ class Callee:
         return "cdecl"
 
 
+def fills_pushed_slot(insns, position):
+    """Whether the dword a `push reg` at `position` puts on the stack is only room for a value
+    stored there afterwards: MSVC passes a float argument as `push ecx` then `fstp dword ptr
+    [esp]`, whatever ecx held. True when a store to [esp] comes before anything else moves the
+    stack or reads it."""
+    for insn in insns[position + 1:]:
+        ops = insn.operands
+        target = ops[0].replace(" ", "") if ops else ""
+        if insn.mn in ("fstp", "fst", "mov") and target.endswith("[esp]"):
+            return True
+        if insn.mn in ("push", "pop", "call", "ret", "retn") or "esp" in insn.ops or insn.mn.startswith("j"):
+            return False
+    return False
+
+
 def read_callee(insns):
     """Register arguments, stack arguments and stack cleanup, from the function's own code."""
     facts = Callee()
@@ -972,7 +987,7 @@ def read_callee(insns):
 
     written, seen_call, esp = set(), False, 0
     prologue = True
-    for insn in insns:
+    for position, insn in enumerate(insns):
         ops = insn.operands
         first = ops[0] if ops else ""
 
@@ -1042,6 +1057,8 @@ def read_callee(insns):
             writes = registers(ops[0])[0]
         if insn.mn == "push" and first in saved:
             reads -= {first}          # a save, however late the compiler placed it
+        if insn.mn == "push" and first in VOLATILE and fills_pushed_slot(insns, position):
+            reads -= {first}          # four bytes of argument space, the value stored after
 
         for reg in reads - written - {"esp", "ebp"}:
             # After a call, eax, ecx and edx hold whatever the callee left: reading one there

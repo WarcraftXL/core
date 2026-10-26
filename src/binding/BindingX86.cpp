@@ -927,6 +927,31 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    void* circle_swap_texture(void* texture)
+    {
+        if (!IsClient() || !OnMainThread()) return nullptr;
+        void** slot = reinterpret_cast<void**>(WXL_STATIC("CGObject_C::s_selectionTexture"));
+        void*  held = *slot;
+        *slot       = texture;
+        return held;
+    }
+
+    void* texture_open(const char* path)
+    {
+        if (!IsClient() || !OnMainThread() || !path || !*path) return nullptr;
+        // CreateTexture(fileName, status): cdecl, two dwords (TextureCreate with clamped
+        // CGxTexFlags(GxTex_LinearMipNearest), 0x004E8D30); the client's global status takes
+        // what the load reports later (GetGlobalStatusObj, cdecl, nothing).
+        void* status = x86::CallFree<void*>(WXL_SITE("GetGlobalStatusObj", 0));
+        return x86::CallFree<void*>(WXL_SITE("CreateTexture", 0), path, status);
+    }
+
+    void texture_close(void* texture)
+    {
+        // HandleClose(handle): cdecl, one dword (0x0047BF30).
+        if (IsClient() && OnMainThread() && texture) x86::CallFree<void>(WXL_SITE("HandleClose", 0), texture);
+    }
+
     uint32_t m2_children(const void* model, void** out, uint32_t capacity)
     {
         if (!IsClient() || !model) return 0;

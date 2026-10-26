@@ -19,6 +19,7 @@
 #include "services/InputService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
 #include "services/M2Service.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -54,6 +55,7 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::pose::Clear();
         wxl::core::services::imgui::Shutdown();
         wxl::core::services::highlight::Clear();
+        wxl::core::services::selectioncircle::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
         {
             wxl::core::objects::Service().DropWatches(token);

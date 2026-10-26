@@ -230,6 +230,7 @@ add_library(wxl-core SHARED
     src/services/WorldService.cpp
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
+    src/services/SelectionCircleService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -281,6 +282,7 @@ add_executable(wxl-core-seam-harness
     src/services/WorldService.cpp
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
+    src/services/SelectionCircleService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}

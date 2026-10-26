@@ -155,6 +155,13 @@ TAIL_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (2, "push 5"), (5, "cal
                    (2, "push 1"), (2, "push 2"), (5, "call 0x402000"), (3, "add esp, 0xc"),
                    (1, "pop ebp"), (1, "ret"))
 TAIL_CALL = address_of(0x00402200, TAIL_CALLER, "call 0x402000")
+# MSVC's float argument: `push ecx` makes room, `fstp dword ptr [esp]` fills it; ecx is never
+# read. Without the store, the push reads ecx.
+FLOAT_SLOT = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"), (1, "push ecx"),
+                  (3, "fld dword ptr [ebp + 0xc]"), (3, "fstp dword ptr [esp]"), (3, "add esp, 4"),
+                  (1, "pop ebp"), (1, "ret"))
+PUSHED_ECX = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"), (1, "push ecx"),
+                  (3, "add esp, 4"), (1, "pop ebp"), (1, "ret"))
 
 PROGRAM = {
     0x00401000: CDECL_TWO,
@@ -180,6 +187,8 @@ PROGRAM = {
     0x00402000: TAIL_TWO,
     0x00402100: CDECL_ONE,
     0x00402200: TAIL_CALLER,
+    0x00402300: FLOAT_SLOT,
+    0x00402340: PUSHED_ECX,
 }
 
 # (name, address, extent)
@@ -194,7 +203,8 @@ SYMBOLS = [("Thing::Plain", 0x00401000, 0x20), ("Thing::Owned", 0x00401100, 0x20
            ("Thing::OrOne", 0x00401CC0, 0x10), ("Thing::Dispatched", 0x00401D00, 0x10),
            ("Thing::Helper", 0x00401E00, 0x10), ("Thing::Dispatcher", 0x00401F00, 0x20),
            ("Thing::Tail", 0x00402000, 0x10), ("Thing::One", 0x00402100, 0x10),
-           ("Thing::TailCaller", 0x00402200, 0x20)]
+           ("Thing::TailCaller", 0x00402200, 0x20), ("Thing::FloatSlot", 0x00402300, 0x20),
+           ("Thing::PushedEcx", 0x00402340, 0x20)]
 
 
 def flatten():
@@ -429,6 +439,12 @@ CASES = [
     ("`or r, 1` reads the register it sets",
      DEMO_DEF + 'WXL_SEAM(Demo, OrOne, "Thing::OrOne", int32_t, cdecl, ())\n',
      THUNKS, 1, "declared cdecl, but 0x00401CC0 is regparm (EDI) + 0 stack dword(s)", ()),
+    ("a `push ecx` that only makes room for a float stored there is no read of ecx",
+     DEMO_DEF + 'WXL_SEAM(Demo, FloatSlot, "Thing::FloatSlot", void, cdecl, (int32_t a, float b))\n',
+     THUNKS, 0, "agree", ()),
+    ("a `push ecx` whose slot nothing fills reads ecx",
+     DEMO_DEF + 'WXL_SEAM(Demo, PushedEcx, "Thing::PushedEcx", void, cdecl, (int32_t a))\n',
+     THUNKS, 1, "declared cdecl, but 0x00402340 is thiscall (ECX)", ()),
     # A witness: a call site the row declares, read like a found one.
     ("a handler reached only through a pointer, without a witness",
      DEMO_DEF + DISPATCHED, THUNKS, 1,
@@ -907,6 +923,16 @@ GROUND_TRUTH = {
     # CGWorldFrame::PerformDefaultAction reads ECX into ESI (0x004F7887) and its button at
     # [ebp+8] (0x004F78C7), and ends `ret 4` on every path (0x004F78E7, 0x004F7A38).
     "WorldFrame.PerformDefaultAction": ("0x004F7880", "thiscall", ["ecx"], 1),
+    # The circles' drawers, members called through the vtable or by CGUnit_C::Render with no
+    # stack argument: each moves ECX to ESI first (0x00725991, 0x00725BF7, 0x007275C7,
+    # 0x007062F7) and ends in one bare `ret` (0x00725BD6, 0x00725DE6, 0x00727759, 0x00706429).
+    "Unit.RenderTargetSelection":      ("0x00725980", "thiscall", ["ecx"], 0),
+    "Unit.RenderPetTargetSelection":   ("0x00725BF0", "thiscall", ["ecx"], 0),
+    "Unit.RenderAutoTrackCursor":      ("0x007275C0", "thiscall", ["ecx"], 0),
+    "Corpse.RenderTargetSelection":    ("0x007062F0", "thiscall", ["ecx"], 0),
+    # ProjectTex::Render2d reads seven dwords from [ebp+8] and ends in a bare `ret` (0x007E447B);
+    # CGUnit_C::RenderTargetSelection pushes seven and cleans 0x1c (0x00725A8F).
+    "ProjectTex.Render2d":             ("0x007E4370", "cdecl", [], 7),
     "Point.CM2Cache_CreateShared":     ("0x0081C390", "thiscall", ["ecx"], 2),
     "Point.CGWorldFrame_RenderWorld":  ("0x004FAF90", "cdecl", [], 1),
     "Point.vFrameScript_SignalEvent":  ("0x0081AC90", "cdecl", [], 3),
@@ -977,6 +1003,13 @@ GROUND_TRUTH = {
     "ObjectCall.CanAttack":            ("0x00729740", "thiscall", ["ecx"], 1),
     "ObjectCall.CanInteractNow":       ("0x00729620", "thiscall", ["ecx"], 1),
     "ObjectCall.CanHighlight":         ("0x0070F580", "thiscall", ["ecx"], 0),
+    # The circle textures' calls (calls_x86.def), read by hand: CreateTexture reads its name and
+    # status at [ebp+8] and [ebp+0xc] (0x004E8D50) and ends in a bare `ret` (0x004E8D68);
+    # GetGlobalStatusObj is `mov eax, imm32; ret` (0x0047C095); HandleClose reads its handle at
+    # [ebp+8] (0x0047BF33) and ends in bare `ret`s.
+    "TextureCall.CreateTexture":       ("0x004E8D30", "cdecl", [], 2),
+    "TextureCall.GetGlobalStatusObj":  ("0x0047C090", "cdecl", [], 0),
+    "TextureCall.HandleClose":         ("0x0047BF30", "cdecl", [], 1),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read

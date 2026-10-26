@@ -11,6 +11,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -38,6 +39,8 @@ namespace wxl::seam::WorldFrame::RenderWorld
         // The world and the text in it are drawn, and nothing of the interface over it yet: the
         // highlights go onto it first, then the mods' own passes.
         wxl::core::services::highlight::WorldEnd();
+        // The circles of the frame are drawn: their counts are the last frame's now.
+        wxl::core::services::selectioncircle::WorldEnd();
         wxl_frame_args args{};
         if (!wxl::core::frame::Current(args)) return;
         host->Raise(WXL_EV_WorldRenderEnd, &args);

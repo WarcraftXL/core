@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The ProjectTex domain: seams on the projection of a texture onto the ground and the buildings.
+
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including projecttex.def"
+#endif
+
+// Projects the bound texture over the terrain, the map objects and the doodads inside `box`
+// (a CAaBox: two C3Vector corners), turned by `matrix`, in `color` (a CImVector, BGRA): the
+// selection circles, the click-to-move marker, a ground-targeted spell's cursor, a missile's
+// trajectory. A free function: cdecl, seven dwords, the box and the colour by address (`add esp,
+// 0x1c` after the call at 0x00725A8A).
+//
+// Gated, and nothing done outside a circle of wxl.selectioncircle's (the drawers' Before
+// opens one): a circle a mod hid is taken (not drawn); one it restyled goes on with the box and
+// the colour pointing at the service's own copies, scaled around their centre and recoloured.
+WXL_SEAM_GATE(ProjectTex, Render2d, "ProjectTex::Render2d", void, cdecl, (const void* box, const void* color, const void* matrix, float fade, uint32_t a5, uint32_t a6, float polygon_offset))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

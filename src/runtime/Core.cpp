@@ -23,6 +23,7 @@
 #include "services/InputService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -126,9 +127,11 @@ namespace
         // The camera goes back to the client, the pointer is let go.
         wxl::core::services::camera::ForgetMod(token);
         wxl::core::services::input::ForgetMod(token);
-        // Its heads go back to their animations, its highlights come off.
+        // Its heads go back to their animations, its highlights come off, the game's circles
+        // get back the look it changed.
         wxl::core::services::pose::ForgetMod(token);
         wxl::core::services::highlight::ForgetMod(token);
+        wxl::core::services::selectioncircle::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a
