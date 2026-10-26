@@ -2,12 +2,15 @@
 // Copyright (c) 2026 WarcraftXL
 //
 // The log: a launch's file kept for the next, the oldest pruned, levels by tag, continuation
-// lines, and WarcraftXL.ini. Run with a scratch folder:
+// lines, WarcraftXL.ini and the graphics API its [gx] section selects. Run with a scratch folder:
 //
 //     wxl-core-log-tests <scratch>
 
 #include "common/Log.hpp"
+#include "gx/Select.hpp"
 #include "runtime/Settings.hpp"
+
+#include "wxl/core/gx_vk.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -237,6 +240,47 @@ int main(int argc, char** argv)
                   std::strstr(bad.problems[4], "lan") && std::strstr(bad.problems[5], "line 7") &&
                   std::strstr(bad.problems[5], "[profile]"),
               "each value that does not read, and an unknown key, is noted with its line");
+
+        // [gx]: the API over the client's request, Vulkan's validation and device.
+        using wxl::core::settings::GxApi;
+        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0],
+              "without a [gx] section the client's own choice stands");
+        const char gxText[] = "[GX]\n"
+                              "api = Vulkan ; tried first\n"
+                              "validation = 1\n"
+                              "gpu = GeForce RTX\n";
+        wxl::core::settings::Settings gx;
+        wxl::core::settings::Parse(gxText, sizeof gxText - 1, gx);
+        Check(gx.gx_api == GxApi::vulkan && gx.gx_validation && std::strcmp(gx.gx_gpu, "GeForce RTX") == 0 &&
+                  gx.problem_count == 0,
+              "[gx] api, validation and gpu, in any case, a comment after a value");
+        const char gxBad[] = "[gx]\n"
+                             "api = d3d11\n"
+                             "validation = on\n"
+                             "gpu =\n"
+                             "vsync = 1\n"
+                             "api = d3d9\n";
+        wxl::core::settings::Settings gxb;
+        wxl::core::settings::Parse(gxBad, sizeof gxBad - 1, gxb);
+        Check(gxb.gx_api == GxApi::d3d9 && !gxb.gx_validation && !gxb.gx_gpu[0] && gxb.problem_count == 4 &&
+                  std::strstr(gxb.problems[0], "d3d11") && std::strstr(gxb.problems[1], "on") &&
+                  std::strstr(gxb.problems[2], "line 4") && std::strstr(gxb.problems[3], "[gx]"),
+              "each [gx] value that does not read, and an unknown key, is noted; the last api line holds");
+
+        using wxl::core::gx::SelectApi;
+        Check(SelectApi(WXL_GX_API_D3D9, GxApi::client).api == WXL_GX_API_D3D9 &&
+                  !SelectApi(WXL_GX_API_D3D9, GxApi::client).why &&
+                  SelectApi(WXL_GX_API_VULKAN, GxApi::client).api == WXL_GX_API_VULKAN &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::client).api == WXL_GX_API_D3D9EX,
+              "without [gx] api the client's request stands, D3D9 by default");
+        Check(SelectApi(WXL_GX_API_D3D9, GxApi::vulkan).api == WXL_GX_API_VULKAN &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::vulkan).api == WXL_GX_API_VULKAN &&
+                  std::strstr(SelectApi(WXL_GX_API_D3D9EX, GxApi::vulkan).why, "D3D9Ex") &&
+                  SelectApi(WXL_GX_API_OPENGL, GxApi::vulkan).api == WXL_GX_API_OPENGL,
+              "[gx] api = vulkan takes D3D9 and D3D9Ex to Vulkan, and leaves OpenGL");
+        Check(SelectApi(WXL_GX_API_VULKAN, GxApi::d3d9).api == WXL_GX_API_D3D9 &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::d3d9).api == WXL_GX_API_D3D9EX,
+              "[gx] api = d3d9 takes a Vulkan request to D3D9 and leaves D3D9Ex");
 
         Level level;
         Check(wxl::log::ParseLevel(" WARN ", level) && level == Level::Warn && wxl::log::ParseLevel("1", level) &&

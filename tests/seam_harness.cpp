@@ -15,6 +15,7 @@
 #include "runtime/Code.hpp"
 #include "runtime/Crash.hpp"
 #include "runtime/Frame.hpp"
+#include "gx/Vulkan.hpp"
 #include "runtime/Stages.hpp"
 #include "seams/Gameplay.hpp"
 #include "seams/Table.hpp"
@@ -43,6 +44,8 @@
 #include "wxl/host/mod_host.hpp"
 #include "wxl/seams/seams.h"
 #include "wxl/core/points.h"
+#include "wxl/core/gx_vk.h"
+#include "wxl/engine/gx.hpp"
 #include "wxl/core/profile.h"
 #include "wxl/core/storm.hpp"
 #include "wxl/objects/map.hpp"
@@ -4313,6 +4316,31 @@ namespace
         wxl::seam::ConsoleDevice::Initialize::After("World of Warcraft", true, true);
         Check(wxl::core::stages::Reached() == WXL_STAGE_GRAPHICS,
               "one that left a device announces the graphics stage");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"),
+              "without [gx] api = vulkan the device's bring-up loads no Vulkan loader: D3D9 as it was");
+
+        // The table the recompiled client's CGxDeviceVk calls, without [gx] in the settings.
+        const wxl_gx_vk_backend* vk = WarcraftXLGxVulkan();
+        Check(vk && vk->struct_size == sizeof(wxl_gx_vk_backend) && vk->select_api && vk->device_create &&
+                  vk->device_destroy && vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
+              "the Vulkan table is whole, with the layout of CGxDevice it reads the engine by");
+        Check(vk && vk->select_api(WXL_GX_API_D3D9) == WXL_GX_API_D3D9 && vk->select_api(WXL_GX_API_D3D9EX) == WXL_GX_API_D3D9EX &&
+                  vk->select_api(WXL_GX_API_VULKAN) == WXL_GX_API_VULKAN,
+              "without [gx] api the client's request stands");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"), "and choosing loads no Vulkan loader either");
+
+        // [gx] api = vulkan on a client with no adapter (the stock one): the device is made beside
+        // the client's, logged and released, or refused with a reason; the loader goes with it.
+        wxl::core::settings::Settings vulkan;
+        vulkan.gx_api = wxl::core::settings::GxApi::vulkan;
+        char why[512] = {};
+        const wxl::core::gx::Outcome outcome = wxl::core::gx::DeviceReady(vulkan, why, sizeof why);
+        std::printf("     [gx] api = vulkan here: %s%s\n",
+                    outcome == wxl::core::gx::Outcome::released ? "a device was made and released" : "no device: ", why);
+        Check(outcome == wxl::core::gx::Outcome::released || (outcome == wxl::core::gx::Outcome::failed && why[0]),
+              "[gx] api = vulkan makes a device and releases it, or says why there is none");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"), "the Vulkan loader is unloaded after it, the client being on D3D9");
+        Check(wxl::core::gx::DeviceReady(vulkan) == wxl::core::gx::Outcome::not_asked, "and it is asked once per launch");
         wxl::core::stages::Reach(WXL_STAGE_SCRIPT);
         Check(wxl::core::stages::Reached() == WXL_STAGE_SCRIPT, "and script still follows it");
     }
