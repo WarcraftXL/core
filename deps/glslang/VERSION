@@ -1,0 +1,6 @@
+glslang vulkan-sdk-1.4.357.0 (16.4.0, https://github.com/KhronosGroup/glslang, commit 168d452a4f460d24b588fed08477a81c44ee27a1),
+BSD-3-Clause and the other permissive licences of LICENSE.txt. Kept: CMakeLists.txt, the compiler (glslang/), its SPIR-V back
+end (SPIRV/), the command-line tool (StandAlone/), External/, the build scripts it runs (build_info.py,
+gen_extension_headers.py, parse_version.cmake, build_info.h.tmpl), unmodified; its tests, test data and CI files are left
+out. Built for the build machine (cmake/wxl_glsl.cmake), never shipped: it compiles the renderer's own GLSL to the SPIR-V
+WarcraftXL.dll embeds.
