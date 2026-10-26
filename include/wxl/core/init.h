@@ -107,6 +107,9 @@ typedef struct wxl_core_camera
     wxl_vec3 pivot;     ///< m_targetPosition raised by m_height
     uint64_t followed;  ///< m_targetGUID, 0 when it follows nothing
     uint32_t cinematic; ///< nonzero while a model camera (m_model) has the view
+    float    roll;      ///< radians around `forward`, positive to the camera's right, which
+                        ///< camera_write turns the facing by (wxl/core/camera_facing.hpp);
+                        ///< camera_read leaves it as it is
 } wxl_core_camera;
 
 /// A model file (CM2Shared) as the loader holds it: the path it was opened by, its parsed header

@@ -45,6 +45,7 @@
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
 #include "wxl/seams/seams.h"
+#include "wxl/core/camera_facing.hpp"
 #include "wxl/core/points.h"
 #include "wxl/core/gx_vk.h"
 #include "wxl/engine/gx.hpp"
@@ -1761,6 +1762,14 @@ namespace
         FakeCamera& fake   = *static_cast<FakeCamera*>(camera);
         fake.view.position = view->position;
         fake.view.forward  = view->forward;
+        // The rows as the bindings build them: SetFacing's, turned by the roll.
+        wxl_vec3 rows[3];
+        if (wxl::core::camera_facing::Facing(view->forward, view->roll, rows))
+        {
+            fake.view.forward = rows[0];
+            fake.view.left    = rows[1];
+            fake.view.up      = rows[2];
+        }
         // FOV() is m_fov plus the effects' offset, which the fake keeps as the difference.
         fake.view.fov      = view->fov_base + (fake.view.fov - fake.view.fov_base);
         fake.view.fov_base = view->fov_base;
@@ -3867,6 +3876,37 @@ namespace
         std::thread([&] { fromThread = api.set_view(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0); }).join();
         Check(fromThread == WXL_E_INVALID, "off the main thread a view is refused");
 
+        // A roll: the rows turned around the forward, read back, and 0 the unrolled rows exactly.
+        {
+            namespace facing = wxl::core::camera_facing;
+            wxl_vec3 level[3], none[3], rolled[3];
+            facing::FaceDirection(wxl_vec3{0.6f, -0.3f, 0.2f}, level);
+            facing::Facing(wxl_vec3{0.6f, -0.3f, 0.2f}, 0.0, none);
+            Check(std::memcmp(level, none, sizeof level) == 0, "a roll of 0 leaves SetFacing's rows bit for bit");
+            facing::Facing(wxl_vec3{1.0f, 0.0f, 0.0f}, 0.3, rolled);
+            Check(rolled[2].y < 0.0f && std::fabs(rolled[2].z - std::cos(0.3f)) < 1e-6f &&
+                      std::fabs(facing::Dot(rolled[0], rolled[2])) < 1e-6f && std::fabs(facing::Dot(rolled[1], rolled[2])) < 1e-6f,
+                  "a positive roll leans the camera's up to its right (east, looking north), the rows kept square");
+            Check(std::fabs(facing::RollOf(wxl_vec3{1.0f, 0.0f, 0.0f}, rolled[2]) - 0.3) < 1e-6 &&
+                      std::fabs(facing::RollOf(level[0], level[2])) < 1e-6,
+                  "the roll is read back from the rows, 0 for level ones");
+        }
+        Check(api.set_view_rolled(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0, std::nan("")) == WXL_E_INVALID,
+              "a roll that is not a number is invalid");
+        Check(api.set_view_rolled(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0, -0.4) == WXL_OK, "a rolled view is set");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        double roll = 0.0;
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll + 0.4) < 1e-5, "it is written rolled, and Roll reads it back");
+        Check(api.set_view_rolled(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0, 0.4 + 6.283185307179586) == WXL_OK,
+              "a roll past a turn is taken modulo a turn");
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll - 0.4) < 1e-5, "and drawn as its remainder");
+        Check(api.set_view(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0) == WXL_OK, "SetView after it");
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll) < 1e-6, "draws level again");
+        Check(api.release_view() == WXL_OK, "and the view goes");
+
         wxl::core::frame::End(frame);
         g_host->Events().Unsubscribe(sub);
         g_worldCamera = nullptr;
@@ -4234,6 +4274,36 @@ namespace
         wxl::core::services::input::Present();
         wxl::core::services::input::Clear();
         Check(api.cursor_captured() == WXL_FALSE, "the shutdown lets every capture go");
+
+        // A point of the window: the last to capture or move has its point, the earlier's comes back.
+        wxl_vec3 point{};
+        Check(api.capture_point(&point) == WXL_E_NOT_FOUND, "nobody holds the pointer: it is held nowhere");
+        Check(api.capture_cursor_at(1.2, 0.5) == WXL_E_INVALID && api.capture_cursor_at(0.5, std::nan("")) == WXL_E_INVALID &&
+                  api.cursor_captured() == WXL_FALSE,
+              "a point off the window is invalid and captures nothing");
+        Check(api.capture_cursor_at(0.5, 0.375) == WXL_OK && api.cursor_captured() == WXL_TRUE &&
+                  api.capture_point(&point) == WXL_OK && point.x == 0.5f && point.y == 0.375f,
+              "a capture at a point holds it there");
+        const wxl::host::ModHost::ModToken previous = g_host->SwapCurrentMod(7);
+        Check(api.capture_cursor(WXL_TRUE) == WXL_OK && api.capture_point(&point) == WXL_OK && point.y == 0.5f,
+              "a later mod's capture at the centre has the pointer at the centre");
+        g_host->SwapCurrentMod(previous);
+        Check(api.capture_cursor_at(0.25, 0.375) == WXL_OK && api.capture_point(&point) == WXL_OK && point.x == 0.25f,
+              "the first moving its hold has its point again");
+        Check(api.capture_cursor(WXL_FALSE) == WXL_OK && api.capture_point(&point) == WXL_OK && point.y == 0.5f &&
+                  api.cursor_captured() == WXL_TRUE,
+              "and letting go gives the other's back");
+        wxl::core::services::input::ForgetMod(7);
+        Check(api.cursor_captured() == WXL_FALSE, "until it goes too");
+        long px = 0, py = 0;
+        wxl::core::services::input::PixelAt(1920, 1080, 0.5, 0.5, px, py);
+        Check(px == 960 && py == 540, "the centre is the pixel it always was");
+        wxl::core::services::input::PixelAt(1281, 721, 0.5, 0.5, px, py);
+        Check(px == 640 && py == 360, "of an odd size too");
+        wxl::core::services::input::PixelAt(1920, 1080, 0.5, 0.4, px, py);
+        Check(px == 960 && py == 432, "a point above the centre");
+        wxl::core::services::input::PixelAt(1920, 1080, 1.0, 0.0, px, py);
+        Check(px == 1919 && py == 0, "the edges stay on the window");
 
         const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_MouseWheel, &OnWheel, nullptr, 0);
         void*     window  = reinterpret_cast<void*>(0x2000);

@@ -14,6 +14,7 @@
 #include "runtime/Image.hpp"
 
 #include "wxl/events.h"
+#include "wxl/core/camera_facing.hpp"
 #include "wxl/core/gpu.hpp"
 #include "wxl/core/storm.hpp"
 #include "wxl/offsets/layout.hpp"
@@ -1602,35 +1603,13 @@ namespace wxl::core::binding
             return Read<wxl_vec3>(camera, kFacing + row * sizeof(wxl_vec3));
         }
 
-        float Dot(const wxl_vec3& a, const wxl_vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+        using camera_facing::Dot;
 
         /// v * m, the client's operator*(C3Vector, C33Matrix): v's components weigh m's rows.
         wxl_vec3 Times(const wxl_vec3& v, const float (&m)[9])
         {
             return wxl_vec3{v.x * m[0] + v.y * m[3] + v.z * m[6], v.x * m[1] + v.y * m[4] + v.z * m[7],
                             v.x * m[2] + v.y * m[5] + v.z * m[8]};
-        }
-
-        /// The facing rows CSimpleCamera::SetFacing(forward) builds (FaceDirection, 0x00607DF0):
-        /// the direction normalised, the client's right a quarter turn to the left of it in the
-        /// ground plane (+x when the direction is vertical), and up from the two. False for a
-        /// zero direction.
-        bool FaceDirection(wxl_vec3 direction, wxl_vec3 (&rows)[3])
-        {
-            const float length = std::sqrt(Dot(direction, direction));
-            if (!(length > 1e-6f)) return false;
-            const wxl_vec3 f{direction.x / length, direction.y / length, direction.z / length};
-            wxl_vec3       r{1.0f, 0.0f, 0.0f};
-            const float    flat = f.x * f.x + f.y * f.y;
-            if (flat >= 0.00000023841858f)
-            {
-                const float scale = 1.0f / std::sqrt(flat);
-                r                 = wxl_vec3{-f.y * scale, f.x * scale, 0.0f};
-            }
-            rows[0] = f;
-            rows[1] = r;
-            rows[2] = wxl_vec3{-(r.y * f.z), f.z * r.x, r.y * f.x - f.y * r.x};
-            return true;
         }
 
         /// The rotation from the camera's parent to the world, when it has one: ParentToWorld,
@@ -1682,8 +1661,10 @@ namespace wxl::core::binding
     void camera_write(void* camera, const wxl_core_camera* view)
     {
         if (!IsClient() || !camera || !view) return;
+        // The rows SetFacing(forward) builds, turned by the roll: the view matrix takes its up
+        // from the third (SetGxProjectionAndView), so the world and the pick turn with it.
         wxl_vec3 rows[3];
-        if (!FaceDirection(view->forward, rows)) return;
+        if (!camera_facing::Facing(view->forward, view->roll, rows)) return;
         float parent[9];
         if (ParentRotation(camera, parent))
         {

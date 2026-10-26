@@ -13,6 +13,7 @@
 #include "common/Log.hpp"
 #include "runtime/Core.hpp"
 
+#include "wxl/core/camera_facing.hpp"
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
 
@@ -30,7 +31,8 @@ namespace
         uint32_t mod;
         wxl_vec3 position;
         wxl_vec3 forward;
-        double   fov; ///< radians; 0 keeps the client's
+        double   fov;  ///< radians; 0 keeps the client's
+        double   roll; ///< radians around forward, positive to the camera's right
     };
 
     /// Newest first. Main thread only, as every call that reaches it.
@@ -130,6 +132,13 @@ namespace
         return WXL_OK;
     }
 
+    wxl_result WXL_CALL Roll(double* out)
+    {
+        WXL_CAMERA_READ("Roll");
+        *out = camera_facing::RollOf(camera.forward, camera.up);
+        return WXL_OK;
+    }
+
     #undef WXL_CAMERA_READ
 
     wxl_bool WXL_CALL Cinematic()
@@ -142,13 +151,17 @@ namespace
 
     bool Finite(const wxl_vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
-    wxl_result WXL_CALL SetView(wxl_vec3 position, wxl_vec3 forward, double fov)
+    /// SetView and SetViewRolled: the caller's view, newest first.
+    wxl_result Place(const char* call, std::atomic<bool>& said, wxl_vec3 position, wxl_vec3 forward, double fov,
+                     double roll)
     {
-        static std::atomic<bool> said{false};
-        if (!OnGameThread("SetView", said)) return WXL_E_INVALID;
+        if (!OnGameThread(call, said)) return WXL_E_INVALID;
         const float length = forward.x * forward.x + forward.y * forward.y + forward.z * forward.z;
         if (!Finite(position) || !Finite(forward) || !(length > 1e-12f)) return WXL_E_INVALID;
         if (!std::isfinite(fov) || fov < 0.0 || fov >= 3.14159265358979) return WXL_E_INVALID;
+        if (!std::isfinite(roll)) return WXL_E_INVALID;
+        // Taken to -pi..pi, where a float keeps its precision.
+        if (roll != 0.0) roll = std::remainder(roll, 6.283185307179586);
 
         const uint32_t mod = Caller();
         for (auto it = g_views.begin(); it != g_views.end(); ++it)
@@ -157,8 +170,20 @@ namespace
                 g_views.erase(it);
                 break;
             }
-        g_views.insert(g_views.begin(), View{mod, position, forward, fov});
+        g_views.insert(g_views.begin(), View{mod, position, forward, fov, roll});
         return WXL_OK;
+    }
+
+    wxl_result WXL_CALL SetView(wxl_vec3 position, wxl_vec3 forward, double fov)
+    {
+        static std::atomic<bool> said{false};
+        return Place("SetView", said, position, forward, fov, 0.0);
+    }
+
+    wxl_result WXL_CALL SetViewRolled(wxl_vec3 position, wxl_vec3 forward, double fov, double roll)
+    {
+        static std::atomic<bool> said{false};
+        return Place("SetViewRolled", said, position, forward, fov, roll);
     }
 
     /// Drops a mod's view; with none left, the client's field of view goes back now.
@@ -196,7 +221,9 @@ namespace wxl::core::services
             table.pivot        = &Pivot;
             table.cinematic    = &Cinematic;
             table.set_view     = &SetView;
-            table.release_view = &ReleaseView;
+            table.release_view    = &ReleaseView;
+            table.set_view_rolled = &SetViewRolled;
+            table.roll            = &Roll;
             return table;
         }();
         return api;
@@ -220,6 +247,7 @@ namespace wxl::core::services
             wxl_core_camera placed = client;
             placed.position = view.position;
             placed.forward  = view.forward;
+            placed.roll     = static_cast<float>(view.roll);
             // The client draws with m_fov plus the offset its effects add (m_targetFov): m_fov is
             // set so that the two make the view's field of view.
             if (view.fov > 0.0)

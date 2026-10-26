@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.28-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.29-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -233,8 +233,8 @@ What a mod can reach **today**, by build:
 | `wxl.m2` (models) | yes: an object's model, `ItemDisplayInfo` rows, race prefixes, models made, hung (to follow the parent's bones or on one key bone too), shown, textured, kept on the interface's copies; `AppearanceChanged`; models of the world placed as the client places its spell effects (a static map entity, `CMap::ObjectCreateStatic`), animated, faded, the ground under a point; bone watchers after `M2.AnimateMT` | the same, through the binding |
 | `wxl.gx` (the D3D9 device) | yes: the device and a state invalidation; `ModelBatchDrawn` after every model batch, its numbers rebuilt from the skin section and the device's buffers and viewport | the same, the numbers as the device recorded them |
 | `wxl.engine` (engine layouts) | yes: each type of the SDK's engine headers, its x86 layout hash | yes: its x64 hash, which the client's build holds its own types to |
-| `wxl.camera` (the world camera) | yes: its position, facing rows (through the parent's rotation on a vehicle or a transport), field of view and pivot read at measured offsets; a mod's view written at the end of `CGCamera::UpdateCallback`, after `CameraUpdate` | the same, through the binding |
-| `wxl.input` (the pointer) | yes: held at the centre of the window by `ClipCursor`, hidden through the device's `CursorSetVisible` while the game's own pointer state is left on; `MouseMotion` from raw input, `MouseWheel` from `WM_MOUSEWHEEL` at the window procedure's gate | the same |
+| `wxl.camera` (the world camera) | yes: its position, facing rows (through the parent's rotation on a vehicle or a transport), field of view and pivot read at measured offsets; a mod's view written at the end of `CGCamera::UpdateCallback`, after `CameraUpdate`, its roll turning the facing's up row (which the view matrix and the pick are built from) | the same, through the binding |
+| `wxl.input` (the pointer) | yes: held at the centre of the window, or at the point a mod chose, by `ClipCursor`, hidden through the device's `CursorSetVisible` while the game's own pointer state is left on; `MouseMotion` from raw input, `MouseWheel` from `WM_MOUSEWHEEL` at the window procedure's gate | the same |
 | `wxl.world` (the world's geometry) | yes: `World::Intersect` | the same |
 | `wxl.input`'s block of the mouse look | yes: gates on `CGInputControl::SetControlBit` and `UnsetControlBit` keep the look bits from the game, and a short click is done through `CGWorldFrame::PerformDefaultAction` | the same, gates in the fork |
 | `wxl.pose` (heads) | yes: after `CGUnit_C::PreAnimate`, the head key bone's procedural transform (`CM2Model::SetBoneFlags`, `SetBoneProceduralTransform`) | the same |

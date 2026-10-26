@@ -306,11 +306,18 @@ before the projection and the sound listener are set from the camera: its After 
 position, facing rows built as `CSimpleCamera::SetFacing` builds them and taken into a parent's
 frame on a vehicle or a transport, `m_fov`). The client's camera runs underneath; only its field
 of view outlives a frame, and the seam's Before puts it back before the client's own update.
+A view's roll turns the second and third facing rows around the first
+(`include/wxl/core/camera_facing.hpp`, shared by both bindings): the client builds its view
+matrix from `Forward()` and `Up()` (`CSimpleCamera::SetGxProjectionAndView`, 0x00607CB0), and its
+pick (`CGWorldFrame::HitTestPoint`) casts through that matrix, so the world and the pick turn
+together; the interface has its own projection. `Roll()` measures the up row against the level
+one for the same forward.
 
 `wxl.input` (`src/services/InputService.cpp`) holds the pointer for the mods that capture it:
-at every present (`Gx.ScenePresent`) it is clipped to the pixel at the centre of the window and
-the device stops drawing it (`binding/input.def`), while the game's own pointer state stays on, so
-its picking and clicks act at the centre. The window procedure's gate raises `MouseMotion` from
+at every present (`Gx.ScenePresent`) it is clipped to one pixel of the window, the centre or the
+point of the last mod to capture or move it (`capture_cursor_at`), and the device stops drawing it
+(`binding/input.def`), while the game's own pointer state stays on, so its picking and clicks act
+there. The window procedure's gate raises `MouseMotion` from
 raw input, which the service registers for the window at the first capture or listener, and
 `MouseWheel`, which a handler keeps from the client.
 

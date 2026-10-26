@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// wxl.input. A captured pointer is clipped to the one pixel at the centre of the game's window,
-// so the client reads it there (OsInputGetMousePosition asks Windows), picks under it every frame
+// wxl.input. A captured pointer is clipped to one pixel of the game's window, its centre or the
+// point the last mod to capture or move it chose, so the client reads it there (OsInputGetMousePosition asks Windows), picks under it every frame
 // and lands its clicks there; the device stops drawing it (CGxDevice::CursorSetVisible) while the
 // game's own state of the pointer is left as it is, which keeps its picking on. The motion comes
 // from Windows' raw input, registered for the window the first time a mod captures the pointer or
@@ -28,8 +28,22 @@ namespace
 {
     using namespace wxl::core;
 
-    /// The mods holding the pointer, one entry each.
-    std::vector<uint32_t> g_holders;
+    /// A mod holding the pointer, and the point of the window it holds it at.
+    struct Hold
+    {
+        uint32_t mod;
+        double   x; ///< from the left edge of the client area, 0 to 1
+        double   y; ///< from its top edge, 0 to 1
+    };
+
+    /// The mods holding the pointer, one entry each, the last to capture or move it last: the
+    /// pointer is held at its point.
+    std::vector<Hold> g_holders;
+
+    std::vector<Hold>::iterator HoldOf(uint32_t mod)
+    {
+        return std::find_if(g_holders.begin(), g_holders.end(), [mod](const Hold& hold) { return hold.mod == mod; });
+    }
 
     HWND g_window     = nullptr; ///< the game's window, from its first message
     bool g_registered = false;   ///< raw mouse input is registered for it
@@ -111,14 +125,17 @@ namespace
         return true;
     }
 
-    /// The pixel at the centre of the window's client area, in screen coordinates.
-    bool Centre(RECT& pixel)
+    /// The pixel of the window's client area the pointer is held on, in screen coordinates.
+    bool HeldPixel(RECT& pixel)
     {
         RECT client{};
-        if (!GetClientRect(g_window, &client) || client.right <= 0 || client.bottom <= 0) return false;
-        POINT centre{client.right / 2, client.bottom / 2};
-        if (!ClientToScreen(g_window, &centre)) return false;
-        pixel = RECT{centre.x, centre.y, centre.x + 1, centre.y + 1};
+        if (g_holders.empty() || !GetClientRect(g_window, &client) || client.right <= 0 || client.bottom <= 0)
+            return false;
+        const Hold& hold = g_holders.back();
+        POINT       point{};
+        wxl::core::services::input::PixelAt(client.right, client.bottom, hold.x, hold.y, point.x, point.y);
+        if (!ClientToScreen(g_window, &point)) return false;
+        pixel = RECT{point.x, point.y, point.x + 1, point.y + 1};
         return true;
     }
 
@@ -133,21 +150,43 @@ namespace
 
     // --- the table --------------------------------------------------------------------------
 
+    /// Captures the pointer for the calling mod at a point, or moves its hold there.
+    wxl_result HoldAt(double x, double y)
+    {
+        const uint32_t mod  = Caller();
+        const auto     held = HoldOf(mod);
+        if (held != g_holders.end()) g_holders.erase(held);
+        g_holders.push_back(Hold{mod, x, y});
+        Register();
+        return WXL_OK;
+    }
+
     wxl_result WXL_CALL CaptureCursor(wxl_bool captured)
     {
         if (!OnGameThread("CaptureCursor")) return WXL_E_INVALID;
-        const uint32_t mod  = Caller();
-        const auto     held = std::find(g_holders.begin(), g_holders.end(), mod);
-        if (captured == WXL_TRUE)
-        {
-            if (held == g_holders.end()) g_holders.push_back(mod);
-            Register();
-        }
-        else if (held != g_holders.end())
+        if (captured == WXL_TRUE) return HoldAt(0.5, 0.5);
+        const auto held = HoldOf(Caller());
+        if (held != g_holders.end())
         {
             g_holders.erase(held);
             if (g_holders.empty()) LetGo();
         }
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL CaptureCursorAt(double x, double y)
+    {
+        if (!OnGameThread("CaptureCursorAt")) return WXL_E_INVALID;
+        if (!(x >= 0.0 && x <= 1.0 && y >= 0.0 && y <= 1.0)) return WXL_E_INVALID;
+        return HoldAt(x, y);
+    }
+
+    wxl_result WXL_CALL CapturePoint(wxl_vec3* out)
+    {
+        if (!out) return WXL_E_INVALID;
+        if (!OnGameThread("CapturePoint")) return WXL_E_INVALID;
+        if (g_holders.empty()) return WXL_E_NOT_FOUND;
+        *out = wxl_vec3{static_cast<float>(g_holders.back().x), static_cast<float>(g_holders.back().y), 0.0f};
         return WXL_OK;
     }
 
@@ -214,6 +253,8 @@ namespace wxl::core::services
             table.pointer_over_world = &PointerOverWorld;
             table.block_mouse_look   = &BlockMouseLook;
             table.mouse_look_blocked = &MouseLookBlocked;
+            table.capture_cursor_at  = &CaptureCursorAt;
+            table.capture_point      = &CapturePoint;
             return table;
         }();
         return api;
@@ -244,7 +285,7 @@ namespace wxl::core::services
             }
 
             RECT pixel{};
-            if (!Centre(pixel))
+            if (!HeldPixel(pixel))
             {
                 LetGo();
                 return;
@@ -308,7 +349,7 @@ namespace wxl::core::services
         {
             const auto blocked = std::find(g_blockers.begin(), g_blockers.end(), mod);
             if (blocked != g_blockers.end()) g_blockers.erase(blocked);
-            const auto held = std::find(g_holders.begin(), g_holders.end(), mod);
+            const auto held = HoldOf(mod);
             if (held == g_holders.end()) return;
             g_holders.erase(held);
             if (g_holders.empty()) LetGo();
@@ -319,6 +360,13 @@ namespace wxl::core::services
             g_holders.clear();
             g_blockers.clear();
             LetGo();
+        }
+
+        void PixelAt(long width, long height, double x, double y, long& px, long& py)
+        {
+            // floor(x * width), on the window's last pixel at 1: the centre is width / 2.
+            px = std::clamp(static_cast<long>(x * static_cast<double>(width)), 0L, width > 0 ? width - 1 : 0L);
+            py = std::clamp(static_cast<long>(y * static_cast<double>(height)), 0L, height > 0 ? height - 1 : 0L);
         }
 
         void* Window() { return g_window; }

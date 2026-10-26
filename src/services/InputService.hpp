@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The wxl.input service: the pointer held at the centre of the game's window for the mods that
-// capture it, and the raw motion the Input seam raises as MouseMotion.
+// The wxl.input service: the pointer held at the centre of the game's window, or at the point a
+// mod chose, for the mods that capture it, and the raw motion the Input seam raises as
+// MouseMotion.
 
 #pragma once
 
@@ -35,6 +36,10 @@ namespace wxl::core::services
         /// The game's CGInputControl::UnsetControlBit: a look bit the gate kept is released here,
         /// with the click's default action when it was short. True when the gate took the call.
         bool UnsetControlBit(int32_t* result, void* control, uint32_t* bit, uint32_t time);
+
+        /// The pixel of a client area `width` x `height` that holds the point (x, y), fractions
+        /// from its top-left corner: (0.5, 0.5) is the pixel (width / 2, height / 2).
+        void PixelAt(long width, long height, double x, double y, long& px, long& py);
 
         /// The game's window, once its procedure has seen a message; null before.
         void* Window();
