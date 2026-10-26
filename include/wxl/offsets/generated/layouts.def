@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 137 types, 844 field offsets, 11 member sizes.
+// 137 types, 852 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -755,6 +755,8 @@ WXL_LAYOUT_TYPE(CVar, "CVar", 0x70, "Engine/Source/ConsoleBase/ConsoleVar.h", 22
 WXL_LAYOUT_FIELD(CVar, "m_key.m_str", 0x14, "Engine/Source/ConsoleBase/ConsoleVar.h", 22)
 WXL_LAYOUT_FIELD(CVar, "m_flags", 0x1C, "Engine/Source/ConsoleBase/ConsoleVar.h", 22)
 WXL_LAYOUT_FIELD(CVar, "m_stringValue.m_str", 0x28, "Engine/Source/ConsoleBase/ConsoleVar.h", 22)
+WXL_LAYOUT_FIELD(CVar, "m_defaultValue.m_str", 0x40, "Engine/Source/ConsoleBase/ConsoleVar.h", 22)
+WXL_LAYOUT_FIELD(CVar, "m_latchedValue.m_str", 0x58, "Engine/Source/ConsoleBase/ConsoleVar.h", 22)
 WXL_LAYOUT_TYPE(CharSectionsRec, "CharSectionsRec", 0x28, "WoW/Source/DB/Rec/CharSectionsRec.h", 9)
 WXL_LAYOUT_FIELD(CharSectionsRec, "m_textureName", 0x10, "WoW/Source/DB/Rec/CharSectionsRec.h", 9)
 WXL_LAYOUT_FIELD(CharSectionsRec, "m_flags", 0x1C, "WoW/Source/DB/Rec/CharSectionsRec.h", 9)

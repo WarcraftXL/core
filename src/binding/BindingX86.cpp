@@ -953,6 +953,39 @@ namespace wxl::core::binding
         if (IsClient() && OnMainThread() && texture) x86::CallFree<void>(WXL_SITE("HandleClose", 0), texture);
     }
 
+    void* cvar_lookup(const char* name)
+    {
+        // CVar::Lookup(name): cdecl, one dword (0x00767440); the hash compares without case.
+        if (!IsClient() || !OnMainThread() || !name) return nullptr;
+        return x86::CallFree<void*>(WXL_SITE("CVar::Lookup", 0), name);
+    }
+
+    void* cvar_register(const char* name, const char* help, uint32_t flags, const char* value, void* callback,
+                        uint32_t category)
+    {
+        // CVar::Register(name, help, flags, value, callback, category, setCommand, arg, unk):
+        // cdecl, nine dwords (0x00767FC0), as the client's code registers its own variables.
+        if (!IsClient() || !OnMainThread() || !name || !value) return nullptr;
+        return x86::CallFree<void*>(WXL_SITE("CVar::Register", 0), name, help, flags, value, callback, category,
+                                    uint8_t(0), static_cast<void*>(nullptr), uint8_t(0));
+    }
+
+    wxl_bool cvar_set(void* cvar, const char* value)
+    {
+        // CVar::Set(value, setValue, setReset, setDefault, setNeedsSave): __thiscall, `ret 0x14`
+        // (0x007668C0); always answers true, whether the callback took the value or not.
+        if (!IsClient() || !OnMainThread() || !cvar || !value) return WXL_FALSE;
+        x86::CallMember<bool>(WXL_SITE_AT("CVar::Set", 0x007668C0, 0), cvar, value, uint8_t(1), uint8_t(0), uint8_t(0),
+                              uint8_t(1));
+        return WXL_TRUE;
+    }
+
+    void cvar_write_flags(void* cvar, uint32_t flags)
+    {
+        if (!IsClient() || !OnMainThread() || !cvar) return;
+        std::memcpy(static_cast<uint8_t*>(cvar) + WXL_FIELD("CVar", "m_flags"), &flags, sizeof flags);
+    }
+
     uint32_t m2_children(const void* model, void** out, uint32_t capacity)
     {
         if (!IsClient() || !model) return 0;

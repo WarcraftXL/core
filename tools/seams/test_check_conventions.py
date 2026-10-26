@@ -782,6 +782,12 @@ GROUND_TRUTH = {
     # ECX at 0x0071F0C8 and ends in `ret 0x1C`; CallMoveEventHandlers (0x006EB2ED-0x006EB309)
     # pushes seven around the call that computes the opcode.
     "ConsoleVar.InternalSet":          ("0x007667B0", "thiscall", ["ecx"], 5),
+    # CVar::Initialize reads its file name at [ebp+8] (0x00768343) and ends in a bare `ret`
+    # (0x00768401); DeleteCharacterCVars and DeleteAccountCVars read no stack and end in a bare
+    # `ret` (0x00767393, 0x007673E3).
+    "ConsoleVar.Initialize":           ("0x00768340", "cdecl", [], 1),
+    "ConsoleVar.DeleteCharacterCVars": ("0x00767350", "cdecl", [], 0),
+    "ConsoleVar.DeleteAccountCVars":   ("0x007673A0", "cdecl", [], 0),
     "Unit.SendMovementUpdate":         ("0x0071F0C0", "thiscall", ["ecx"], 7),
     # OnUpdateMoney is a mirror handler and reads none of its arguments; CallMirrorFunctions
     # (0x004D5238-0x004D5256) pushes the six dwords of MIRRORHANDLERFUNC, calls through
@@ -1010,6 +1016,13 @@ GROUND_TRUTH = {
     "TextureCall.CreateTexture":       ("0x004E8D30", "cdecl", [], 2),
     "TextureCall.GetGlobalStatusObj":  ("0x0047C090", "cdecl", [], 0),
     "TextureCall.HandleClose":         ("0x0047BF30", "cdecl", [], 1),
+    # wxl.cvar's calls (calls_x86.def), read by hand: Lookup reads its name at [ebp+8]
+    # (0x00767443) and ends in bare `ret`s (0x00767456); Register reads up to its ninth dword
+    # at [ebp+0x28] (0x00768068) and ends in bare `ret`s (0x00768085, 0x007681E0); Set moves ECX
+    # to ESI (0x007668CE) and ends `ret 0x14` (0x00766915, 0x00766933).
+    "CVarCall.Lookup":                 ("0x00767440", "cdecl", [], 1),
+    "CVarCall.Register":               ("0x00767FC0", "cdecl", [], 9),
+    "CVarCall.Set":                    ("0x007668C0", "thiscall", ["ecx"], 5),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read

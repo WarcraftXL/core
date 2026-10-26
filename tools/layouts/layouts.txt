@@ -1321,6 +1321,8 @@ type CVar Engine/Source/ConsoleBase/ConsoleVar.h CVar
   m_key.m_str                             -                                            # binding cvar_name: the hash key of the variable
   m_stringValue.m_str                     -                                            # binding cvar_value
   m_flags                                 -                                            # binding cvar_flags
+  m_defaultValue.m_str                    -                                            # binding cvar_default: the coded default
+  m_latchedValue.m_str                    -                                            # binding cvar_latched: a set waiting for the next launch
 
 type CTerrainClickEvent WoW/Source/Ui/GameUI.h CTerrainClickEvent
   sizeof                                  -

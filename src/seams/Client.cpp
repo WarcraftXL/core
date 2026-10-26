@@ -21,6 +21,7 @@
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
 #include "services/TextureService.hpp"
+#include "services/CVarService.hpp"
 #include "services/M2Service.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -58,6 +59,7 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::highlight::Clear();
         wxl::core::services::selectioncircle::Clear();
         wxl::core::services::texture::Clear();
+        wxl::core::services::cvar::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
         {
             wxl::core::objects::Service().DropWatches(token);

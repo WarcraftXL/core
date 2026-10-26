@@ -11,6 +11,7 @@
 #include "runtime/Stages.hpp"
 #include "seams/Chat.hpp"
 #include "seams/Gameplay.hpp"
+#include "services/CVarService.hpp"
 #include "services/ScriptService.hpp"
 #include "services/TextureService.hpp"
 
@@ -156,6 +157,7 @@ namespace wxl::seam::FrameScript::CreateEvents
             wxl::core::services::script::OnContextReady(g_context, state);
             // WxlTexture, for the interface the context is coming up for.
             wxl::core::services::texture::OnScriptReady();
+            wxl::core::services::cvar::OnContextReady();
         }
         wxl::core::services::script::OnClientEventsInstalled(names, count);
         wxl::core::seams::gameplay::Install(names, count);

@@ -29,6 +29,7 @@
 #include "services/SelectionCircleService.hpp"
 #include "services/TextureService.hpp"
 #include "imaging/Imaging.hpp"
+#include "services/CVarService.hpp"
 #include <imgui.h>
 #include <implot.h>
 #include "services/DataService.hpp"
@@ -177,9 +178,11 @@ namespace
     /// A console variable, as the ConsoleVar rows read one.
     struct FakeCVar
     {
-        const char* name  = nullptr;
-        const char* value = nullptr;
-        uint32_t    flags = 0;
+        const char* name         = nullptr;
+        const char* value        = nullptr;
+        uint32_t    flags        = 0;
+        const char* defaultValue = nullptr;
+        const char* latched      = nullptr;
     };
 
     /// The glue screen the fake client shows.
@@ -258,6 +261,175 @@ namespace
     const char* WXL_CALL FakeCVarName(const void* cvar) { return CVarOf(cvar)->name; }
     const char* WXL_CALL FakeCVarValue(const void* cvar) { return CVarOf(cvar)->value; }
     uint32_t WXL_CALL FakeCVarFlags(const void* cvar) { return CVarOf(cvar)->flags; }
+    const char* WXL_CALL FakeCVarDefault(const void* cvar) { return CVarOf(cvar)->defaultValue; }
+    const char* WXL_CALL FakeCVarLatched(const void* cvar) { return CVarOf(cvar)->latched; }
+
+    // The client's variable table, as ConsoleVar.cpp of the fork keeps it: a hash without case,
+    // CVar::Register, Set and InternalSet with the callback and the latch, the console's `set`
+    // as Config.wtf's lines reach it, and the deletion of a category.
+    struct FakeTableCVar : FakeCVar
+    {
+        std::string key, text, fallback, reset, pending;
+        bool        hasText = false, hasDefault = false, hasReset = false, hasPending = false;
+        void*       callback = nullptr;
+        void*       arg      = nullptr;
+        void Sync()
+        {
+            name         = key.c_str();
+            value        = hasText ? text.c_str() : nullptr;
+            defaultValue = hasDefault ? fallback.c_str() : nullptr;
+            latched      = hasPending ? pending.c_str() : nullptr;
+        }
+    };
+    using FakeCVarCallback = bool (*)(void*, const char*, const char*, void*);
+    std::map<std::string, std::unique_ptr<FakeTableCVar>> g_cvars;
+    std::vector<std::string>                              g_cvarCommands; // ConsoleCommandRegister's names
+    std::map<std::string, const char*>                    g_cvarHelp;     // kept by pointer, as the console does
+
+    std::string FakeCVarKey(const char* name)
+    {
+        std::string key(name ? name : "");
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return key;
+    }
+
+    FakeTableCVar* FakeFindCVar(const char* name)
+    {
+        const auto found = g_cvars.find(FakeCVarKey(name));
+        return found == g_cvars.end() ? nullptr : found->second.get();
+    }
+
+    bool FakeSameText(const std::string& a, const char* b)
+    {
+        return FakeCVarKey(a.c_str()) == FakeCVarKey(b);
+    }
+
+    void FakeInternalSet(FakeTableCVar& var, const char* text, bool setValue, bool setReset, bool setDefault)
+    {
+        wxl::seam::ConsoleVar::InternalSet::Before(&var, text, setValue, setReset, setDefault, 1);
+        if ((var.flags & 0x4) || !text) return;
+        if (setValue && (!var.hasText || !FakeSameText(var.text, text)))
+        {
+            var.text    = text;
+            var.hasText = true;
+        }
+        if (setReset && !var.hasReset)
+        {
+            var.reset    = text;
+            var.hasReset = true;
+        }
+        if (setDefault && !var.hasDefault)
+        {
+            var.fallback   = text;
+            var.hasDefault = true;
+        }
+        var.Sync();
+    }
+
+    void FakeSet(FakeTableCVar& var, const char* text, bool setValue, bool setReset, bool setDefault)
+    {
+        if (setValue)
+        {
+            if (var.callback && !reinterpret_cast<FakeCVarCallback>(var.callback)(&var, var.value, text, var.arg)) return;
+            if (var.flags & 0x2)
+            {
+                var.pending    = text;
+                var.hasPending = true;
+                var.Sync();
+                return;
+            }
+        }
+        FakeInternalSet(var, text, setValue, setReset, setDefault);
+    }
+
+    FakeTableCVar* FakeRegisterFull(const char* name, const char* help, uint32_t flags, const char* text, void* callback,
+                                    bool setCommand, bool unk)
+    {
+        if (!name || !*name || !text) return nullptr;
+        if (FakeTableCVar* var = FakeFindCVar(name))
+        {
+            const bool setReset   = !var->hasReset;
+            var->flags            = flags | (var->flags & ~0x30u);
+            const bool setDefault = !var->hasDefault;
+            var->callback         = callback;
+            bool setValue         = false;
+            if (callback && !reinterpret_cast<FakeCVarCallback>(callback)(var, var->value, var->value, nullptr)) setValue = true;
+            FakeSet(*var, text, setValue, setReset, setDefault);
+            if (!setCommand) var->flags |= 0x80000000u;
+            if (unk && !(var->flags & 0x80000000u)) var->flags |= 0x80u;
+            return var;
+        }
+        auto made     = std::make_unique<FakeTableCVar>();
+        made->key     = name;
+        made->callback = callback;
+        made->Sync();
+        FakeTableCVar* var = made.get();
+        g_cvars[FakeCVarKey(name)] = std::move(made);
+        if (setCommand)
+            FakeSet(*var, text, true, true, false);
+        else
+            FakeSet(*var, text, true, false, true);
+        var->flags = flags | 0x1u;
+        if (!setCommand) var->flags |= 0x80000000u;
+        if (unk && !(var->flags & 0x80000000u)) var->flags |= 0x80u;
+        if (std::find(g_cvarCommands.begin(), g_cvarCommands.end(), FakeCVarKey(name)) == g_cvarCommands.end())
+        {
+            g_cvarCommands.push_back(FakeCVarKey(name));
+            g_cvarHelp[FakeCVarKey(name)] = help;
+        }
+        return var;
+    }
+
+    /// A `SET name "value"` line of Config.wtf, as the stock client's SetCommandHandler takes it:
+    /// Set and InternalSet inlined, a name nobody has registered made archived with that value.
+    void FakeConfigLine(const char* name, const char* text)
+    {
+        FakeTableCVar* var = FakeFindCVar(name);
+        if (!var)
+        {
+            FakeRegisterFull(name, "", 0, text, nullptr, true, false);
+            return;
+        }
+        if (var->callback && !reinterpret_cast<FakeCVarCallback>(var->callback)(var, var->value, text, var->arg)) return;
+        if (var->flags & 0x2)
+        {
+            var->pending    = text;
+            var->hasPending = true;
+            var->Sync();
+            return;
+        }
+        if (var->flags & 0x4) return;
+        if (var->hasText && FakeSameText(var->text, text)) return;
+        var->text    = text;
+        var->hasText = true;
+        var->Sync();
+    }
+
+    void FakeDeleteCategory(uint32_t category)
+    {
+        for (auto it = g_cvars.begin(); it != g_cvars.end();)
+            if ((it->second->flags & 0x1) && (it->second->flags & 0x30) == category)
+                it = g_cvars.erase(it);
+            else
+                ++it;
+    }
+
+    void* WXL_CALL FakeCVarLookup(const char* name) { return FakeFindCVar(name); }
+    void* WXL_CALL FakeCVarRegister(const char* name, const char* help, uint32_t flags, const char* text, void* callback,
+                                    uint32_t)
+    {
+        return FakeRegisterFull(name, help, flags, text, callback, false, false);
+    }
+    wxl_bool WXL_CALL FakeCVarSet(void* cvar, const char* text)
+    {
+        if (!cvar || !text) return WXL_FALSE;
+        FakeSet(*static_cast<FakeTableCVar*>(cvar), text, true, false, false);
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeCVarWriteFlags(void* cvar, uint32_t flags)
+    {
+        if (cvar) static_cast<FakeCVar*>(cvar)->flags = flags;
+    }
 
     const char* WXL_CALL FakeGlueScreen(void) { return g_glueScreen; }
 
@@ -1976,6 +2148,12 @@ namespace
         init.cvar_name              = &FakeCVarName;
         init.cvar_value             = &FakeCVarValue;
         init.cvar_flags             = &FakeCVarFlags;
+        init.cvar_default           = &FakeCVarDefault;
+        init.cvar_latched           = &FakeCVarLatched;
+        init.cvar_lookup            = &FakeCVarLookup;
+        init.cvar_register          = &FakeCVarRegister;
+        init.cvar_set               = &FakeCVarSet;
+        init.cvar_write_flags       = &FakeCVarWriteFlags;
         init.glue_current_screen    = &FakeGlueScreen;
         init.login_server_type      = &FakeLoginServerType;
         init.chat_pending_last      = &FakePendingLast;
@@ -7083,6 +7261,179 @@ namespace
         g_host->Events().Unsubscribe(sub);
     }
 
+    // --- wxl.cvar: variables registered, saved, read back and held ------------------------------
+
+    void CheckCVarService()
+    {
+        namespace cvars = wxl::core::services::cvar;
+        const wxl_cvar_api& api  = wxl::core::services::CVarApi();
+        const auto          str  = [](const char* text) { return wxl_str{text, static_cast<uint32_t>(std::strlen(text))}; };
+        const auto          read = [&](const char* name) {
+            wxl_str out{};
+            return api.get(str(name), &out) == WXL_OK ? std::string(out.data, out.size) : std::string("<none>");
+        };
+        const auto flagsOf = [&](const char* name) {
+            uint32_t out = 0;
+            return api.flags(str(name), &out) == WXL_OK ? out : 0xFFFFFFFFu;
+        };
+        constexpr wxl::host::ModHost::ModToken kMod = 11, kOther = 12;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+
+        // Before the client reads Config.wtf: the registration waits.
+        Check(api.register_cvar(str("test_early"), str("5"), WXL_CVAR_SAVED | WXL_CVAR_LATCHED, str("set early")) == WXL_OK,
+              "a variable is registered before the client reads Config.wtf");
+        Check(!FakeFindCVar("test_early") && api.exists(str("TEST_EARLY")) && read("test_early") == "5" &&
+                  api.set(str("test_early"), str("6")) == WXL_E_PENDING &&
+                  flagsOf("test_early") == (WXL_CVAR_SAVED | WXL_CVAR_LATCHED | WXL_CVAR_MOD),
+              "it waits: found without case, its default read, a set answered pending, its flags its own");
+
+        // CVar::Initialize: the registrations made, then the file's lines, then the latch.
+        wxl::seam::ConsoleVar::Initialize::Before("Config.wtf");
+        FakeTableCVar* early = FakeFindCVar("test_early");
+        Check(early && early->defaultValue && std::string(early->defaultValue) == "5" && (early->flags & 0x80000001u) == 0x80000001u &&
+                  !(early->flags & 0x2) && g_cvarHelp["test_early"] && std::string(g_cvarHelp["test_early"]) == "set early",
+              "just before the file is read it is made: default, archived, registered, its help kept, not latched yet");
+        FakeConfigLine("test_early", "7");
+        FakeConfigLine("test_late", "9");
+        FakeConfigLine("test_ranged", "50");
+        FakeConfigLine("test_char", "z");
+        wxl::seam::ConsoleVar::Initialize::After("Config.wtf");
+        Check(read("test_early") == "7" && (early->flags & 0x2), "the saved line reached it, and it latches from now on");
+        Check(!api.exists(str("test_late")) && read("test_late") == "<none>",
+              "a line nobody registered is kept by the client, and found by nobody");
+
+        Check(api.register_cvar(str("test_late"), str("1"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_late") == "9",
+              "a registration after the file was read adopts the saved value");
+        wxl_str fallback{};
+        Check(api.get_default(str("test_late"), &fallback) == WXL_OK && std::string(fallback.data, fallback.size) == "1",
+              "and its default is the registered one");
+
+        // A range: a saved value outside it goes back to the default; every set is held to it.
+        Check(api.register_cvar(str("test_ranged"), str("2"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_ranged") == "50",
+              "a variable with a saved 50");
+        Check(api.set_range(str("test_ranged"), 0.0, 10.0) == WXL_OK && read("test_ranged") == "2",
+              "a range of 0 to 10 sends it back to its default");
+        Check(api.set_range(str("test_ranged"), 5.0, 1.0) == WXL_E_INVALID && api.set_range(str("test_ranged"), 3.0, 10.0) == WXL_E_INVALID,
+              "bounds the wrong way round, or that leave the default out, are refused");
+        Check(api.set(str("test_ranged"), str("11")) == WXL_E_INVALID && api.set(str("test_ranged"), str("abc")) == WXL_E_INVALID &&
+                  api.set_number(str("test_ranged"), 3.5) == WXL_OK && read("test_ranged") == "3.5",
+              "a set outside the range, or no number, is refused; a number inside is written as it reads back");
+        FakeSet(*FakeFindCVar("test_ranged"), "20", true, false, false);
+        Check(read("test_ranged") == "3.5", "the console's set outside the range is refused by the callback");
+        double number = 0.0;
+        Check(api.get_number(str("test_ranged"), &number) == WXL_OK && number == 3.5 && api.get_number(str("test_late"), &number) == WXL_OK &&
+                  number == 9.0,
+              "the values read as numbers");
+
+        // A latched variable: a set waits for the next start.
+        Check(api.set(str("test_early"), str("8")) == WXL_OK && read("test_early") == "7" &&
+                  (flagsOf("test_early") & WXL_CVAR_PENDING) && early->latched && std::string(early->latched) == "8",
+              "a latched set keeps the value and waits, which flags tells");
+
+        // CVarChanged follows a set made through the service.
+        StrWatch                     watch;
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_CVarChanged, &OnCVar, &watch, 0);
+        Check(api.set(str("test_late"), str("10")) == WXL_OK && watch.calls == 1 && watch.strings[0] == "test_late" &&
+                  watch.strings[1] == "9" && watch.strings[2] == "10",
+              "a set raises CVarChanged with the name, the old and the new value");
+        Check(api.reset(str("test_late")) == WXL_OK && read("test_late") == "1" && watch.calls == 2, "a reset gives the default back");
+        g_host->Events().Unsubscribe(sub);
+
+        // Switches.
+        Check(api.set_bool(str("test_late"), WXL_TRUE) == WXL_OK && read("test_late") == "1", "a switch is written 1");
+        wxl_bool on = WXL_FALSE;
+        api.set(str("test_late"), str("enabled"));
+        Check(api.get_bool(str("test_late"), &on) == WXL_OK && on == WXL_TRUE, "\"enabled\" reads as on, as GetCVarBool reads it");
+        api.set(str("test_late"), str("off"));
+        Check(api.get_bool(str("test_late"), &on) == WXL_OK && on == WXL_FALSE, "and \"off\" as off");
+
+        // Read-only: the console refused, the mod not, another mod refused.
+        Check(api.register_cvar(str("test_ro"), str("1"), WXL_CVAR_READ_ONLY, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_ro")->flags & 0x100) && !(FakeFindCVar("test_ro")->flags & 0x1),
+              "a read-only variable of the session: the console's read-only bit, not archived");
+        FakeSet(*FakeFindCVar("test_ro"), "2", true, false, false);
+        Check(read("test_ro") == "1" && api.set(str("test_ro"), str("3")) == WXL_OK && read("test_ro") == "3",
+              "a set from outside is refused, its mod's goes through");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.set(str("test_ro"), str("4")) == WXL_E_INVALID && read("test_ro") == "3", "another mod cannot set it");
+
+        // Ownership.
+        Check(api.register_cvar(str("TEST_LATE"), str("0"), 0, str("")) == WXL_E_INVALID && api.release(str("test_late")) == WXL_E_NOT_FOUND &&
+                  api.set_range(str("test_late"), 0.0, 1.0) == WXL_E_NOT_FOUND,
+              "another mod can neither register a held name, nor release it, nor range it");
+        g_host->SwapCurrentMod(kMod);
+        Check(api.release(str("test_late")) == WXL_OK && api.release(str("test_late")) == WXL_E_NOT_FOUND, "its mod releases it once");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.register_cvar(str("test_late"), str("0"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_late") == "off",
+              "a released variable is registered by another mod, its value kept");
+        g_host->SwapCurrentMod(kMod);
+
+        // The client's own and the interface's.
+        FakeRegisterFull("farclip", "", 0x1, "777", nullptr, false, false);
+        FakeRegisterFull("addonSetting", nullptr, 0, "a", nullptr, true, true);
+        Check(api.register_cvar(str("FARCLIP"), str("1"), 0, str("")) == WXL_E_INVALID && read("farclip") == "777" &&
+                  (flagsOf("farclip") & (WXL_CVAR_CLIENT | WXL_CVAR_SAVED)) == (WXL_CVAR_CLIENT | WXL_CVAR_SAVED),
+              "the client's own variable cannot be registered, and reads as the client's and saved");
+        Check(api.set(str("farclip"), str("800")) == WXL_OK && read("farclip") == "800", "a mod sets a variable of the client");
+        Check(read("addonSetting") == "a" && flagsOf("addonSetting") == WXL_CVAR_INTERFACE,
+              "the interface's RegisterCVar is read, and never saved");
+        FakeRegisterFull("lockedOne", "", 0x4, "x", nullptr, false, false);
+        Check(api.set(str("lockedOne"), str("y")) == WXL_E_INVALID, "a variable the client locked is refused");
+
+        // Malformed names, flags and values.
+        std::string longName(64, 'n');
+        std::string longValue(250, 'v');
+        Check(api.register_cvar(str("a b"), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str(""), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str(longName.c_str()), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_q"), str("say \"hi\""), 0, str("")) == WXL_E_INVALID,
+              "a name with a space, empty or too long, and a value with a quote, are refused");
+        Check(api.register_cvar(str("test_f"), str("1"), 0x80u, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_ACCOUNT | WXL_CVAR_CHARACTER, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_LATCHED, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_READ_ONLY | WXL_CVAR_CHARACTER, str("")) == WXL_E_INVALID,
+              "a flag that names nothing, account with character, latched unsaved, read-only per character are refused");
+        Check(api.register_cvar(str("test_long"), str(""), WXL_CVAR_SAVED, str("")) == WXL_OK &&
+                  api.set(str("test_long"), str(longValue.c_str())) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_long2"), str(""), 0, str("")) == WXL_OK &&
+                  api.set(str("test_long2"), str(longValue.c_str())) == WXL_OK,
+              "a value too long for a line of Config.wtf is refused for a saved variable only");
+        Check(api.register_cvar(str("test_seen"), str("1"), WXL_CVAR_PROTECTED | WXL_CVAR_HIDDEN, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_seen")->flags & 0x48) == 0x48 &&
+                  flagsOf("test_seen") == (WXL_CVAR_PROTECTED | WXL_CVAR_HIDDEN | WXL_CVAR_MOD),
+              "protected and hidden reach the client's bits and read back");
+
+        // The account's and the character's: made again when the client deletes them.
+        Check(api.register_cvar(str("test_char"), str("x"), WXL_CVAR_CHARACTER, str("")) == WXL_OK && read("test_char") == "z" &&
+                  (FakeFindCVar("test_char")->flags & 0x31) == 0x21,
+              "a character's variable: archived in the character's category");
+        Check(api.register_cvar(str("test_account"), str("q"), WXL_CVAR_ACCOUNT, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_account")->flags & 0x31) == 0x11,
+              "an account's variable: archived in the account's category");
+        FakeDeleteCategory(0x20);
+        Check(!FakeFindCVar("test_char") && FakeFindCVar("test_account"), "the character leaving the world deletes its own");
+        wxl::seam::ConsoleVar::DeleteCharacterCVars::After();
+        Check(read("test_char") == "x" && (FakeFindCVar("test_char")->flags & 0x80000021u) == 0x80000021u,
+              "it is made again at once, at its default");
+        FakeConfigLine("test_char", "w");
+        Check(read("test_char") == "w", "and the next character's saved value reaches it");
+        FakeDeleteCategory(0x10);
+        wxl::seam::ConsoleVar::DeleteAccountCVars::After();
+        Check(read("test_account") == "q" && FakeFindCVar("test_account"), "likewise the account's at login");
+
+        // A mod's go with it; the variables stay.
+        cvars::ForgetMod(kMod);
+        Check(read("test_early") == "7" && api.release(str("test_early")) == WXL_E_NOT_FOUND, "a mod's variables are released, not removed");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.register_cvar(str("test_early"), str("5"), WXL_CVAR_SAVED, str("")) == WXL_OK && !(FakeFindCVar("test_early")->flags & 0x2),
+              "another mod takes it, with its own flags");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.set(str("test_late"), str("1")); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a call is refused");
+        g_host->SwapCurrentMod(previous);
+    }
+
     void WXL_CALL OnGlueScreen(void* user, const void* args)
     {
         StrWatch&                   watch  = *static_cast<StrWatch*>(user);
@@ -12125,6 +12476,7 @@ int main(int argc, char** argv)
     CheckScriptError();
     CheckWorldZoneMouseoverClick();
     CheckConsoleVar();
+    CheckCVarService();
     CheckPlayerMoveMoneyLevel();
     CheckGlue();
     CheckChat();

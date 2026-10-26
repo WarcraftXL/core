@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The ConsoleVar domain: a seam on CVar, the client's console variables.
+// The ConsoleVar domain: seams on CVar, the client's console variables.
 
 #ifndef WXL_SEAM_BEFORE
 #error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including consolevar.def"
+#endif
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including consolevar.def"
+#endif
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including consolevar.def"
 #endif
 
 // Writes a variable's value: the string, the int and the float it parses to when set_value is
@@ -17,6 +23,25 @@
 // (compared without case, as the client compares it).
 WXL_SEAM_BEFORE(ConsoleVar, InternalSet, "CVar::InternalSet", void, thiscall, (void* self, const char* value, uint8_t set_value, uint8_t set_reset, uint8_t set_default, uint8_t set_needs_save))
 WXL_SEAM_RAISES(ConsoleVar, InternalSet, CVarChanged)
+
+// Registers the console's set, cvar_reset, cvar_default and cvarlist, then reads Config.wtf: a
+// `SET name "value"` line sets a variable already registered, and registers one nobody has yet
+// with that value (archived, no default), which is how a later registration finds its saved
+// value. Called once, early in InitializeGlobal, before any archive is opened. Before makes the
+// registrations wxl.cvar kept waiting, so the file's lines reach them; After lets their latch
+// flags take effect and marks the file read. A static, one stack argument, a bare `ret`: cdecl.
+WXL_SEAM(ConsoleVar, Initialize, "CVar::Initialize", void, cdecl, (const char* file_name))
+
+// Deletes every archived variable of the character category (flags & 0x30 == 0x20), when the
+// player leaves the world (CGGameUI::Shutdown, after their values were written to the
+// character's config-cache.wtf); the client registers its own again at the next world. After
+// registers the mods' character variables again at once. No argument, a bare `ret`: cdecl.
+WXL_SEAM_AFTER(ConsoleVar, DeleteCharacterCVars, "CVar::DeleteCharacterCVars", void, cdecl, ())
+
+// Deletes every archived variable of the account category (flags & 0x30 == 0x10), when an
+// account logs in (ClientServices::LoginServerStatus, authenticated). After registers the mods'
+// account variables again at once. No argument, a bare `ret`: cdecl.
+WXL_SEAM_AFTER(ConsoleVar, DeleteAccountCVars, "CVar::DeleteAccountCVars", void, cdecl, ())
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

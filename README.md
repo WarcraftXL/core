@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.30-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.31-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -256,6 +256,7 @@ What a mod can reach **today**, by build:
 | `wxl.highlight` (outline and glow) | yes: the batches of a highlighted object kept at `M2.DrawBatch` (bindings, vertex program, first texture and alpha test, and constants read from the engine's copy, the device being pure), drawn again after the world into two masks against the scene's depth with the game's alpha test, the device's bindings and registers put back as the engine believes them, the glow blurred at half size and the outline found in a full-screen pass, with programs compiled at build time (`src/gx/d3d9/`) | not yet: `supported` false, its reason the Vulkan renderer's render points to come |
 | `wxl.selectioncircle` (the game's circles) | yes: around each drawer of a circle (the target's, a corpse's, the pet's target's, the move marker's) a mod's texture is put in `CGObject_C::s_selectionTexture`, and `ProjectTex::Render2d`'s gate skips a hidden circle or points the projection at a scaled box and another colour; textures made with the client's `CreateTexture` | the same, the calls in the fork |
 | `wxl.texture` (SVG and PNG made into textures) | yes: an SVG rasterized (nanosvg) or a PNG decoded (stb_image) at the size asked, its groups restyled, written as an uncompressed BLP2 with its mips and served under `Interface\WXL\...` by a provider of the runtime's own, which every loader reads through the client's file stack; `WxlTexture` in both script contexts of the interface | the same |
+| `wxl.cvar` (console variables) | yes: made with the client's own `CVar::Register`, their flags written as the client's bits, a callback of the runtime's (`OsValidateFunctionPointer` lets it through) holding ranges and read-only variables; registrations made before `CVar::Initialize` reads Config.wtf are made at its start, the account's and the character's made again after `CVar::DeleteAccountCVars` and `DeleteCharacterCVars`; `WxlRegisterCVar` in both script contexts of the interface | the same, the calls in the fork |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -413,6 +414,9 @@ source. Everything else observes.
 | `GameUI.HandleObjectTrackChange` | `CGGameUI::HandleObjectTrackChange(uint64_t guid, uint64_t prev_guid)` | `MouseoverChanged` before, once per change of the object under the mouse |
 | `GameUI.HandleTerrainClick`, `GameUI.HandleSpriteClick` | `CGGameUI::HandleTerrainClick(const CTerrainClickEvent*)`, `CGGameUI::HandleSpriteClick(const CSpriteClickEvent*)`, the two ends of a click the world frame resolved | `WorldClick` before: the hit point and the game object for the terrain, the object and its position for a model |
 | `ConsoleVar.InternalSet` | `CVar::InternalSet(const char* value, bool set_value, bool set_reset, bool set_default, bool set_needs_save)`, where every set of a console variable ends | `CVarChanged` before, when the call will change the value |
+| `ConsoleVar.Initialize` | `CVar::Initialize(const char* file_name)`, which reads Config.wtf | nothing raised; before: `wxl.cvar`'s waiting registrations made; after: their latches set |
+| `ConsoleVar.DeleteCharacterCVars` | `CVar::DeleteCharacterCVars()`, when the player leaves the world | nothing raised; after: the mods' character variables made again |
+| `ConsoleVar.DeleteAccountCVars` | `CVar::DeleteAccountCVars()`, when an account logs in | nothing raised; after: the mods' account variables made again |
 | `Unit.SendMovementUpdate` | `CGUnit_C::SendMovementUpdate(uint32_t time, uint32_t msg_id, float value, uint32_t index, uint64_t transport, uint8_t seat)` (the six-argument overload, at 0x0071F0C0), where every movement message of the local player is built and sent | `PlayerMoveStart` before for a start, a jump, an ascent or a descent, `PlayerMoveStop` for a stop or a landing |
 | `Player.OnUpdateMoney` | `OnUpdateMoney(uint64_t guid, uint32_t offset, uint32_t count, const void* value, void* param)`, the mirror handler of `PLAYER_FIELD_COINAGE` | `PlayerMoneyChanged` before, with the previous value the mirror hands over and the one the field holds |
 | `Player.Packet_Group_9` | `Packet_Group_9(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_LEVEL_UP_INFO` among the local player's other messages | `PlayerLevelUp` before, for that opcode |

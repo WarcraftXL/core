@@ -397,6 +397,28 @@ alpha kept as a factor, so the game's own fades still play. Textures are made wi
 `CreateTexture` once per path and closed with their last look. With no look set, a circle costs
 the drawer's two calls and one load at the gate.
 
+### Console variables
+
+`wxl.cvar` (`src/services/CVarService.cpp`) keeps the variables mods and the interface register by
+name (without case, as the client's hash compares them), each with its default, flags, help,
+range and holder, and makes each one of the client's own CVars: `CVar::Register` with the
+runtime's callback, then the flags written as the client's bits (archive 0x1 for any save, the
+category 0x10 or 0x20 for the account's or the character's, latch 0x2, protected 0x8, hidden 0x40,
+read-only to the console and `SetCVar` 0x100, registered by code 0x80000000). The client reads
+Config.wtf once, in `CVar::Initialize`, early in `InitializeGlobal`; a `SET` line of a name nobody
+registered makes an archived variable of that value with no default, which a later `Register`
+adopts, value kept. A registration made before waits: `ConsoleVar.Initialize`'s Before makes it,
+so the file's lines set it like a variable of the client's (the latch bit only after, or the line
+would go to the latched value). The client deletes its account variables when an account logs in
+and its character variables when the player leaves the world, and registers its own again at the
+next world; `ConsoleVar.DeleteAccountCVars` and `DeleteCharacterCVars`' After make the mods' again
+at once, so they exist at every moment and take the saved values the account data brings. Every
+set the client makes calls the callback first (`CVar::Set`, `Reset`, `Default`, the console's
+`set`, inlined on the stock client): it refuses a value outside a range, and a set of a read-only
+variable that is not the service's own. Nothing is cached by pointer: every call looks the name up.
+The interface's `WxlRegisterCVar` is a function `wxl.script` registers at each context, owned by
+no mod. Main thread only.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
