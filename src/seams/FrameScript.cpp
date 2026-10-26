@@ -12,6 +12,7 @@
 #include "seams/Chat.hpp"
 #include "seams/Gameplay.hpp"
 #include "services/ScriptService.hpp"
+#include "services/TextureService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -153,6 +154,8 @@ namespace wxl::seam::FrameScript::CreateEvents
         {
             g_live = true;
             wxl::core::services::script::OnContextReady(g_context, state);
+            // WxlTexture, for the interface the context is coming up for.
+            wxl::core::services::texture::OnScriptReady();
         }
         wxl::core::services::script::OnClientEventsInstalled(names, count);
         wxl::core::seams::gameplay::Install(names, count);

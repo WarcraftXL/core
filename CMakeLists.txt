@@ -205,6 +205,13 @@ set(WXL_CORE_SESSION_SOURCES
     src/runtime/Crash.cpp
     src/runtime/Stamp.cpp)
 
+# --- Pictures made into textures (wxl.texture) ----------------------------------------------------
+# nanosvg (zlib, deps/nanosvg) rasterizes SVG, stb_image (MIT or public domain, deps/stb) decodes
+# PNG; the resampler, the mips and the BLP2 writer are ours. One static library, so the tests below
+# check the very code the runtime links.
+add_library(wxl-core-imaging STATIC src/imaging/Svg.cpp src/imaging/Image.cpp)
+target_include_directories(wxl-core-imaging PUBLIC src PRIVATE deps/nanosvg deps/stb)
+
 add_library(wxl-core SHARED
     src/runtime/Core.cpp
     src/points/Points.cpp
@@ -231,6 +238,7 @@ add_library(wxl-core SHARED
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
     src/services/SelectionCircleService.cpp
+    src/services/TextureService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -246,7 +254,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -283,6 +291,7 @@ add_executable(wxl-core-seam-harness
     src/services/PoseService.cpp
     src/services/HighlightService.cpp
     src/services/SelectionCircleService.cpp
+    src/services/TextureService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -292,7 +301,7 @@ add_executable(wxl-core-seam-harness
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -351,6 +360,11 @@ enable_testing()
 add_test(NAME seams COMMAND wxl-core-seam-harness)
 add_test(NAME log COMMAND wxl-core-log-tests "${CMAKE_CURRENT_BINARY_DIR}/log-scratch")
 add_test(NAME vk COMMAND wxl-core-vk-tests)
+
+# The rasterizer, the decoder, the resampler and the BLP writer, pixel by pixel.
+add_executable(wxl-core-imaging-tests tests/imaging_tests.cpp)
+target_link_libraries(wxl-core-imaging-tests PRIVATE wxl-core-imaging)
+add_test(NAME imaging COMMAND wxl-core-imaging-tests)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 
 install(TARGETS wxl-core RUNTIME DESTINATION "bin/${WXL_CORE_ARCH_DIR}" COMPONENT core)

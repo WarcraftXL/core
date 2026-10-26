@@ -26,6 +26,7 @@
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
+#include "services/TextureService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/EngineService.hpp"
@@ -91,6 +92,7 @@ namespace wxl::core::attachment
             { WXL_IMGUI_SERVICE, WXL_IMGUI_SERVICE_VERSION, &services::ImGuiApi() },
             { WXL_HIGHLIGHT_SERVICE, WXL_HIGHLIGHT_SERVICE_VERSION, &services::HighlightApi() },
             { WXL_SELECTIONCIRCLE_SERVICE, WXL_SELECTIONCIRCLE_SERVICE_VERSION, &services::SelectionCircleApi() },
+            { WXL_TEXTURE_SERVICE, WXL_TEXTURE_SERVICE_VERSION, &services::TextureApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif
