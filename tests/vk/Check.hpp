@@ -32,6 +32,12 @@ namespace wxl::vk::test
     /// pipelines compiled on workers, linked from parts, and compiled ahead from the last launch.
     bool V4LiveCases();
 
+    /// Where the renderer follows D3D9 to the pixel: the software cursor in the screenshot, an
+    /// overlay under it when multisampled, GxRs_Multisample 0 (the engine's state read: pure; the
+    /// pixels by D3D9's rule, or the fallback counted: live).
+    void ParityPureCases();
+    bool ParityLiveCases();
+
     /// The translator of the client's DX9 programs: what it refuses, its cache and pack (pure); and
     /// programs assembled here drawn on the driver against D3D9's formulas (live).
     void TranslatePureCases();

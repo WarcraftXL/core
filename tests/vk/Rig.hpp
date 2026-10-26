@@ -89,6 +89,7 @@ namespace wxl::vk::test::rig
             device.m_caps.m_depthBias = 1;
             State(vk::gxfront::kColorWrite, 0xF);
             State(vk::gxfront::kDepthTest, 0);
+            State(vk::gxfront::kMultisample, 1); // the engine's default (CGxDevice's constructor)
             // Identity matrices everywhere, their stacks marked identity.
             for (auto* stack : {&device.m_xforms[0], &device.m_xforms[1], &device.m_xforms[8], &device.m_xforms[10], &device.m_texGen[0],
                                 &device.m_texGen[1]})

@@ -383,11 +383,13 @@ int main()
     wxl::vk::test::CaptureCases();
     wxl::vk::test::DrawPureCases();
     wxl::vk::test::TranslatePureCases();
+    wxl::vk::test::ParityPureCases();
     if (!wxl::vk::test::SpirvValidation()) std::printf("(spirv-val is not in this build: the native tree of tests/vk/ runs it)\n");
     bool live = Live();
     if (live) live = wxl::vk::test::PresentLiveCases();
     if (live) wxl::vk::test::DrawLiveCases();
     if (live) wxl::vk::test::V4LiveCases();
+    if (live) wxl::vk::test::ParityLiveCases();
     if (live) wxl::vk::test::TranslateLiveCases();
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
