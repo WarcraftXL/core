@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Vulkan device behind one engine device: what CGxDevice's work means for the renderer. It
+// reads the engine's device through the generated engine layouts (wxl::engine::CGxDevice and its
+// siblings) and nothing else of the engine; the engine's own logic around each call stays with
+// the caller (the recompiled client's CGxDeviceVk), as it does in the D3D9 device.
+//
+// What it does at this step: the device, the window's surface and swapchain, the scene cleared to
+// the engine's colour and shown through the present pass (stretched, the gamma ramp in
+// fullscreen, the software cursor), vsync and its emulated intervals, the hardware cursor, the
+// loss and its recovery, the engine's capabilities, and memory for the engine's vertex and index
+// pools. The engine's draws are accepted and counted, not drawn yet; its textures get a record and
+// no image yet.
+//
+// Windows only (the window, the cursor), built into WarcraftXL.dll. Main thread only.
+
+#pragma once
+
+#include "gx/vk/device/Device.hpp"
+#include "gx/vk/frame/Frame.hpp"
+#include "gx/vk/present/Display.hpp"
+#include "gx/vk/resources/Resources.hpp"
+
+#include <cstdint>
+#include <unordered_set>
+
+namespace wxl::vk::gxfront
+{
+    struct Options
+    {
+        const char*     gpu = nullptr;                    ///< [gx] gpu
+        bool            validation = false;               ///< [gx] validation
+        uint32_t        frames = 2;                       ///< [gx] frames_in_flight
+        present::Filter filter = present::Filter::Linear; ///< [gx] present_filter
+    };
+
+    class Front
+    {
+    public:
+        struct Stats
+        {
+            uint64_t draws = 0;  ///< the engine's draws, accepted and not drawn
+            uint64_t clears = 0;
+            uint64_t losses = 0;
+        };
+
+        Front() = default;
+        Front(const Front&)            = delete;
+        Front& operator=(const Front&) = delete;
+        ~Front() { Destroy(); }
+
+        /**
+         * @brief Makes the device for the engine's @p device, presenting into @p window (an HWND).
+         * @return false with @p why: no loader, no device that meets the floor, a surface or a
+         *         swapchain that cannot be made on this window.
+         */
+        bool Create(void* device, void* window, const Options& options, char* why, uint32_t why_size);
+
+        /// Releases everything; the engine's pools and textures lose their records.
+        void Destroy();
+        bool Ready() const { return context_.Ready(); }
+        void* Owner() const { return device_; }
+
+        /// The engine made its window again (null: it is about to destroy it, the surface goes now).
+        bool SetWindow(void* window, char* why, uint32_t why_size);
+
+        /// The engine's capabilities (CGxDevice::m_caps) for this device.
+        void WriteCaps();
+
+        /// The window's client size, or that it was minimised.
+        void WindowSize(uint32_t width, uint32_t height, bool minimized);
+
+        /// Opens the next frame; false when the device is lost.
+        bool BeginScene();
+        /// Clears the scene inside (x, y, width, height), the colour 0xAARRGGBB when mask has 1, the depth when 2.
+        void Clear(uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height);
+        void Draw(const void* batch, int32_t count);
+        /// Shows the open frame; false when the device is lost.
+        bool Present();
+
+        /// After a loss: everything made again on the same window. False with @p why.
+        bool Restore(char* why, uint32_t why_size);
+
+        void GammaChanged();
+        void CursorChanged();
+        /// WM_SETCURSOR over the client area: the pointer the engine wants.
+        void SetCursor();
+
+        char* PoolMemory(void* pool);
+        void  PoolResize(void* pool);
+        void  PoolDestroy(void* pool);
+        bool  TexCreate(void* tex);
+        void  TexDestroy(void* tex);
+
+        /// Waits (bounded) for the frames submitted; a GPU that does not finish them is marked lost.
+        void WaitIdle();
+
+        void SimulateLoss();
+        void Describe(char* out, uint32_t size) const;
+
+        // --- For the runtime around it ---------------------------------------------------------------
+        device::Context&      Context() { return context_; }
+        resources::Allocator& Allocator() { return allocator_; }
+        present::Display&     Screen() { return display_; }
+        frame::Timeline&      Timeline() { return timeline_; }
+        /// Grows each time the device is made again: what was made on the previous one is gone.
+        uint64_t              Generation() const { return generation_; }
+        const Stats&          Counters() const { return stats_; }
+        void*                 Window() const { return window_; }
+
+    private:
+        bool MakeDevice(char* why, uint32_t why_size);
+        void ReleaseDevice();
+        void ReadRefresh();
+        void UpdateSync();
+        void UpdateSoftwareCursor();
+        void ReleaseCursor();
+
+        Options               options_;
+        void*                 device_ = nullptr; ///< the engine's CGxDevice
+        void*                 window_ = nullptr; ///< its HWND
+        device::Context       context_;
+        resources::Allocator  allocator_;
+        frame::Timeline       timeline_;
+        present::Display      display_;
+        uint64_t              generation_ = 0;
+        Stats                 stats_;
+
+        uint32_t refresh_hz_ = 60;
+        void*    cursor_ = nullptr;       ///< the hardware cursor (HCURSOR) made from the engine's pixels
+        bool     cursor_pixels_ = false;  ///< the software cursor's pixels were handed to the present pass
+
+        std::unordered_set<void*> pools_;    ///< pools whose m_apiSpecific is a block of ours
+        std::unordered_set<void*> textures_; ///< textures whose m_apiSpecificData is a record of ours
+    };
+}

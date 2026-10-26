@@ -243,17 +243,27 @@ int main(int argc, char** argv)
 
         // [gx]: the API over the client's request, Vulkan's validation and device.
         using wxl::core::settings::GxApi;
-        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0],
-              "without a [gx] section the client's own choice stands");
+        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0] && none.gx_frames == 2 && !none.gx_nearest,
+              "without a [gx] section the client's own choice stands, two frames in flight, bilinear");
         const char gxText[] = "[GX]\n"
                               "api = Vulkan ; tried first\n"
                               "validation = 1\n"
-                              "gpu = GeForce RTX\n";
+                              "gpu = GeForce RTX\n"
+                              "frames_in_flight = 3\n"
+                              "present_filter = Nearest\n";
         wxl::core::settings::Settings gx;
         wxl::core::settings::Parse(gxText, sizeof gxText - 1, gx);
         Check(gx.gx_api == GxApi::vulkan && gx.gx_validation && std::strcmp(gx.gx_gpu, "GeForce RTX") == 0 &&
-                  gx.problem_count == 0,
-              "[gx] api, validation and gpu, in any case, a comment after a value");
+                  gx.gx_frames == 3 && gx.gx_nearest && gx.problem_count == 0,
+              "[gx] api, validation, gpu, frames_in_flight and present_filter, in any case, a comment after a value");
+        const char gxRange[] = "[gx]\n"
+                               "frames_in_flight = 4\n"
+                               "present_filter = cubic\n";
+        wxl::core::settings::Settings gxr;
+        wxl::core::settings::Parse(gxRange, sizeof gxRange - 1, gxr);
+        Check(gxr.gx_frames == 2 && !gxr.gx_nearest && gxr.problem_count == 2 && std::strstr(gxr.problems[0], "1, 2 or 3") &&
+                  std::strstr(gxr.problems[1], "linear or nearest"),
+              "frames in flight outside 1-3 and an unknown filter are noted, the defaults kept");
         const char gxBad[] = "[gx]\n"
                              "api = d3d11\n"
                              "validation = on\n"

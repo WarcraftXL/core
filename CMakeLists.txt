@@ -161,10 +161,13 @@ add_custom_target(wxl-core-build-ids
 # (cmake/wxl_vk.cmake, which the native test tree of tests/vk/ builds from too). The runtime's side
 # of it is src/gx/: WarcraftXL.ini's [gx] api, the table the recompiled client's CGxDeviceVk calls
 # (include/wxl/core/gx_vk.h) and the device made on the stock client.
+set(WXL_VK_IMGUI_TARGET wxl::imgui)
+set(WXL_VK_IMGUI_DIR "${WXL_IMGUI_DIR}")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/wxl_vk.cmake")
 set(WXL_CORE_GX_SOURCES
     src/gx/Select.cpp
-    src/gx/Vulkan.cpp)
+    src/gx/Vulkan.cpp
+    src/gx/vk/gxfront/Front.cpp)
 
 # The launch's log (its settings file, its header and its end, the crash report, the client's fatal
 # errors) and the code the client accepts.
@@ -306,9 +309,10 @@ endif()
 # --- The Vulkan renderer's lower modules on the machine's driver --------------------------------------
 # The same program as the native tree of tests/vk/: the device floor and choice, a device made and
 # refused, VMA, the timeline, a clear read back. Skipped (77) on a machine without a Vulkan 1.3 device.
-add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp)
+add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cpp tests/vk/capture_tests.cpp)
 target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
 target_compile_options(wxl-core-vk-tests PRIVATE /W4 /permissive-)
+target_compile_definitions(wxl-core-vk-tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 enable_testing()
 add_test(NAME seams COMMAND wxl-core-seam-harness)

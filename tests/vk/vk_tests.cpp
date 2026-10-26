@@ -10,7 +10,9 @@
 //   - the instance and the device on the machine's driver, a device refused by a floor above it;
 //   - memory through VMA, a submission on the timeline and a wait that runs out;
 //   - an image cleared by dynamic rendering, a part of it cleared again inside the rendering, and
-//     read back to the CPU byte for byte.
+//     read back to the CPU byte for byte;
+//   - the present module and Dear ImGui (present_tests.cpp);
+//   - the frame capture's reader (capture_tests.cpp).
 //
 // Exit 0 when every check passes, 1 when one fails, 77 (ctest's skip) when the machine has no
 // Vulkan 1.3 device to run the live half on.
@@ -20,6 +22,8 @@
 #include "gx/vk/frame/Frame.hpp"
 #include "gx/vk/present/Present.hpp"
 #include "gx/vk/resources/Resources.hpp"
+
+#include "Check.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,18 +37,12 @@ namespace
     int g_failures = 0;
     int g_passes   = 0;
 
-    void Check(bool ok, const char* what)
-    {
-        if (ok) ++g_passes;
-        else
-        {
-            ++g_failures;
-            std::printf("FAIL %s\n", what);
-        }
-    }
+    using wxl::vk::test::Check;
 
     void Print(vk::LogLevel level, const char* text, void*)
     {
+        // The renderer's debug lines only when asked for: WXL_VK_VERBOSE=1.
+        if (level == vk::LogLevel::Debug && !wxl::vk::test::Environment("WXL_VK_VERBOSE")) return;
         static const char* const kNames[] = {"debug", "info", "warn", "error"};
         std::printf("  [%s] %s\n", kNames[static_cast<int>(level)], text);
     }
@@ -256,16 +254,7 @@ namespace
         allocator.Destroy(image);
     }
 
-    bool Environment(const char* name)
-    {
-#if defined(_WIN32)
-        char   value[8];
-        size_t length = 0;
-        return getenv_s(&length, value, sizeof value, name) == 0 && length > 0;
-#else
-        return std::getenv(name) != nullptr;
-#endif
-    }
+    using wxl::vk::test::Environment;
 
     /// The live half; false when the machine has no device to run it on.
     bool Live()
@@ -309,8 +298,10 @@ namespace
 
         vk::resources::Allocator allocator;
         Check(allocator.Create(context, why, sizeof why), "VMA starts on the device");
+        vk::frame::Timeline timeline;
+        Check(timeline.Create(context, why, sizeof why), "a timeline semaphore");
         vk::frame::Submitter submitter;
-        Check(submitter.Create(context, why, sizeof why), "a command pool and a timeline semaphore");
+        Check(submitter.Create(timeline, why, sizeof why), "a command pool on the timeline");
         if (allocator.Ready())
         {
             vk::resources::Buffer upload;
@@ -330,6 +321,7 @@ namespace
         Check(!context.Lost(), "the device was not lost");
 
         submitter.Destroy();
+        timeline.Destroy();
         allocator.Destroy();
         context.Destroy();
         Check(!context.Ready(), "the device is released");
@@ -352,13 +344,40 @@ namespace
     }
 }
 
+namespace wxl::vk::test
+{
+    void Check(bool ok, const char* what)
+    {
+        if (ok) ++g_passes;
+        else
+        {
+            ++g_failures;
+            std::printf("FAIL %s\n", what);
+        }
+    }
+
+    bool Environment(const char* name)
+    {
+#if defined(_WIN32)
+        char   value[260];
+        size_t length = 0;
+        return getenv_s(&length, value, sizeof value, name) == 0 && length > 0;
+#else
+        return std::getenv(name) != nullptr;
+#endif
+    }
+}
+
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     vk::SetLogSink(Print, nullptr);
 
     FloorCases();
-    const bool live = Live();
+    wxl::vk::test::PresentPureCases();
+    wxl::vk::test::CaptureCases();
+    bool live = Live();
+    if (live) live = wxl::vk::test::PresentLiveCases();
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
     if (g_failures) return 1;

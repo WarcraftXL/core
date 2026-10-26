@@ -30,6 +30,7 @@ namespace wxl::vk::device
         const char* const*  instance_extensions = nullptr; ///< required besides the renderer's own (the surface's)
         uint32_t            instance_extension_count = 0;
         PresentQuery        presents = nullptr;         ///< asked for each graphics family when floor.present
+        bool                swapchain = false;          ///< enable VK_KHR_swapchain when present, a window or not (a headless surface)
     };
 
     class Context
@@ -46,7 +47,8 @@ namespace wxl::vk::device
          */
         bool Create(const Options& options, char* why, uint32_t why_size);
 
-        /// Waits for the device to be idle, destroys it and the instance, and unloads the loader.
+        /// Destroys the device and the instance, and unloads the loader. The work submitted to it must
+        /// have completed (or the device be lost): no wait is made here.
         void Destroy();
 
         bool Ready() const { return device_ != VK_NULL_HANDLE; }
@@ -87,6 +89,7 @@ namespace wxl::vk::device
         VkDevice                   device_ = VK_NULL_HANDLE;
         VkQueue                    queue_ = VK_NULL_HANDLE;
         bool                       validation_ = false;
+        bool                       want_swapchain_ = false;
         std::atomic<bool>          lost_{false};
     };
 

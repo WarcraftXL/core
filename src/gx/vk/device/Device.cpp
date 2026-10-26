@@ -132,6 +132,7 @@ namespace wxl::vk::device
     {
         Destroy();
         lost_.store(false, std::memory_order_relaxed);
+        want_swapchain_ = options.swapchain;
         if (!CreateInstance(options, why, why_size) || !ChoosePhysical(options, why, why_size) ||
             !CreateDevice(why, why_size))
         {
@@ -334,8 +335,8 @@ namespace wxl::vk::device
     if (chosen_.extensions.member && enabled) extensions.push_back(name);
         WXL_VK_EXTENSIONS(WXL_VK_EXTENSION_ENABLE)
 #undef WXL_VK_EXTENSION_ENABLE
-        // The swapchain is enabled with the window it serves: a headless device has none.
-        if (chosen_.presents && chosen_.extensions.swapchain) extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        // The swapchain is enabled with the window it serves, or when asked for (a headless surface).
+        if ((chosen_.presents || want_swapchain_) && chosen_.extensions.swapchain) extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
         const float             priority = 1.0f;
         VkDeviceQueueCreateInfo queue{};
@@ -381,7 +382,8 @@ namespace wxl::vk::device
     {
         if (device_)
         {
-            vkDeviceWaitIdle(device_);
+            // No vkDeviceWaitIdle: it has no bound. Whoever submitted waits for its own serials
+            // (bounded) before the device goes; a lost or hung device is destroyed as it is.
             vkDestroyDevice(device_, nullptr);
             device_ = VK_NULL_HANDLE;
             queue_  = VK_NULL_HANDLE;

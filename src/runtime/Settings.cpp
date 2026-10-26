@@ -32,7 +32,11 @@ namespace
         const size_t length = std::strlen(b);
         if (a.size() != length) return false;
         for (size_t i = 0; i < length; ++i)
-            if ((a[i] | 0x20) != b[i]) return false;
+        {
+            // Letters in any case; anything else as it is ('_' is not a letter's other case).
+            const char c = a[i] >= 'A' && a[i] <= 'Z' ? static_cast<char>(a[i] | 0x20) : a[i];
+            if (c != b[i]) return false;
+        }
         return true;
     }
 }
@@ -118,9 +122,20 @@ namespace wxl::core::settings
                     }
                     else Problem(out, number, "not a device index or a part of its name (1 to 63 characters):", value);
                 }
+                else if (SameWord(key, "frames_in_flight"))
+                {
+                    if (value == "1" || value == "2" || value == "3") out.gx_frames = static_cast<unsigned>(value[0] - '0');
+                    else Problem(out, number, "not 1, 2 or 3:", value);
+                }
+                else if (SameWord(key, "present_filter"))
+                {
+                    if (SameWord(value, "linear")) out.gx_nearest = false;
+                    else if (SameWord(value, "nearest")) out.gx_nearest = true;
+                    else Problem(out, number, "not linear or nearest:", value);
+                }
                 else
                 {
-                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu):", key);
+                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter):", key);
                 }
                 continue;
             }

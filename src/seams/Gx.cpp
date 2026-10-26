@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "binding/Binding.hpp"
+#include "gx/Events.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
@@ -64,19 +65,27 @@ namespace wxl::seam::Gx::ScenePresent
     }
 }
 
+namespace wxl::core::gx
+{
+    void ResourcesLost(bool device_objects)
+    {
+        // ImGui's device objects go with the game's, and come back at its next frame.
+        if (device_objects) wxl::core::services::imgui::DeviceLost();
+
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (!host) return;
+        // Read before the release: this is the size of what is about to go away.
+        const wxl_swapchain_args args = Size();
+        host->Raise(WXL_EV_SwapchainLost, &args);
+    }
+}
+
 namespace wxl::seam::Gx::ReleaseD3dResources
 {
     void WXL_CALL Before(void* self, int32_t)
     {
-        wxl::host::ModHost* host = wxl::core::Host();
-        if (!host || !self) return;
-
-        // ImGui's device objects go with the game's, and come back at its next frame.
-        wxl::core::services::imgui::DeviceLost();
-
-        // Read before the release: this is the size of what is about to go away.
-        const wxl_swapchain_args args = Size();
-        host->Raise(WXL_EV_SwapchainLost, &args);
+        if (!wxl::core::Host() || !self) return;
+        wxl::core::gx::ResourcesLost(true);
     }
 }
 

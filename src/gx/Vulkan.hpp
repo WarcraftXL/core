@@ -10,6 +10,22 @@
 
 #include <cstdint>
 
+namespace wxl::vk
+{
+    namespace device
+    {
+        class Context;
+    }
+    namespace resources
+    {
+        class Allocator;
+    }
+    namespace present
+    {
+        class Display;
+    }
+}
+
 namespace wxl::core::gx
 {
     enum class Outcome
@@ -27,4 +43,20 @@ namespace wxl::core::gx
      * @param why  the reason when it fails, when given
      */
     Outcome DeviceReady(const settings::Settings& settings, char* why = nullptr, uint32_t why_size = 0);
+
+    /// Whether the client renders through the runtime's Vulkan device.
+    bool VulkanActive();
+
+    /// The Vulkan device and its open frame, for what draws into the frame beside the engine (Dear ImGui).
+    struct VulkanFrame
+    {
+        wxl::vk::device::Context*     context = nullptr;
+        wxl::vk::resources::Allocator* allocator = nullptr;
+        wxl::vk::present::Display*    display = nullptr;
+        uint64_t                      generation = 0; ///< grows each time the device is made again
+        uint32_t                      frames = 0;     ///< frames in flight
+    };
+
+    /// The device and its frame, when a frame is open; false otherwise.
+    bool VulkanOpenFrame(VulkanFrame& out);
 }

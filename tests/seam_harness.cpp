@@ -4369,8 +4369,37 @@ namespace
         // The table the recompiled client's CGxDeviceVk calls, without [gx] in the settings.
         const wxl_gx_vk_backend* vk = WarcraftXLGxVulkan();
         Check(vk && vk->struct_size == sizeof(wxl_gx_vk_backend) && vk->select_api && vk->device_create &&
-                  vk->device_destroy && vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
+                  vk->device_destroy && vk->device_set_window && vk->device_caps && vk->window_size && vk->scene_begin &&
+                  vk->scene_clear && vk->draw && vk->scene_present && vk->device_restore && vk->gamma_changed &&
+                  vk->cursor_changed && vk->cursor_set && vk->pool_memory && vk->pool_resize && vk->pool_destroy &&
+                  vk->tex_create && vk->tex_destroy && vk->simulate_loss && vk->describe &&
+                  vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
               "the Vulkan table is whole, with the layout of CGxDevice it reads the engine by");
+        if (vk)
+        {
+            // A device the runtime did not make is not its: every row answers as for no device.
+            alignas(16) unsigned char fakeDevice[sizeof(wxl::engine::CGxDevice)] = {};
+            alignas(16) unsigned char fakePool[sizeof(wxl::engine::CGxPool)]     = {};
+            alignas(16) unsigned char fakeTex[sizeof(wxl::engine::CGxTex)]       = {};
+            char                      said[128]                                  = {};
+            Check(vk->scene_begin(fakeDevice) == WXL_GX_VK_FRAME_LOST && vk->scene_present(fakeDevice) == WXL_GX_VK_FRAME_LOST &&
+                      !vk->pool_memory(fakeDevice, fakePool) && vk->tex_create(fakeDevice, fakeTex) == 0 &&
+                      vk->device_restore(fakeDevice, said, sizeof said) == WXL_E_INVALID &&
+                      vk->device_set_window(fakeDevice, nullptr, said, sizeof said) == WXL_E_INVALID,
+                  "the Vulkan rows refuse a device they did not make");
+            vk->scene_clear(fakeDevice, 3, 0xFF000000u, 0, 0, 16, 16);
+            vk->draw(fakeDevice, nullptr, 0);
+            vk->window_size(fakeDevice, 640, 480, 0);
+            vk->gamma_changed(fakeDevice);
+            vk->cursor_changed(fakeDevice);
+            vk->simulate_loss(fakeDevice);
+            vk->describe(fakeDevice, said, sizeof said);
+            Check(std::strcmp(said, "Vulkan: no device") == 0, "and describe it as no device");
+            std::memset(said, 0, sizeof said);
+            Check(vk->device_create(fakeDevice, nullptr, said, sizeof said) == WXL_E_FAILED && said[0] &&
+                      !GetModuleHandleW(L"vulkan-1.dll"),
+                  "a device asked for without a window is refused with a reason, before any Vulkan loader is loaded");
+        }
         Check(vk && vk->select_api(WXL_GX_API_D3D9) == WXL_GX_API_D3D9 && vk->select_api(WXL_GX_API_D3D9EX) == WXL_GX_API_D3D9EX &&
                   vk->select_api(WXL_GX_API_VULKAN) == WXL_GX_API_VULKAN,
               "without [gx] api the client's request stands");

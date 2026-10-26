@@ -84,7 +84,8 @@ namespace wxl::vk::resources
         buffer = Buffer{};
     }
 
-    bool Allocator::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out)
+    bool Allocator::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
+                                VkImageAspectFlags aspect)
     {
         out = Image{};
         VkImageCreateInfo info{};
@@ -111,7 +112,7 @@ namespace wxl::vk::resources
             view.image            = out.image;
             view.viewType         = VK_IMAGE_VIEW_TYPE_2D;
             view.format           = format;
-            view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            view.subresourceRange = {aspect, 0, 1, 0, 1};
             result                = vkCreateImageView(device_, &view, nullptr, &out.view);
         }
         if (result != VK_SUCCESS)
@@ -136,6 +137,41 @@ namespace wxl::vk::resources
     void Allocator::Invalidate(const Buffer& buffer)
     {
         if (buffer.allocation) vmaInvalidateAllocation(vma_, buffer.allocation, 0, VK_WHOLE_SIZE);
+    }
+
+    uint32_t Allocator::Allocations() const
+    {
+        if (!vma_) return 0;
+        VmaTotalStatistics stats{};
+        vmaCalculateStatistics(vma_, &stats);
+        return stats.total.statistics.allocationCount;
+    }
+
+    void Graveyard::Bury(uint64_t serial, std::function<void()> release)
+    {
+        if (release) dead_.push_back(Dead{serial, std::move(release)});
+    }
+
+    void Graveyard::Collect(uint64_t completed)
+    {
+        // Serials only grow, so the front is the oldest; a release buried out of order waits behind
+        // an older one, which is late but never early.
+        while (!dead_.empty() && dead_.front().serial <= completed)
+        {
+            std::function<void()> release = std::move(dead_.front().release);
+            dead_.pop_front();
+            release();
+        }
+    }
+
+    void Graveyard::Flush()
+    {
+        while (!dead_.empty())
+        {
+            std::function<void()> release = std::move(dead_.front().release);
+            dead_.pop_front();
+            release();
+        }
     }
 
     Budget Allocator::CurrentBudget() const

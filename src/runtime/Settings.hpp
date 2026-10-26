@@ -49,6 +49,8 @@ namespace wxl::core::settings
         GxApi    gx_api        = GxApi::client;
         bool     gx_validation = false;  ///< [gx] validation = 1: Vulkan's validation layer, when installed
         char     gx_gpu[64]    = {};     ///< [gx] gpu: the device's index, or a part of its name
+        unsigned gx_frames     = 2;      ///< [gx] frames_in_flight: 1 to 3
+        bool     gx_nearest    = false;  ///< [gx] present_filter = nearest: the scene stretched without blending
 
         /// Lines of the file that were not understood, as messages for the log, at most 8.
         char     problems[8][160] = {};
@@ -84,6 +86,8 @@ namespace wxl::core::settings
      *     api = vulkan           ; vulkan or d3d9; without it, the client's own choice
      *     validation = 1         ; 0 or 1: Vulkan's validation layer, when it is installed
      *     gpu = 1                ; the Vulkan device: its index, or a part of its name
+     *     frames_in_flight = 2   ; 1 to 3: frames the CPU may record ahead of the GPU
+     *     present_filter = linear ; linear or nearest: how the scene is stretched to the window
      *
      * `;` and `#` start a comment. Other sections are left for later uses; an unknown key or a
      * value that does not read is noted in `problems` and otherwise ignored.

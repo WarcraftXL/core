@@ -5,19 +5,23 @@
 // (wxl/core/gx_vk.h), the Vulkan device made from WarcraftXL.ini's [gx] section, and on the stock
 // client, which has no Vulkan adapter, the same device made once its own D3D9 device is up.
 //
-// This runtime does not draw through Vulkan yet. Selecting it makes the device, logs which one
-// and what it offers, checks that a submission comes back, and releases it: the client renders
-// through D3D9 as before.
+// On the recompiled client the device renders: frames are cleared to the engine's colour, Dear
+// ImGui is drawn into them and they are shown through the present pass. The engine's draws are
+// accepted and counted, not drawn yet. The stock client's device is made, checked and released:
+// it keeps rendering through D3D9.
+//
+// The runtime's part around the device lives here: the log, the events a device's resources going
+// raises (SwapchainLost; SwapchainRestored comes from the engine's own NotifyOnDeviceRestored), how
+// many losses are too many, the frame's GPU zone in the profiler.
 
 #include "gx/Vulkan.hpp"
 
 #include "common/Log.hpp"
+#include "gx/Events.hpp"
 #include "gx/Select.hpp"
 #include "gx/vk/Log.hpp"
-#include "gx/vk/device/Device.hpp"
-#include "gx/vk/frame/Frame.hpp"
-#include "gx/vk/present/Present.hpp"
-#include "gx/vk/resources/Resources.hpp"
+#include "gx/vk/gxfront/Front.hpp"
+#include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
 
 #include "wxl/core/gx_vk.h"
@@ -25,8 +29,13 @@
 
 #include <windows.h>
 
+#if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
+#include <tracy/TracyC.h>
+#endif
+
 #include <cstdio>
 #include <cstring>
+#include <deque>
 
 namespace
 {
@@ -44,17 +53,10 @@ namespace
         wxl::log::Write(to, kTag, "Vulkan: %s", text);
     }
 
-    /// The renderer's objects, from device_create to device_destroy.
-    struct Renderer
-    {
-        vk::device::Context     context;
-        vk::resources::Allocator allocator;
-        vk::frame::Submitter    submitter;
-    };
-
-    Renderer* g_renderer = nullptr;
-    void*     g_owner    = nullptr;
-    bool      g_tried    = false; ///< a device was asked for in this launch
+    vk::gxfront::Front*  g_front   = nullptr;
+    bool                 g_tried   = false; ///< a device was asked for in this launch
+    bool                 g_renders = false; ///< the client renders through it (the recompiled client)
+    std::deque<uint64_t> g_losses;          ///< when the last losses came, in milliseconds
 
     /// "anisotropy, BC textures, ..." for the features and extensions @p want says.
     void Optional(const vk::device::Candidate& c, bool want, char* out, size_t size)
@@ -92,79 +94,140 @@ namespace
     }
 
     /// The device line: what was taken, and what it offers beyond the floor.
-    void Report(const Renderer& r, double milliseconds)
+    void Report(vk::gxfront::Front& front, double milliseconds)
     {
-        const vk::device::Candidate& c = r.context.Chosen();
+        const vk::device::Candidate& c = front.Context().Chosen();
         char api[32], driver[32], loader[32];
         vk::FormatVersion(c.api, api, sizeof api);
         vk::device::FormatDriver(c.vendor, c.driver, driver, sizeof driver);
-        vk::FormatVersion(r.context.InstanceApi(), loader, sizeof loader);
-        const vk::resources::Budget budget = r.allocator.CurrentBudget();
+        vk::FormatVersion(front.Context().InstanceApi(), loader, sizeof loader);
+        const vk::resources::Budget budget = front.Allocator().CurrentBudget();
         WLOG_INFO(kTag, "Vulkan: device %u, %s (%s, Vulkan %s, driver %s, %04x:%04x, %llu MiB device memory, budget %llu MiB), "
                         "queue family %u, loader %s, validation %s, made in %.0f ms",
                   c.index, c.name, vk::device::TypeName(c.type), api, driver, c.vendor, c.device_id,
                   static_cast<unsigned long long>(c.device_local >> 20), static_cast<unsigned long long>(budget.budget >> 20),
-                  c.family, loader, r.context.Validation() ? "on" : "off", milliseconds);
+                  c.family, loader, front.Context().Validation() ? "on" : "off", milliseconds);
         char has[512], lacks[512];
         Optional(c, true, has, sizeof has);
         Optional(c, false, lacks, sizeof lacks);
         WLOG_INFO(kTag, "Vulkan: beyond the 1.3 floor it offers %s; it lacks %s", has, lacks);
     }
 
-    void Stop()
+    double Milliseconds(const LARGE_INTEGER& begin)
     {
-        if (!g_renderer) return;
-        delete g_renderer;
-        g_renderer = nullptr;
-        g_owner    = nullptr;
+        LARGE_INTEGER frequency{}, end{};
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&end);
+        return 1000.0 * static_cast<double>(end.QuadPart - begin.QuadPart) / static_cast<double>(frequency.QuadPart);
+    }
+
+    vk::gxfront::Options OptionsOf(const wxl::core::settings::Settings& settings)
+    {
+        vk::gxfront::Options options;
+        options.gpu        = settings.gx_gpu[0] ? settings.gx_gpu : nullptr;
+        options.validation = settings.gx_validation;
+        options.frames     = settings.gx_frames;
+        options.filter     = settings.gx_nearest ? vk::present::Filter::Nearest : vk::present::Filter::Linear;
+        return options;
+    }
+
+    // --- The frame's GPU zone in the profiler ------------------------------------------------------
+#if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
+    /// Each frame as a GPU zone of a "Vulkan" context, from its first command to the end of the
+    /// present pass, timed by the frame's own timestamps once it has completed (nothing waits).
+    class GpuZones final : public vk::present::TimestampSink
+    {
+    public:
+        /// The context of the device of the front's generation, made once the profiler is up.
+        void Attach(vk::gxfront::Front& front)
+        {
+            if (generation_ == front.Generation() || !wxl::core::profile::Started()) return;
+            generation_                     = front.Generation();
+            vk::present::Display& display = front.Screen();
+            int64_t               ticks   = 0;
+            if (!display.SetTimestamps(this) || !display.SampleGpuTime(ticks))
+            {
+                display.SetTimestamps(nullptr);
+                return;
+            }
+            // One context per device made: a device made again starts its clock again.
+            context_ = next_++;
+            ___tracy_emit_gpu_new_context(___tracy_gpu_new_context_data{ticks, display.TimestampPeriod(), context_, 0, 2 /* Vulkan */});
+            static const char kName[] = "Vulkan";
+            ___tracy_emit_gpu_context_name(___tracy_gpu_context_name_data{context_, kName, static_cast<uint16_t>(sizeof kName - 1)});
+            std::memset(open_, 0, sizeof open_);
+        }
+
+        void Begin(uint16_t query) override
+        {
+            open_[query & 15] = ___tracy_connected() != 0;
+            if (open_[query & 15])
+                ___tracy_emit_gpu_zone_begin(___tracy_gpu_zone_begin_data{reinterpret_cast<uint64_t>(&kFrame), query, context_});
+        }
+
+        void End(uint16_t query) override
+        {
+            // A zone ends only where it began: one that began unwatched is not recorded at all.
+            open_[query & 15] = open_[(query - 1) & 15];
+            if (open_[query & 15]) ___tracy_emit_gpu_zone_end(___tracy_gpu_zone_end_data{query, context_});
+        }
+
+        void Time(uint16_t query, int64_t ticks) override
+        {
+            if (!open_[query & 15]) return;
+            ___tracy_emit_gpu_time(___tracy_gpu_time_data{ticks, query, context_});
+            open_[query & 15] = false;
+        }
+
+    private:
+        static inline const ___tracy_source_location_data kFrame = {"frame", "ScenePresent", __FILE__, __LINE__, 0x4A90D9};
+        uint64_t generation_ = 0;
+        uint8_t  context_    = 0;
+        bool     open_[16]   = {};
+        /// Context ids above those Tracy's own GPU contexts count up from 0; none is used in this process.
+        static inline uint8_t next_ = 200;
+    };
+
+    GpuZones g_zones;
+#endif
+
+    void Stop(bool released_resources)
+    {
+        if (!g_front) return;
+        if (g_renders && released_resources)
+        {
+            // What the runtime and the mods made on the device goes before it, its frames done.
+            g_front->WaitIdle();
+            wxl::core::gx::ResourcesLost(true);
+        }
+        delete g_front;
+        g_front   = nullptr;
+        g_renders = false;
         vk::SetLogSink(nullptr, nullptr);
     }
 
-    /// Makes the device from the settings and checks a submission comes back; false with @p why.
-    bool Start(void* owner, const wxl::core::settings::Settings& settings, char* why, uint32_t why_size)
+    /// Makes the device from the settings, on @p window when there is one; false with @p why.
+    bool Start(void* owner, void* window, const wxl::core::settings::Settings& settings, char* why, uint32_t why_size)
     {
-        Stop();
+        Stop(false);
         g_tried = true;
         vk::SetLogSink(Sink, nullptr);
 
-        vk::device::Options options;
-        options.gpu        = settings.gx_gpu[0] ? settings.gx_gpu : nullptr;
-        options.validation = settings.gx_validation;
-        options.instance_extensions = vk::present::InstanceExtensions(options.instance_extension_count);
-        options.presents            = vk::present::Presents;
-
-        LARGE_INTEGER frequency{}, begin{}, end{};
-        QueryPerformanceFrequency(&frequency);
+        LARGE_INTEGER begin{};
         QueryPerformanceCounter(&begin);
-
-        g_renderer = new Renderer();
-        g_owner    = owner;
-        if (!g_renderer->context.Create(options, why, why_size) || !g_renderer->allocator.Create(g_renderer->context, why, why_size) ||
-            !g_renderer->submitter.Create(g_renderer->context, why, why_size))
+        g_front = new vk::gxfront::Front();
+        if (!g_front->Create(owner, window, OptionsOf(settings), why, why_size))
         {
-            Stop();
+            Stop(false);
             return false;
         }
-
-        // An empty submission, waited for with the bound every wait has: the queue answers.
-        vk::frame::Submitter& submitter = g_renderer->submitter;
-        uint64_t serial = 0;
-        if (submitter.Begin()) serial = submitter.Submit();
-        const vk::frame::Wait wait = serial ? submitter.WaitFor(serial) : vk::frame::Wait::Failed;
-        if (wait != vk::frame::Wait::Done)
-        {
-            std::snprintf(why, why_size, "the device took no submission (%s) on %s", vk::frame::WaitName(wait),
-                          g_renderer->context.Chosen().name);
-            Stop();
-            return false;
-        }
-
-        QueryPerformanceCounter(&end);
-        Report(*g_renderer, 1000.0 * static_cast<double>(end.QuadPart - begin.QuadPart) / static_cast<double>(frequency.QuadPart));
+        Report(*g_front, Milliseconds(begin));
         return true;
     }
 
-    constexpr char kNoDrawing[] = "this runtime does not draw through Vulkan yet";
+    bool Mine(void* device) { return g_front && g_renders && device && g_front->Owner() == device; }
+
+    // --- The table's rows ------------------------------------------------------------------------------
 
     int32_t WXL_CALL SelectApiRow(int32_t requested)
     {
@@ -177,24 +240,174 @@ namespace
         return choice.api;
     }
 
-    wxl_result WXL_CALL DeviceCreateRow(void* device, void*, char* why, uint32_t why_size)
+    wxl_result WXL_CALL DeviceCreateRow(void* device, void* window, char* why, uint32_t why_size)
     {
         char reason[512] = {};
-        if (!Start(device, wxl::core::session::CurrentSettings(), reason, sizeof reason))
+        if (!device || !window || !Start(device, window, wxl::core::session::CurrentSettings(), reason, sizeof reason))
         {
+            if (!reason[0]) std::snprintf(reason, sizeof reason, "the client gave no device or no window");
             WLOG_WARN(kTag, "Vulkan not started: %s; the client stays on D3D9", reason);
             if (why && why_size) std::snprintf(why, why_size, "%s", reason);
             return WXL_E_FAILED;
         }
-        WLOG_INFO(kTag, "Vulkan: %s, so the device is released and the client goes on with D3D9", kNoDrawing);
-        Stop();
-        if (why && why_size) std::snprintf(why, why_size, "%s", kNoDrawing);
-        return WXL_E_UNSUPPORTED;
+        g_renders = true;
+        g_losses.clear();
+        const wxl::core::settings::Settings& s = wxl::core::session::CurrentSettings();
+        WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling). The engine's draws are "
+                        "not drawn at this step: the screen shows its clear colour, Dear ImGui and the pointer",
+                  s.gx_frames, s.gx_nearest ? "nearest" : "bilinear");
+        return WXL_OK;
     }
 
     void WXL_CALL DeviceDestroyRow(void* device)
     {
-        if (g_renderer && g_owner == device) Stop();
+        if (!g_front || g_front->Owner() != device) return;
+        char line[320];
+        g_front->Describe(line, sizeof line);
+        WLOG_INFO(kTag, "%s; released", line);
+        Stop(true);
+    }
+
+    wxl_result WXL_CALL DeviceSetWindowRow(void* device, void* window, char* why, uint32_t why_size)
+    {
+        if (!Mine(device)) return WXL_E_INVALID;
+        char reason[256] = {};
+        if (!window)
+        {
+            g_front->SetWindow(nullptr, reason, sizeof reason);
+            // As the D3D9 device's DeviceSetFormat: what was made for the old window goes.
+            wxl::core::gx::ResourcesLost(true);
+            return WXL_OK;
+        }
+        if (!g_front->SetWindow(window, reason, sizeof reason))
+        {
+            WLOG_WARN(kTag, "Vulkan: the new window cannot be presented to: %s", reason);
+            if (why && why_size) std::snprintf(why, why_size, "%s", reason);
+            return WXL_E_FAILED;
+        }
+        return WXL_OK;
+    }
+
+    void WXL_CALL DeviceCapsRow(void* device)
+    {
+        if (Mine(device)) g_front->WriteCaps();
+    }
+
+    void WXL_CALL WindowSizeRow(void* device, uint32_t width, uint32_t height, int32_t minimized)
+    {
+        if (!Mine(device)) return;
+        // A resize: the size-bound images go (as at a D3D9 reset), the device and Dear ImGui stay.
+        if (!minimized) wxl::core::gx::ResourcesLost(false);
+        g_front->WindowSize(width, height, minimized != 0);
+    }
+
+    int32_t WXL_CALL SceneBeginRow(void* device)
+    {
+        if (!Mine(device)) return WXL_GX_VK_FRAME_LOST;
+        return g_front->BeginScene() ? WXL_GX_VK_FRAME_OK : WXL_GX_VK_FRAME_LOST;
+    }
+
+    void WXL_CALL SceneClearRow(void* device, uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height)
+    {
+        if (Mine(device)) g_front->Clear(mask, argb, x, y, width, height);
+    }
+
+    void WXL_CALL DrawRow(void* device, const void* batch, int32_t count)
+    {
+        if (Mine(device)) g_front->Draw(batch, count);
+    }
+
+    int32_t WXL_CALL ScenePresentRow(void* device)
+    {
+        if (!Mine(device)) return WXL_GX_VK_FRAME_LOST;
+        if (!g_front->Present())
+        {
+            WLOG_ERROR(kTag, "Vulkan: the device was lost; the client stops drawing until it is made again");
+            return WXL_GX_VK_FRAME_LOST;
+        }
+#if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
+        // Between frames: where the zone's context is made (once per device), its clock sampled.
+        g_zones.Attach(*g_front);
+#endif
+        return WXL_GX_VK_FRAME_OK;
+    }
+
+    wxl_result WXL_CALL DeviceRestoreRow(void* device, char* why, uint32_t why_size)
+    {
+        if (!Mine(device)) return WXL_E_INVALID;
+        const uint64_t now = GetTickCount64();
+        while (!g_losses.empty() && now - g_losses.front() > 60'000) g_losses.pop_front();
+        g_losses.push_back(now);
+        char reason[512] = {};
+        if (g_losses.size() >= 3)
+            std::snprintf(reason, sizeof reason, "the Vulkan device was lost three times within a minute");
+        else
+        {
+            // The runtime's objects and the mods' go with the device, once what it was given is done
+            // (a loss the renderer declared leaves a working GPU behind); SwapchainRestored follows
+            // from the engine's NotifyOnDeviceRestored once the client has its device back.
+            g_front->WaitIdle();
+            wxl::core::gx::ResourcesLost(true);
+            LARGE_INTEGER begin{};
+            QueryPerformanceCounter(&begin);
+            if (g_front->Restore(reason, sizeof reason))
+            {
+                WLOG_WARN(kTag, "Vulkan: the device was lost and is made again (%zu loss(es) in the last minute), in %.0f ms",
+                          g_losses.size(), Milliseconds(begin));
+                return WXL_OK;
+            }
+        }
+        WLOG_ERROR(kTag, "Vulkan: %s; the client closes. Set [gx] api = d3d9 in WarcraftXL.ini to play on D3D9", reason);
+        if (why && why_size) std::snprintf(why, why_size, "%s", reason);
+        return WXL_E_FAILED;
+    }
+
+    void WXL_CALL GammaChangedRow(void* device)
+    {
+        if (Mine(device)) g_front->GammaChanged();
+    }
+
+    void WXL_CALL CursorChangedRow(void* device)
+    {
+        if (Mine(device)) g_front->CursorChanged();
+    }
+
+    void WXL_CALL CursorSetRow(void* device)
+    {
+        if (Mine(device)) g_front->SetCursor();
+    }
+
+    char* WXL_CALL PoolMemoryRow(void* device, void* pool) { return Mine(device) && pool ? g_front->PoolMemory(pool) : nullptr; }
+
+    void WXL_CALL PoolResizeRow(void* device, void* pool)
+    {
+        if (Mine(device) && pool) g_front->PoolResize(pool);
+    }
+
+    void WXL_CALL PoolDestroyRow(void* device, void* pool)
+    {
+        if (Mine(device) && pool) g_front->PoolDestroy(pool);
+    }
+
+    int32_t WXL_CALL TexCreateRow(void* device, void* tex) { return Mine(device) && tex && g_front->TexCreate(tex) ? 1 : 0; }
+
+    void WXL_CALL TexDestroyRow(void* device, void* tex)
+    {
+        if (Mine(device) && tex) g_front->TexDestroy(tex);
+    }
+
+    void WXL_CALL SimulateLossRow(void* device)
+    {
+        if (!Mine(device)) return;
+        WLOG_WARN(kTag, "Vulkan: gxVkSimulateLoss: the device is marked lost, as a real loss would");
+        g_front->SimulateLoss();
+    }
+
+    void WXL_CALL DescribeRow(void* device, char* out, uint32_t out_size)
+    {
+        if (!out || !out_size) return;
+        if (g_front && g_front->Owner() == device) g_front->Describe(out, out_size);
+        else std::snprintf(out, out_size, "Vulkan: no device");
     }
 
     const wxl_gx_vk_backend kBackend = {
@@ -204,6 +417,24 @@ namespace
         SelectApiRow,
         DeviceCreateRow,
         DeviceDestroyRow,
+        DeviceSetWindowRow,
+        DeviceCapsRow,
+        WindowSizeRow,
+        SceneBeginRow,
+        SceneClearRow,
+        DrawRow,
+        ScenePresentRow,
+        DeviceRestoreRow,
+        GammaChangedRow,
+        CursorChangedRow,
+        CursorSetRow,
+        PoolMemoryRow,
+        PoolResizeRow,
+        PoolDestroyRow,
+        TexCreateRow,
+        TexDestroyRow,
+        SimulateLossRow,
+        DescribeRow,
     };
 }
 
@@ -212,18 +443,32 @@ namespace wxl::core::gx
     Outcome DeviceReady(const settings::Settings& settings, char* why, uint32_t why_size)
     {
         // The recompiled client asked through its adapter already; the stock one has none, so
-        // the device is made here, beside its own.
+        // the device is made here, beside its own, checked with a frame, and released.
         if (g_tried || settings.gx_api != settings::GxApi::vulkan) return Outcome::not_asked;
         char reason[512] = {};
-        if (!Start(nullptr, settings, reason, sizeof reason))
+        if (!Start(nullptr, nullptr, settings, reason, sizeof reason))
         {
             WLOG_WARN(kTag, "Vulkan not started: %s; the client stays on D3D9", reason);
             if (why && why_size) std::snprintf(why, why_size, "%s", reason);
             return Outcome::failed;
         }
-        WLOG_INFO(kTag, "Vulkan: %s, so the device is released and the client keeps its D3D9 device", kNoDrawing);
-        Stop();
+        WLOG_INFO(kTag, "Vulkan: this runtime does not draw the stock client through Vulkan yet, so the device is released "
+                        "and the client keeps its D3D9 device");
+        Stop(false);
         return Outcome::released;
+    }
+
+    bool VulkanActive() { return g_front && g_renders; }
+
+    bool VulkanOpenFrame(VulkanFrame& out)
+    {
+        if (!g_front || !g_renders || !g_front->Ready() || g_front->Context().Lost() || !g_front->Screen().InFrame()) return false;
+        out.context    = &g_front->Context();
+        out.allocator  = &g_front->Allocator();
+        out.display    = &g_front->Screen();
+        out.generation = g_front->Generation();
+        out.frames     = g_front->Screen().FrameCount();
+        return true;
     }
 }
 

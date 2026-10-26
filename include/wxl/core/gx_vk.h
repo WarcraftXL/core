@@ -3,8 +3,9 @@
 //
 // The Vulkan renderer as the recompiled client's device reaches it. The renderer is
 // WarcraftXL.dll's (src/gx/vk/, one source for both architectures); the client's CGxDeviceVk is a
-// thin adapter whose overrides call through this table, one line each. The client takes the
-// table once, from WarcraftXLGxVulkan, and checks it before it makes a Vulkan device:
+// thin adapter: it keeps the engine's own logic of each device call (as the D3D9 device does) and
+// hands the Vulkan work to this table. The client takes the table once, from WarcraftXLGxVulkan,
+// and checks it before it makes a Vulkan device:
 //
 //     const wxl_gx_vk_backend* vk = WarcraftXLGxVulkan();
 //     if (!vk || vk->struct_size < sizeof(wxl_gx_vk_backend) ||
@@ -12,6 +13,9 @@
 //
 // Which API the client creates is decided here too: WarcraftXL.ini's [gx] api, over the client's
 // own choice (its gxApi CVar and its command line).
+//
+// Every row is called on the client's main thread. `device` is always the engine's CGxDevice the
+// Vulkan device was made for; a row called with another one does nothing.
 
 #ifndef WXL_CORE_GX_VK_H
 #define WXL_CORE_GX_VK_H
@@ -33,6 +37,13 @@ enum
     WXL_GX_API_VULKAN = 6, ///< appended to the client's EGxApi after GxApi_GLL
 };
 
+/// What a frame came to (scene_begin, scene_present).
+enum
+{
+    WXL_GX_VK_FRAME_OK   = 0,
+    WXL_GX_VK_FRAME_LOST = 1, ///< the device was lost: the client sets m_context to 0 and restores it at its next scene
+};
+
 typedef struct wxl_gx_vk_backend
 {
     uint32_t struct_size;
@@ -46,23 +57,86 @@ typedef struct wxl_gx_vk_backend
      * @brief The API the client creates, given the one it asked for (its gxApi CVar, then its
      *        command line): WarcraftXL.ini's `[gx] api = vulkan` turns a D3D9 or D3D9Ex request into
      *        Vulkan, `[gx] api = d3d9` a Vulkan one into D3D9; without the line the request stands.
-     *        Logs a change. Called once, on the main thread, before the device is created.
+     *        Logs a change. Called once, before the device is created.
      */
     int32_t(WXL_CALL* select_api)(int32_t requested);
 
     /**
-     * @brief Makes the Vulkan device for the engine's device @p device, which presents into
-     *        @p window (an HWND; null before the engine has made it). Logs the device taken, or
-     *        why none was.
+     * @brief Makes the Vulkan device for the engine's device @p device, presenting into @p window
+     *        (an HWND, the client's window, already made), and shows a first frame on it. Logs the
+     *        device taken, or why none was.
      * @param why  a sentence when it fails, for the client's own log
-     * @return WXL_OK when the device renders through Vulkan; otherwise the client releases its
-     *         Vulkan device and creates D3D9 in its place. This runtime does not draw through
-     *         Vulkan yet: it makes the device, logs it, releases it and answers WXL_E_UNSUPPORTED.
+     * @return WXL_OK when the client renders through Vulkan; otherwise nothing is kept and the
+     *         client creates D3D9 in its place.
      */
     wxl_result(WXL_CALL* device_create)(void* device, void* window, char* why, uint32_t why_size);
 
     /// Releases what device_create made for @p device; nothing when it made nothing.
     void(WXL_CALL* device_destroy)(void* device);
+
+    /**
+     * @brief The client's window changes (DeviceSetFormat makes it again): null before the old one
+     *        is destroyed (its surface goes now, the frames on it completed), then the new one.
+     * @return WXL_OK, or a failure with @p why (the client treats it as a failed format).
+     */
+    wxl_result(WXL_CALL* device_set_window)(void* device, void* window, char* why, uint32_t why_size);
+
+    /// Fills the engine's capabilities (CGxDevice::m_caps) for the device made.
+    void(WXL_CALL* device_caps)(void* device);
+
+    /// The client area's size (WM_SIZE), or that the window was minimised.
+    void(WXL_CALL* window_size)(void* device, uint32_t width, uint32_t height, int32_t minimized);
+
+    /// Opens the next frame, as the D3D9 device's scene begin: WXL_GX_VK_FRAME_OK or _LOST.
+    int32_t(WXL_CALL* scene_begin)(void* device);
+
+    /// Clears the open frame's back buffer inside (x, y, width, height): its colour (0xAARRGGBB)
+    /// when @p mask has 1, its depth when it has 2.
+    void(WXL_CALL* scene_clear)(void* device, uint32_t mask, uint32_t argb, int32_t x, int32_t y, int32_t width, int32_t height);
+
+    /// A draw of the engine (CGxDevice::Draw): accepted; not drawn by this runtime yet.
+    void(WXL_CALL* draw)(void* device, const void* batch, int32_t count);
+
+    /// Shows the open frame: WXL_GX_VK_FRAME_OK, or _LOST when the device was lost.
+    int32_t(WXL_CALL* scene_present)(void* device);
+
+    /**
+     * @brief After a loss, at the next scene: the device made again on the same window.
+     * @return WXL_OK; WXL_E_FAILED with @p why when it cannot be, or after three losses within a
+     *         minute (the client then tells the player and closes).
+     */
+    wxl_result(WXL_CALL* device_restore)(void* device, char* why, uint32_t why_size);
+
+    /// The engine's gamma ramp (m_gammaRamp) or its window mode changed.
+    void(WXL_CALL* gamma_changed)(void* device);
+
+    /// The engine's pointer changed: its pixels and hotspot (m_cursor), or whether it shows.
+    void(WXL_CALL* cursor_changed)(void* device);
+
+    /// WM_SETCURSOR over the client area: the runtime sets the pointer the engine wants.
+    void(WXL_CALL* cursor_set)(void* device);
+
+    /// The memory of a vertex or index pool (CGxPool, m_size bytes), made at its first lock; null
+    /// when none can be (the client then writes into its emergency memory).
+    char*(WXL_CALL* pool_memory)(void* device, void* pool);
+
+    /// A pool's size changed (m_size): its memory is made again at its next lock.
+    void(WXL_CALL* pool_resize)(void* device, void* pool);
+
+    /// A pool goes: its memory with it.
+    void(WXL_CALL* pool_destroy)(void* device, void* pool);
+
+    /// A texture (CGxTex) is made on the device: its m_apiSpecificData set. 1 when made.
+    int32_t(WXL_CALL* tex_create)(void* device, void* tex);
+
+    /// A texture goes, or is to be made again: what tex_create made goes, m_apiSpecificData is null.
+    void(WXL_CALL* tex_destroy)(void* device, void* tex);
+
+    /// The console command gxVkSimulateLoss: the device is marked lost, as a real loss would.
+    void(WXL_CALL* simulate_loss)(void* device);
+
+    /// One line on the device for the client's crash report.
+    void(WXL_CALL* describe)(void* device, char* out, uint32_t out_size);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

@@ -10,6 +10,8 @@
 #include "gx/vk/device/Device.hpp"
 
 #include <cstdint>
+#include <deque>
+#include <functional>
 
 // The allocator's handles, declared here so that only Resources.cpp includes VMA.
 struct VmaAllocator_T;
@@ -64,9 +66,13 @@ namespace wxl::vk::resources
         bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out);
         void Destroy(Buffer& buffer);
 
-        /// A 2D image with one mip and one layer, and its colour view.
-        bool CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out);
+        /// A 2D image with one mip and one layer, and its view of @p aspect (colour unless said).
+        bool CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
+                         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
         void Destroy(Image& image);
+
+        /// The number of allocations alive: what a test reads to see nothing leaked.
+        uint32_t Allocations() const;
 
         /// Makes the CPU's reads of a Readback buffer see what the GPU wrote.
         void Invalidate(const Buffer& buffer);
@@ -76,5 +82,38 @@ namespace wxl::vk::resources
     private:
         VkDevice        device_ = VK_NULL_HANDLE;
         VmaAllocator_T* vma_ = nullptr;
+    };
+
+    /**
+     * What the GPU may still read is released here, by serial: each release waits for the serial
+     * of the last submission that may have used it, and runs once the timeline has passed it. The
+     * queue has no fixed size, so nothing is dropped and nothing freed early.
+     */
+    class Graveyard
+    {
+    public:
+        Graveyard() = default;
+        Graveyard(const Graveyard&)            = delete;
+        Graveyard& operator=(const Graveyard&) = delete;
+        ~Graveyard() { Flush(); }
+
+        /// Runs @p release once @p serial has completed.
+        void Bury(uint64_t serial, std::function<void()> release);
+
+        /// Runs every release whose serial is at most @p completed, in the order they came.
+        void Collect(uint64_t completed);
+
+        /// Runs every release now: the device is idle or lost.
+        void Flush();
+
+        size_t Size() const { return dead_.size(); }
+
+    private:
+        struct Dead
+        {
+            uint64_t              serial;
+            std::function<void()> release;
+        };
+        std::deque<Dead> dead_;
     };
 }
