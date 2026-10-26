@@ -142,11 +142,18 @@ exec wine "$@"
 The SDK's suites run the same way; its README says how to give them LuaJIT.
 
 ctest's `vk` runs the Vulkan renderer's lower modules on the machine's driver: the device floor
-and choice, VMA, a submission and a bounded wait, an image cleared and read back. Under Wine it
+and choice, VMA, a submission and a bounded wait, an image cleared and read back, the present pass,
+and the engine's draws (every texture format, the blend modes, the alpha test, the scissor, culling,
+depth, fixed function's stages, the interface's programs, pools and textures written again inside a
+frame, mips, cubes) read back and compared with what D3D9 shows, and a frame capture made up in the
+client's format drawn again and compared with its D3D9 picture. Under Wine it
 runs through winevulkan on the host's driver (Mesa's lavapipe on a machine without a GPU, 32-bit
 lavapipe for x86). Wine with no display behind it lists `VK_KHR_win32_surface` but refuses it at
 `vkCreateInstance`, so the test then goes on headless and says so. A machine without a Vulkan 1.3
-device skips it. The same program builds natively for Linux, from the same module rules:
+device skips it. The same program builds natively for Linux, from the same module rules, where it
+also holds every program the renderer makes to `spirv-val` (SPIRV-Tools, built there only), and
+`wxl-vk-replay <capture folder>` draws a real capture again and writes what it drew, the D3D9
+picture and their difference beside it:
 
 ```sh
 cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test-dir build-vk
@@ -198,9 +205,10 @@ Its Vulkan device, `CGxDeviceVk`, is an adapter over this runtime's renderer, re
 table of [`include/wxl/core/gx_vk.h`](include/wxl/core/gx_vk.h). It is chosen by `gxApi Vulkan`,
 `-vulkan`, or `WarcraftXL.ini`'s `[gx] api = vulkan`, which also takes a D3D9Ex request
 (`[gx] api = d3d9` takes any Vulkan request back to D3D9). The client then renders through Vulkan:
-its window, the swapchain, the frame's clear, Dear ImGui and the pointer; the engine's own draws are
-not drawn yet, so the screen shows the clear colour, the mods' ImGui windows and the pointer. A
-machine or a window Vulkan cannot serve keeps D3D9, with one line in the log. D3D9 stays the
+its window, the swapchain, the frame's clear, the game's interface (the glue screens, the loading
+screen, the in-game frames, text and icons), Dear ImGui and the pointer. The world (terrain,
+models, liquids, particles) is not drawn yet: its draws are counted and left out. A machine or a
+window Vulkan cannot serve keeps D3D9, with one line in the log. D3D9 stays the
 default. The console commands `gxVkSimulateLoss` (the device's loss and return, under Vulkan) and
 `gxCapture` (the next frame of the D3D9 device recorded to `WarcraftXL\captures\` in the format of
 [`include/wxl/core/gx_capture.h`](include/wxl/core/gx_capture.h)) are for testing the renderer.
@@ -486,10 +494,12 @@ src/seams/                       the seam bodies, one file per domain (both); th
 src/objects/                     wxl.object over the binding
 src/services/                    wxl.script, wxl.storage, wxl.data (both); wxl.hook, wxl.hook.raw, wxl.patch (x86)
 src/profile/                     the Tracy profiler and wxl.profile (both)
-src/gx/vk/                       the Vulkan renderer, wxl::vk: device, resources, shaders, frame, present,
-                                 imgui; no engine, no runtime, also built natively for Linux (both)
-src/gx/vk/gxfront/               the Vulkan device behind one engine CGxDevice, through the engine layouts
-src/gx/capture/                  the reader of a frame capture (include/wxl/core/gx_capture.h)
+src/gx/vk/                       the Vulkan renderer, wxl::vk: device, resources, shaders, pipelines,
+                                 frame, present, draw, imgui; no runtime, also built natively for Linux (both)
+src/gx/vk/shaders/glsl/          the renderer's programs, GLSL compiled to SPIR-V when it is built
+src/gx/vk/gxfront/               the engine's draws read through the engine layouts (Engine.cpp, portable),
+                                 and the Vulkan device behind one engine CGxDevice (Front.cpp, Windows)
+src/gx/capture/                  a frame capture (include/wxl/core/gx_capture.h) read and drawn again
 src/gx/                          the renderer in the runtime: [gx] api, the table of include/wxl/core/gx_vk.h
                                  for the recompiled client's CGxDeviceVk, the device on the stock client
 src/points/                      wxl.point: handlers and dispatch (both), the detours (x86), the client's bytes (x64)
@@ -501,7 +511,8 @@ src/common/                      the log
 tests/seam_harness.cpp           every seam body against a fake client; --bench times the hot paths
 tests/stock_tests.cpp            src/deinlined/ against a stock Wow.exe's own code, laid at its base    (x86)
 tests/vk/                        the renderer's lower modules on the machine's Vulkan driver; its own
-                                 CMakeLists.txt builds them natively for Linux
+                                 CMakeLists.txt builds them natively for Linux, with spirv-val and
+                                 wxl-vk-replay
 mods/                            the mods above                                (x86)
 deps/minhook/                    MinHook, BSD-2-Clause, unmodified             (x86)
 deps/safetyhook/                 SafetyHook v0.7.0, BSL-1.0, its sources; its near allocator also tries a
@@ -512,7 +523,10 @@ deps/tracy/                      Tracy's client 0.14.1, BSD-3-Clause, unmodified
 deps/vulkan-headers/             Vulkan-Headers vulkan-sdk-1.4.357.0, Apache-2.0 OR MIT, the C headers
 deps/volk/                       volk vulkan-sdk-1.4.357.0, MIT, unmodified: the loader, at run time
 deps/vma/                        Vulkan Memory Allocator v3.4.0, MIT, unmodified
-deps/spirv-headers/              SPIRV-Headers vulkan-sdk-1.4.357.0, Khronos (MIT-style), three headers
+deps/spirv-headers/              SPIRV-Headers vulkan-sdk-1.4.357.0, Khronos (MIT-style), its headers and grammars
+deps/glslang/                    glslang vulkan-sdk-1.4.357.0, BSD-3-Clause and others, built for the build
+                                 machine only: it compiles the renderer's GLSL, nothing of it ships
+deps/spirv-tools/                SPIRV-Tools vulkan-sdk-1.4.357.0, Apache-2.0, built by the tests only (spirv-val)
 tools/seams/                     check the seam table against the fork and against Wow.exe
 tools/offsets/, tools/layouts/   regenerate the tables from the decompiled client
 tools/fields/                    regenerate the SDK's update-field table from the decompiled client
