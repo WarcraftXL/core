@@ -338,6 +338,34 @@ is saved and restored by the backend and the game told to send its own again. Th
 procedure's gate hands every message to ImGui first and stops the ones it wants. Mods compile the
 same copy (`wxl::imgui`) and point it at these contexts and this allocator (`ImGuiService::Bind`).
 
+### Highlights
+
+`wxl.highlight` (`src/services/HighlightService.cpp`) keeps the highlights mods set, one per mod
+and object, newest drawn where two mods mark one object. The service is the same on both
+runtimes; what draws is the runtime's renderer. On the stock client it is
+`src/gx/d3d9/Highlight.cpp`, over the `Device` interface of `src/gx/d3d9/Device.hpp` (the game's
+`IDirect3DDevice9`, or the harness's recording one):
+
+- `WorldFrame.RenderWorld` Before opens the pass; at its first `M2.DrawBatch` (the camera is placed
+  by then) the objects' top models are found, and every opaque batch of theirs drawn to the
+  screen is kept: its numbers (`gx_model_draw`), what the device had bound and the vertex
+  program's constants, read from the engine's own copy (`src/binding/HighlightDrawX86.hpp`): the
+  game makes its device pure, so Direct3D cannot be asked.
+- `WorldFrame.RenderWorld` After, before `WorldRenderEnd`, draws them again with the game's vertex
+  program into two masks against the scene's depth, never writing it (multisampled like that
+  depth, then resolved), blurs the second at half size, and finds the outline and adds the glow in
+  one full-screen pass. The registers it set are marked for the engine to send again, the state it
+  changed that the engine keeps no copy of is put back, and `gx_invalidate_state` does the rest.
+- `Gx.ReleaseD3dResources` takes its targets and programs; they are made again at the next draw.
+
+Its programs are HLSL (`src/gx/d3d9/shaders/highlight.hlsl`), compiled when the runtime is built
+by `wxl-core-d3d9-shaders` (`tools/shaders/compile_d3d9.cpp`, the system's d3dcompiler_47: under
+Wine from Linux) and held to `shaders.txt`: the profile's version, the constant registers each may
+read (above the game's, so the game's are never touched), the samplers; the device's caps are
+checked against the composite's length before anything is drawn. The recompiled client has no
+renderer for it yet: `supported` answers false with the reason, and its Vulkan renderer's render
+points are where it will be drawn.
+
 ### The profiler
 
 WarcraftXL.dll carries the process's one Tracy client (`deps/tracy`, v0.14.1), compiled with
@@ -506,7 +534,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.
@@ -541,6 +569,7 @@ folder, source or transform is registered: the gate's test is two loads.
 
 | Command | What it proves |
 |---|---|
+| `wxl-core-d3d9-shaders`, at every x86 build | the runtime's own Direct3D 9 programs compile and read only the registers and samplers `src/gx/d3d9/shaders/shaders.txt` allows them |
 | `ctest` in `core/build/win-x64` and `core/build/win-x86` | every seam body against a fake client; on x86, the generated detours and the register thunks; `wxl.point`'s dispatch, and on x86 its detours armed and disarmed on stand-ins; the log's files, levels and settings (`wxl-core-log-tests`) |
 | `ctest` in `sdk/build` | the contract, the field table against the args structs, the mod host, the shared `wxl.object`, `wxl.lua` against the host and its editor definitions against the tables, and that the docs quote the examples as they are |
 | `python core/tools/seams/check_seams.py` | every seam is called from the fork, once, in the right function, with the right arguments. Runs in the fork's build |

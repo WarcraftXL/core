@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.26-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.27-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -231,6 +231,7 @@ What a mod can reach **today**, by build:
 | `wxl.input`'s block of the mouse look | yes: gates on `CGInputControl::SetControlBit` and `UnsetControlBit` keep the look bits from the game, and a short click is done through `CGWorldFrame::PerformDefaultAction` | the same, gates in the fork |
 | `wxl.pose` (heads) | yes: after `CGUnit_C::PreAnimate`, the head key bone's procedural transform (`CM2Model::SetBoneFlags`, `SetBoneProceduralTransform`) | the same |
 | `wxl.imgui` (Dear ImGui, ImPlot) | yes: one context, drawn at the present with the D3D9 device (the SDK's copy and its Win32 and DX9 backends), the window's messages fed at the window procedure's gate | the same |
+| `wxl.highlight` (outline and glow) | yes: the batches of a highlighted object kept at `M2.DrawBatch` (bindings, vertex program and constants read from the engine's copy, the device being pure), drawn again after the world into two masks against the scene's depth, the glow blurred at half size and the outline found in a full-screen pass, with programs compiled at build time (`src/gx/d3d9/`) | not yet: `supported` false, its reason the Vulkan renderer's render points to come |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -349,11 +350,11 @@ source. Everything else observes.
 | `InputControl.UnsetControlBit` (gated) | `CGInputControl::UnsetControlBit(uint32_t bit, uint32_t time, int32_t keep_smoothing)` | the release of a look bit kept out, with the default action of a short click |
 | `Unit.PreAnimate` | `CGUnit_C::PreAnimate(void* frame)` | After applies the head turns of `wxl.pose` |
 | `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
-| `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world |
+| `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world. Before, `wxl.highlight` starts keeping its objects' batches; after, before `WorldRenderEnd`, it draws them |
 | `WorldFrame.PerformDefaultAction` (gated) | `CGWorldFrame::PerformDefaultAction(MOUSEBUTTON button)` | `WorldClickRequest` with what the click met (a name plate, a model, the ground, a map object, nothing) and whether a spell waits for its target; a mod that refuses it keeps the game from acting on the click |
-| `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
+| `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it. Dear ImGui's and `wxl.highlight`'s device objects go first |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
-| `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound. The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens |
+| `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound. The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens; two more while nothing is highlighted, else a batch of a highlighted object is kept for `wxl.highlight` |
 | `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton, then the bone watchers get the pose; one load while none is |
 | `M2Shared.Initialize` | `CM2Shared::Initialize()`, a parsed model made ready | `ModelParsed` before, ahead of its skin profile's choice and its textures |
 | `M2Shared.InitializeSkinProfile` | `CM2Shared::InitializeSkinProfile()`, a parsed skin profile sized for drawing | `SkinProfileParsed` before, with the model's header and the skin's |
