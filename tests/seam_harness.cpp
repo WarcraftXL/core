@@ -4615,7 +4615,9 @@ namespace
                   vk->cursor_changed && vk->cursor_set && vk->pool_memory && vk->pool_resize && vk->pool_destroy &&
                   vk->tex_create && vk->tex_destroy && vk->simulate_loss && vk->describe && vk->shader_constants &&
                   vk->shader_create && vk->shader_destroy && vk->tex_lock && vk->tex_unlock && vk->pool_discard &&
-                  vk->pool_written && vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
+                  vk->pool_written && vk->shader_prewarm && vk->target_set && vk->tex_copy && vk->tex_stretch && vk->query_create &&
+                  vk->query_destroy && vk->query_begin && vk->query_end && vk->query_result &&
+                  vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
               "the Vulkan table is whole, with the layout of CGxDevice it reads the engine by");
         if (vk)
         {
@@ -4627,7 +4629,11 @@ namespace
             Check(vk->scene_begin(fakeDevice) == WXL_GX_VK_FRAME_LOST && vk->scene_present(fakeDevice) == WXL_GX_VK_FRAME_LOST &&
                       !vk->pool_memory(fakeDevice, fakePool) && vk->tex_create(fakeDevice, fakeTex, 4, 4, 1) == 0 &&
                       !vk->tex_lock(fakeDevice, fakeTex, 0, 0, 0, 0, 4, 4, nullptr) &&
-                      vk->shader_create(fakeDevice, fakeTex, 1, "UI:0") == 0 &&
+                      vk->shader_create(fakeDevice, fakeTex, 1, "UI:0", nullptr, 0) == 0 &&
+                      vk->tex_copy(fakeDevice, fakeTex, 0, 0, 0, 0, 4, 4, 0, 0) == 0 &&
+                      vk->tex_stretch(fakeDevice, fakeTex, nullptr, nullptr, 0, 0) == 0 && vk->query_create(fakeDevice) == 0 &&
+                      vk->query_begin(fakeDevice, 1) == 0 && vk->query_end(fakeDevice, 1) == 0 &&
+                      vk->query_result(fakeDevice, 1, nullptr) == 0 &&
                       vk->device_restore(fakeDevice, said, sizeof said) == WXL_E_INVALID &&
                       vk->device_set_window(fakeDevice, nullptr, said, sizeof said) == WXL_E_INVALID,
                   "the Vulkan rows refuse a device they did not make");
@@ -4639,6 +4645,11 @@ namespace
             vk->tex_unlock(fakeDevice, fakeTex);
             vk->pool_discard(fakeDevice, fakePool);
             vk->pool_written(fakeDevice, fakePool, 0, 16);
+            const void*    codes[1] = {rows};
+            const uint32_t sizes[1] = {sizeof rows};
+            vk->shader_prewarm(fakeDevice, codes, sizes, 1);
+            vk->target_set(fakeDevice);
+            vk->query_destroy(fakeDevice, 1);
             vk->window_size(fakeDevice, 640, 480, 0);
             vk->gamma_changed(fakeDevice);
             vk->cursor_changed(fakeDevice);

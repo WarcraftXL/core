@@ -8,7 +8,8 @@
 //
 // Writes into the output folder (the capture's when not given) vulkan.ppm (what the renderer
 // drew), d3d9.ppm (the capture's SHOT) and diff.ppm (each pixel's largest channel difference as
-// grey), and prints what was replayed, what was left out and why, and how many pixels match.
+// grey), and prints what was replayed (the client's records translated, targets, copies, the
+// pipelines made), what was left out and why, and how many pixels match.
 // Exit 0 when the replay ran, 1 when it could not, 77 without a Vulkan 1.3 device.
 
 #include "gx/capture/Replay.hpp"
@@ -93,7 +94,7 @@ int main(int argc, char** argv)
         {
             display.SetSceneExtent({w, h});
             vk::frame::Wait wait{};
-            if (renderer.Create(context, allocator, display, reason, sizeof reason) && display.BeginFrame(wait))
+            if (renderer.Create(context, allocator, display, {}, reason, sizeof reason) && display.BeginFrame(wait))
             {
                 wxl::gx::capture::Replay replay;
                 const bool               ran = replay.Run(bytes.data(), bytes.size(), renderer, why);
@@ -101,12 +102,20 @@ int main(int argc, char** argv)
                 std::vector<uint32_t> pixels;
                 display.ReadOffscreen(pixels);
                 const auto& s = replay.Counters();
-                std::printf("%ux%u: %u shaders (%u the renderer draws), %u pools, %u textures, %u clears, %u copies not replayed, "
-                            "%u pool ranges unknown\n",
-                            w, h, s.shaders, s.programs, s.pools, s.textures, s.clears, s.copies, s.unknown);
-                std::printf("%u draws: %u drawn (%u recorded); left out: %u into targets, %u in the world, %u 3D, %u client programs, "
+                const vk::draw::Renderer::Stats& r = renderer.Counters();
+                std::printf("%ux%u: %u shaders (%u with a program: %llu translated, %llu refused), %u pools, %u textures, %u clears, "
+                            "%u target changes, %u copies (%u made), %u pool ranges unknown\n",
+                            w, h, s.shaders, s.programs, static_cast<unsigned long long>(r.programs),
+                            static_cast<unsigned long long>(r.programs_refused), s.pools, s.textures, s.clears, s.targets, s.copies, s.copied,
+                            s.unknown);
+                std::printf("%u draws: %u drawn (%u recorded); left out: %u untranslated programs, %u into a depth texture alone, "
                             "%u not ready\n",
-                            s.draws, s.verdicts[0], s.recorded, s.verdicts[1], s.verdicts[2], s.verdicts[3], s.verdicts[4], s.verdicts[5]);
+                            s.draws, s.verdicts[0], s.recorded, s.verdicts[static_cast<int>(vk::gxfront::Verdict::Program)],
+                            s.verdicts[static_cast<int>(vk::gxfront::Verdict::Target)],
+                            s.verdicts[static_cast<int>(vk::gxfront::Verdict::Unready)]);
+                std::printf("%llu pipelines (%zu vertex layouts), %llu target renderings, %llu register bytes copied\n",
+                            static_cast<unsigned long long>(r.pipelines), renderer.PipelineCache().Layouts(),
+                            static_cast<unsigned long long>(r.target_renderings), static_cast<unsigned long long>(r.register_bytes));
                 if (!ran) std::printf("the replay stopped: %s\n", why.c_str());
                 Save(output + "/vulkan.ppm", pixels, w, h);
                 if (!replay.Shot().empty() && replay.ShotWidth() == w && replay.ShotHeight() == h)

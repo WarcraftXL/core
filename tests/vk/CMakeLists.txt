@@ -41,7 +41,7 @@ set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
 set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-tools" spirv-tools EXCLUDE_FROM_ALL)
 
-add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp)
+add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp translate_tests.cpp)
 target_link_libraries(wxl-vk-tests PRIVATE wxl-vk SPIRV-Tools-static)
 target_compile_definitions(wxl-vk-tests PRIVATE WXL_VK_SPIRV_VAL)
 
@@ -53,3 +53,12 @@ target_link_libraries(wxl-vk-replay PRIVATE wxl-vk)
 enable_testing()
 add_test(NAME vk COMMAND wxl-vk-tests)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
+
+# The translator over a client's shader corpus (extracted from the user's own archives, never in a
+# repository): wxl-vk-corpus <folder> [--device]. ctest runs it when WXL_VK_CORPUS names the folder.
+add_executable(wxl-vk-corpus corpus_tool.cpp corpus_device.cpp)
+target_link_libraries(wxl-vk-corpus PRIVATE wxl-vk SPIRV-Tools-static)
+if(DEFINED ENV{WXL_VK_CORPUS})
+    add_test(NAME vk-corpus COMMAND wxl-vk-corpus "$ENV{WXL_VK_CORPUS}" --device)
+    set_tests_properties(vk-corpus PROPERTIES SKIP_RETURN_CODE 77)
+endif()

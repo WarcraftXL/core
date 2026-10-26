@@ -4,6 +4,8 @@
 // Every program the renderer makes, held to SPIRV-Tools' validator (spirv-val) for Vulkan 1.3:
 // the programs of the engine's draws, compiled from GLSL when the renderer is built
 // (pipelines/Pipelines.cpp), and the present pass's, written at run time by shaders/Spirv.hpp.
+// The client's translated programs are validated where they are made (translate_tests.cpp, and
+// over a whole corpus by wxl-vk-corpus).
 // SPIRV-Tools (deps/spirv-tools) is built in the native test tree only (WXL_VK_SPIRV_VAL).
 
 #include "gx/vk/pipelines/Pipelines.hpp"
@@ -43,6 +45,11 @@ namespace wxl::vk::test
             size_t          words = 0;
             const uint32_t* code  = pipelines::VertexCode(static_cast<pipelines::VertexProgram>(i), words);
             validate(code, words, kVertex[i]);
+        }
+        {
+            size_t          words = 0;
+            const uint32_t* code  = pipelines::VertexCode(pipelines::VertexProgram::Fixed, words, true);
+            validate(code, words, "ff.vert with the user clip plane");
         }
         static const char* const kPixel[] = {"ff.frag", "ui.frag", "desaturate.frag"};
         for (int i = 0; i < static_cast<int>(pipelines::PixelProgram::Count); ++i)

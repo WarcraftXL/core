@@ -13,7 +13,11 @@
 //   - a stream pool renamed when the engine discards it inside a frame, a static pool and a
 //     texture written again after a draw read them in the same frame (the copy goes between the
 //     draws), mips made from the first level, a cube's first face;
-//   - a frame capture made up in the client's format, drawn again and compared with its SHOT.
+//   - a frame capture made up in the client's format, drawn again and compared with its SHOT;
+//   - V3's world: client programs translated from their DX9 records with the engine's registers
+//     copied as they change between draws, a texture target drawn into and sampled, a clear into it,
+//     a copy from the scene, an occlusion query counting samples, D3D9's fixed-function lighting,
+//     fog and user clip plane; a capture with translated programs, a target and a copy replayed.
 
 #include "gx/capture/Replay.hpp"
 #include "gx/vk/Log.hpp"
@@ -21,6 +25,7 @@
 #include "gx/vk/gxfront/Engine.hpp"
 #include "gx/vk/present/Display.hpp"
 
+#include "Asm.hpp"
 #include "Check.hpp"
 
 #include <algorithm>
@@ -92,12 +97,12 @@ namespace
         Check(draw::Formats::Pitch(dxt, 13) == 32 && draw::Formats::Rows(dxt, 5) == 2, "a DXT1 row of 13 texels is 4 blocks, 5 rows 2 block rows");
         draw::FormatInfo argb;
         Check(draw::Formats::Pitch(argb, 7) == 28 && draw::Formats::Rows(argb, 3) == 3, "an ARGB8888 row is 4 bytes a texel");
-        uint8_t program = 0;
-        Check(draw::ProgramByName(true, "UI:0", program) && program == static_cast<uint8_t>(vk::pipelines::VertexProgram::Interface),
+        uint16_t program = 0;
+        Check(draw::ProgramByName(true, "UI:0", program) && program == static_cast<uint16_t>(vk::pipelines::VertexProgram::Interface),
               "the client's UI:0 vertex program is the interface's");
-        Check(draw::ProgramByName(true, "UI:1", program) && program == static_cast<uint8_t>(vk::pipelines::VertexProgram::InterfaceStereo),
+        Check(draw::ProgramByName(true, "UI:1", program) && program == static_cast<uint16_t>(vk::pipelines::VertexProgram::InterfaceStereo),
               "UI:1 is the stereo one");
-        Check(draw::ProgramByName(false, "Desaturate", program) && program == static_cast<uint8_t>(vk::pipelines::PixelProgram::Desaturate),
+        Check(draw::ProgramByName(false, "Desaturate", program) && program == static_cast<uint16_t>(vk::pipelines::PixelProgram::Desaturate),
               "Desaturate is the renderer's");
         Check(!draw::ProgramByName(false, "Terrain3:17", program) && !draw::ProgramByName(true, "UI", program),
               "the client's other programs are not (UI as a vertex program has permutations)");
@@ -206,7 +211,7 @@ namespace
               "the PCT vertex is one stream of 24 bytes, three attributes");
         Check(packet.viewport[0] == 0.0f && packet.viewport[2] == 64.0f && packet.viewport[3] == 32.0f && packet.scissor[2] == 64,
               "the viewport and the scissor cover the window");
-        Check(packet.vertex == vk::pipelines::VertexProgram::Fixed && packet.data.ops[0] == -1, "no shader, no texture: fixed function, stage 0 off");
+        Check(packet.vertex == static_cast<uint16_t>(vk::pipelines::VertexProgram::Fixed) && packet.data.ops[0] == -1, "no shader, no texture: fixed function, stage 0 off");
 
         // The colour mask's bits are red 1, blue 2, green 4, alpha 8.
         fake.State(vk::gxfront::kColorWrite, 2);
@@ -259,25 +264,25 @@ namespace
         const float d3 = fake.device.m_projNative.d3;
         fake.device.m_projNative.c3 = 1.0f;
         fake.device.m_projNative.d3 = 0.0f;
-        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Perspective,
-              "fixed function in perspective outside the world is 3D");
+        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Draw,
+              "fixed function in perspective is drawn (the world's, a model's in a frame)");
         fake.device.m_projNative.c3 = 0.0f;
         fake.device.m_projNative.d3 = d3;
-        view.world = true;
-        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::World, "a draw in the world's pass is the world's");
-        view.world = false;
         fake.StateP(vk::gxfront::kVertexShader, &fake);
-        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Program, "a client program the renderer lacks");
+        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Program, "a client program the translator refused");
         fake.programs[1] = static_cast<int>(vk::pipelines::VertexProgram::Interface);
         fake.constants[0] = 7.0f;
         Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Draw &&
-                  packet.vertex == vk::pipelines::VertexProgram::Interface && packet.data.constants[0][0] == 7.0f,
+                  packet.vertex == static_cast<uint16_t>(vk::pipelines::VertexProgram::Interface) && packet.data.constants[0][0] == 7.0f,
               "the interface's program, its c0..c3 copied");
         fake.StateP(vk::gxfront::kVertexShader, nullptr);
         engine::CGxTex target{};
         fake.device.m_textureTarget[0].m_texture = reinterpret_cast<engine::CGxTex*>(&target);
-        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Target, "a draw into a texture target");
+        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Draw, "a draw into a texture target is drawn");
         fake.device.m_textureTarget[0].m_texture = nullptr;
+        fake.device.m_textureTarget[1].m_texture = reinterpret_cast<engine::CGxTex*>(&target);
+        Check(vk::gxfront::BuildDraw(view, batch, 0, fake, packet) == vk::gxfront::Verdict::Target, "a draw into a depth texture alone is not");
+        fake.device.m_textureTarget[1].m_texture = nullptr;
 
         // Texture stages: a stage with a texture takes its ops, the sampler its flags.
         draw::Texture tex0, tex1;
@@ -311,9 +316,10 @@ namespace
         fake.device.m_primVertexMask &= ~(1u << 4);
         fake.State(vk::gxfront::kMatDiffuse, static_cast<int32_t>(0x80FF0000u));
         vk::gxfront::BuildDraw(view, batch, 0, fake, packet);
-        Check(packet.data.inputs[2] == 1 && packet.data.material[0] == 1.0f && packet.data.material[1] == 0.0f &&
-                  std::fabs(packet.data.material[3] - 128.0f / 255.0f) < 1e-6f,
-              "no vertex colour and a red material: the material's colour");
+        Check(packet.data.lighting[1] == 1 && packet.data.lighting[0] == 0 && packet.data.globalAmbient[0] == 1.0f &&
+                  packet.data.matDiffuse[0] == 1.0f && packet.data.matDiffuse[1] == 0.0f &&
+                  std::fabs(packet.data.matDiffuse[3] - 128.0f / 255.0f) < 1e-6f,
+              "no vertex colour and a red material: D3D9's ambient-only lighting, the material's colour");
     }
 
     // --- Live ------------------------------------------------------------------------------------------
@@ -340,7 +346,7 @@ namespace
             display.SetSceneExtent({w, h});
             width  = w;
             height = h;
-            return renderer.Create(context, allocator, display, why, size);
+            return renderer.Create(context, allocator, display, {}, why, size);
         }
 
         bool Begin(uint32_t clear = 0xFF000000u)
@@ -1106,7 +1112,7 @@ namespace
         const auto&           stats = replay.Counters();
         Check(ran && stats.draws == 2 && stats.recorded == 1 && stats.verdicts[static_cast<int>(vk::gxfront::Verdict::Program)] == 1 &&
                   stats.programs == 2 && stats.textures == 1 && stats.clears == 1,
-              "a capture's shaders, pool, texture, clear and draws replayed; the world's draw counted and left out");
+              "a capture's shaders, pool, texture, clear and draws replayed; a draw with a refused record counted and left out");
         // The back buffer's alpha is not shown: compared on rgb.
         const wxl::gx::capture::Comparison c = wxl::gx::capture::Compare(p, replay.Shot(), 2);
         Check(ran && c.pixels == static_cast<uint64_t>(w) * h && c.matching == c.pixels, "the replayed frame matches its SHOT on every pixel");
@@ -1118,6 +1124,432 @@ namespace
 
 namespace wxl::vk::test
 {
+    // --- V3: the world's work --------------------------------------------------------------------------
+
+    namespace a = wxl::vk::test::dx9asm;
+
+    /// vs_3_0: the position through c0..c3 (as the interface's projection), the colour times c4.
+    std::vector<uint8_t> WorldVs()
+    {
+        using a::Reg;
+        a::Asm v(false, 3, 0);
+        v.Dcl(0, 0, a::Dst(Reg::Input, 0));
+        v.Dcl(10, 0, a::Dst(Reg::Input, 1));
+        v.Dcl(0, 0, a::Dst(Reg::Output, 0));
+        v.Dcl(10, 0, a::Dst(Reg::Output, 1));
+        v.Def(5, 0, 0, 0, 1);
+        v.Op(wxl::vk::shaders::dx9::kMov, {a::Dst(Reg::Temp, 0), a::Src(Reg::Const, 5)});
+        v.Op(wxl::vk::shaders::dx9::kMov, {a::Dst(Reg::Temp, 0, 0x7), a::Src(Reg::Input, 0)});
+        for (uint32_t row = 0; row < 4; ++row)
+            v.Op(wxl::vk::shaders::dx9::kDp4, {a::Dst(Reg::Output, 0, 1u << row), a::Src(Reg::Temp, 0), a::Src(Reg::Const, row)});
+        v.Op(wxl::vk::shaders::dx9::kMul, {a::Dst(Reg::Output, 1), a::Src(Reg::Input, 1), a::Src(Reg::Const, 4)});
+        return v.Bytes();
+    }
+
+    /// ps_3_0: the colour times c0 of the pixel registers.
+    std::vector<uint8_t> WorldPs()
+    {
+        using a::Reg;
+        a::Asm p(true, 3, 0);
+        p.Dcl(10, 0, a::Dst(Reg::Input, 0));
+        p.Op(wxl::vk::shaders::dx9::kMul, {a::Dst(Reg::ColorOut, 0), a::Src(Reg::Input, 0), a::Src(Reg::Const, 0)});
+        return p.Bytes();
+    }
+
+    void WorldCases(Live& live, FakeEngine& fake, draw::Pool* pool)
+    {
+        const float w = static_cast<float>(live.width), h = static_cast<float>(live.height);
+        Vertex      quad[6];
+        uint32_t    at = 0;
+
+        // Client programs translated, the engine's registers changing between two draws.
+        const std::vector<uint8_t> vs = WorldVs(), ps = WorldPs();
+        const int vp = live.renderer.Program(false, "World:0", vs.data(), vs.size());
+        const int pp = live.renderer.Program(true, "World", ps.data(), ps.size());
+        Check(vp >= static_cast<int>(vk::pipelines::VertexProgram::Count) && pp >= static_cast<int>(vk::pipelines::PixelProgram::Count) &&
+                  live.renderer.Program(false, "World:0", vs.data(), vs.size()) == vp,
+              "client records become programs, once each");
+        std::string why;
+        Check(live.renderer.Program(false, "Bad", ps.data(), ps.size(), &why) < 0 && !why.empty(), "a pixel record where a vertex one is wanted is refused");
+        if (vp >= 0 && pp >= 0 && live.Begin())
+        {
+            const float projection[16] = {2.0f / w, 0, 0, -1.0f, 0, -2.0f / h, 0, 1.0f, 0, 0, 1.0f, 0, 0, 0, 0, 1.0f};
+            const float red[4] = {1, 0, 0, 1}, green[4] = {0, 1, 0, 1}, white[4] = {1, 1, 1, 1};
+            live.renderer.Constants(false, 0, 4, projection);
+            live.renderer.Constants(false, 4, 1, red);
+            live.renderer.Constants(true, 0, 1, white);
+            fake.programs[1] = vp;
+            fake.programs[0] = pp;
+            fake.StateP(vk::gxfront::kVertexShader, &fake);
+            fake.StateP(vk::gxfront::kPixelShader, &fake);
+            Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            const bool first = Record(live, fake, 6);
+            live.renderer.Constants(false, 4, 1, green);
+            Quad(quad, 2, 0, 4, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            const bool second = Record(live, fake, 6);
+            const std::vector<uint32_t> p = live.End();
+            Check(first && second && !p.empty() && p[0] == Argb(255, 0, 0) && p[3] == Argb(0, 255, 0),
+                  "translated programs draw with the registers each draw had (red, then green)");
+            fake.StateP(vk::gxfront::kVertexShader, nullptr);
+            fake.StateP(vk::gxfront::kPixelShader, nullptr);
+            fake.programs[0] = fake.programs[1] = -1;
+        }
+
+        // A texture target: cleared, drawn into, then sampled in the scene.
+        draw::TextureDesc desc;
+        desc.width  = 4;
+        desc.height = 4;
+        desc.target = true;
+        draw::Texture* target = live.renderer.CreateTexture(desc);
+        if (target && live.Begin(Argb(0, 0, 0)))
+        {
+            fake.device.m_textureTarget[0].m_texture = reinterpret_cast<engine::CGxTex*>(&fake.tex_fields[1]);
+            fake.device.m_curWindowRect = {0.0f, 0.0f, 4.0f, 4.0f};
+            float* p = &fake.device.m_projNative.a0;
+            p[0] = 2.0f / 4.0f;
+            p[5] = -2.0f / 4.0f;
+            live.renderer.SetTarget(target, 0, nullptr);
+            int32_t rect[4];
+            vk::gxfront::ClearRect(fake.device, rect);
+            const float blue[4] = {0, 0, 1, 1};
+            live.renderer.Clear(true, true, blue, 1.0f, {{rect[0], rect[1]}, {static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])}});
+            // White over the target's top half (D3D9's rows 0 and 1 of the texture).
+            Quad(quad, 0, 0, 4, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            const bool into = Record(live, fake, 6);
+            // Back to the scene: the target over its 4x4 top left, texel for texel.
+            fake.device.m_textureTarget[0].m_texture = nullptr;
+            fake.device.m_curWindowRect = {0.0f, 0.0f, h, w};
+            p[0] = 2.0f / w;
+            p[5] = -2.0f / h;
+            live.renderer.SetTarget(nullptr, 0, nullptr);
+            fake.textures[0]                   = target;
+            fake.tex_fields[0].m_flags.m_filter = 0;
+            fake.StateP(vk::gxfront::kTexture0, &fake.tex_fields[0]);
+            fake.State(vk::gxfront::kColorOp0, 0);
+            fake.State(vk::gxfront::kAlphaOp0, 0);
+            Quad(quad, 0, 0, 4, 4, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            const bool back = Record(live, fake, 6);
+            const std::vector<uint32_t> px = live.End();
+            Check(into && back && !px.empty() && px[0] == Argb(255, 255, 255) && px[live.width * 1 + 3] == Argb(255, 255, 255) &&
+                      px[live.width * 2] == Argb(0, 0, 255) && px[live.width * 3 + 3] == Argb(0, 0, 255),
+                  "a texture target cleared and drawn into reads back in the scene, its rows the right way up");
+            Check(live.renderer.Counters().target_renderings >= 1, "the target was drawn into by a rendering of its own");
+        }
+
+        // A copy from the scene (D3D9's TexCopy and TexStretch from the back buffer).
+        desc.width = desc.height = 2;
+        draw::Texture* copy = live.renderer.CreateTexture(desc);
+        if (copy && live.Begin(Argb(0, 0, 0)))
+        {
+            fake.StateP(vk::gxfront::kTexture0, nullptr);
+            Quad(quad, 0, 0, 1, 1, Argb(255, 0, 0));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            Quad(quad, 1, 1, 2, 2, Argb(0, 255, 0));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            const bool copied = live.renderer.CopyScene(copy, 0, 0, {{0, 0}, {2, 2}}, {{0, 0}, {2, 2}}, false);
+            fake.textures[0] = copy;
+            fake.StateP(vk::gxfront::kTexture0, &fake.tex_fields[0]);
+            Quad(quad, 4, 0, 6, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            const std::vector<uint32_t> px = live.End();
+            Check(copied && !px.empty() && px[4] == Argb(255, 0, 0) && px[live.width + 5] == Argb(0, 255, 0) && px[5] == Argb(0, 0, 0),
+                  "a copy from the scene into a texture, drawn back texel for texel");
+            fake.StateP(vk::gxfront::kTexture0, nullptr);
+            fake.textures[0] = nullptr;
+        }
+
+        // An occlusion query: the samples of a 2x2 quad that passes the depth test, then of one that fails it.
+        if (live.renderer.QueriesSupported())
+        {
+            const uint32_t query = live.renderer.CreateQuery();
+            uint32_t       samples = 99;
+            Check(live.renderer.QueryResult(query, samples) && samples == 0, "a query never issued reads as known, no samples");
+            if (live.Begin())
+            {
+                fake.State(vk::gxfront::kDepthTest, 1);
+                fake.State(vk::gxfront::kDepthWrite, 1);
+                live.renderer.BeginQuery(query);
+                Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+                Stream(live, fake, pool, quad, 6, at);
+                Record(live, fake, 6);
+                live.renderer.EndQuery(query);
+                Check(!live.renderer.QueryResult(query, samples), "a query of a frame not yet completed is not known");
+                live.End();
+                Check(live.renderer.QueryResult(query, samples) && samples == 4, "the query counts the quad's 4 samples once the frame completed");
+            }
+            if (live.Begin())
+            {
+                Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+                Stream(live, fake, pool, quad, 6, at);
+                Record(live, fake, 6);
+                fake.State(vk::gxfront::kDepthFunc, 3); // LESS: the same depth fails
+                live.renderer.BeginQuery(query);
+                Stream(live, fake, pool, quad, 6, at);
+                Record(live, fake, 6);
+                live.renderer.EndQuery(query);
+                live.End();
+                Check(live.renderer.QueryResult(query, samples) && samples == 0, "a quad hidden by the depth test counts none");
+                fake.State(vk::gxfront::kDepthFunc, 0);
+            }
+            fake.State(vk::gxfront::kDepthTest, 0);
+            fake.State(vk::gxfront::kDepthWrite, 0);
+            live.renderer.DestroyQuery(query);
+        }
+
+        // D3D9's fixed-function lighting: a light's ambient on the vertex's colour (no normal).
+        if (live.Begin())
+        {
+            auto* lights   = reinterpret_cast<wxl_gx_light*>(fake.device.m_lights);
+            lights[0]      = wxl_gx_light{};
+            lights[0].dir[2] = 1.0f;
+            lights[0].ambient[0] = 0.25f;
+            lights[0].ambient[1] = 0.5f;
+            lights[0].diffuse[0] = lights[0].diffuse[1] = lights[0].diffuse[2] = 1.0f;
+            lights[0].enable = 1;
+            fake.State(vk::gxfront::kLighting, 1);
+            Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            fake.State(vk::gxfront::kLighting, 0);
+            lights[0].enable = 0;
+            const std::vector<uint32_t> px = live.End();
+            Check(!px.empty() && Near(px[0], Argb(64, 128, 0), 1), "fixed-function lighting: the light's ambient times the vertex's colour");
+        }
+
+        // D3D9's linear vertex fog: at z 0.5 between 0 and 1, half the fog colour.
+        if (live.Begin())
+        {
+            fake.State(vk::gxfront::kFog, 1);
+            fake.StateF(vk::gxfront::kFogStart, 0.0f);
+            fake.StateF(vk::gxfront::kFogEnd, 1.0f);
+            fake.State(vk::gxfront::kFogColor, static_cast<int32_t>(Argb(0, 0, 255)));
+            Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            fake.State(vk::gxfront::kFog, 0);
+            const std::vector<uint32_t> px = live.End();
+            Check(!px.empty() && Near(px[0], Argb(128, 128, 255), 1), "fixed-function fog: half white, half the fog colour");
+        }
+
+        // The user clip plane (world space under fixed function): z 0.5 kept by z <= 0.6, clipped by z <= 0.4.
+        if (live.renderer.Screen().FrameCount() && live.Begin(Argb(0, 0, 0)))
+        {
+            fake.device.m_caps.m_maxClipPlanes = 1;
+            fake.State(vk::gxfront::kClipPlaneMask, 1);
+            fake.device.m_clipPlane[0] = {{0.0f, 0.0f, -1.0f}, 0.6f};
+            Quad(quad, 0, 0, 2, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            fake.device.m_clipPlane[0] = {{0.0f, 0.0f, -1.0f}, 0.4f};
+            Quad(quad, 2, 0, 4, 2, Argb(255, 255, 255));
+            Stream(live, fake, pool, quad, 6, at);
+            Record(live, fake, 6);
+            fake.State(vk::gxfront::kClipPlaneMask, 0);
+            const std::vector<uint32_t> px = live.End();
+            if (live.context.Chosen().features.shaderClipDistance)
+                Check(!px.empty() && px[0] == Argb(255, 255, 255) && px[2] == Argb(0, 0, 0),
+                      "the user clip plane keeps what is in front of it and clips what is behind");
+        }
+        live.renderer.DestroyTexture(target);
+        live.renderer.DestroyTexture(copy);
+    }
+
+    /// A capture of V3's work: translated programs (their records in the SHDR chunks), a texture
+    /// target cleared, a copy from the back buffer, both drawn back with fixed function.
+    void ReplayWorldCases(Live& live)
+    {
+        const uint32_t w = live.width, h = live.height;
+        FakeEngine     fake;
+        fake.Reset(w, h);
+        const uint64_t bufId = reinterpret_cast<uint64_t>(&fake.buffers[0]), poolId = 0x5100, vsId = 0x8000, psId = 0x8100,
+                       copyId = 0x8200, targetId = 0x8300;
+        fake.buffers[0].m_pool  = reinterpret_cast<engine::CGxPool*>(poolId);
+        fake.buffers[0].m_index = 0;
+
+        Writer f;
+        wxl_gx_capture_header header{};
+        header.magic              = WXL_GX_CAPTURE_MAGIC;
+        header.version            = WXL_GX_CAPTURE_VERSION;
+        header.header_size        = sizeof header;
+        header.pointer_size       = sizeof(void*);
+        header.device_layout_hash = engine::CGxDevice::kLayoutHash;
+        header.device_size        = sizeof(engine::CGxDevice);
+        header.tex_size           = sizeof(engine::CGxTex);
+        header.buf_size           = sizeof(engine::CGxBuf);
+        header.state_size         = sizeof(wxl_gx_app_state);
+        header.width              = w;
+        header.height             = h;
+        header.api                = 1;
+        f.Put(&header, sizeof header);
+
+        auto shader = [&](uint64_t id, uint32_t target, const char* name, const std::vector<uint8_t>& code) {
+            const size_t s = f.Begin(WXL_GX_CAPTURE_SHADER);
+            f.Put64(id);
+            f.Put32(target);
+            f.Put32(static_cast<uint32_t>(std::strlen(name)));
+            f.Put(name, std::strlen(name));
+            f.Put32(static_cast<uint32_t>(code.size()));
+            f.Put(code.data(), code.size());
+            f.End(s);
+        };
+        shader(vsId, 0, "World:0", WorldVs());
+        shader(psId, 4, "World", WorldPs());
+        size_t s = f.Begin(WXL_GX_CAPTURE_POOL);
+        f.Put64(poolId);
+        f.Put32(draw::kVertexPool);
+        f.Put32(draw::kStream);
+        f.Put32(4096);
+        f.Put32(3);
+        f.End(s);
+        auto texture = [&](uint64_t id, uint32_t size) {
+            engine::CGxTex t{};
+            t.m_width  = size;
+            t.m_height = size;
+            t.m_format = draw::kTexArgb8888;
+            t.m_flags.m_renderTarget = 1;
+            const size_t c = f.Begin(WXL_GX_CAPTURE_TEXTURE);
+            f.Put64(id);
+            f.Put(&t, sizeof t);
+            f.Put32(0);
+            f.End(c);
+        };
+        texture(copyId, 2);
+        auto constants = [&](uint32_t target, uint32_t first, const float* rows, uint32_t count) {
+            const size_t c = f.Begin(WXL_GX_CAPTURE_CONSTANTS);
+            f.Put32(target);
+            f.Put32(first);
+            f.Put32(count);
+            f.Put(rows, count * 16);
+            f.End(c);
+        };
+        const float projection[20] = {2.0f / w, 0, 0, -1.0f, 0, -2.0f / h, 0, 1.0f, 0, 0, 1.0f, 0, 0, 0, 0, 1.0f, 1, 0, 0, 1};
+        const float white[4]       = {1, 1, 1, 1};
+        constants(0, 0, projection, 5);
+        constants(1, 0, white, 1);
+
+        // Vertices: a quad at (0,0)-(2,2) for the programs, (4,0)-(8,4) for the target, (8,0)-(10,2) for the copy.
+        Vertex quads[18];
+        Quad(quads, 0, 0, 2, 2, Argb(255, 255, 255));
+        Quad(quads + 6, 4, 0, 8, 4, Argb(255, 255, 255));
+        Quad(quads + 12, 8, 0, 10, 2, Argb(255, 255, 255));
+        s = f.Begin(WXL_GX_CAPTURE_DATA);
+        f.Put64(poolId);
+        f.Put32(0);
+        f.Put32(sizeof quads);
+        f.Put32(1);
+        f.Put(quads, sizeof quads);
+        f.End(s);
+        auto buffer = [&](uint32_t index) {
+            fake.buffers[0].m_index = index;
+            const size_t c          = f.Begin(WXL_GX_CAPTURE_BUFFER);
+            f.Put64(bufId);
+            f.Put64(poolId);
+            f.Put(&fake.buffers[0], sizeof(engine::CGxBuf));
+            f.End(c);
+        };
+        auto state = [&]() {
+            f.Region(WXL_GX_CAPTURE_REGION_DEVICE, &fake.device, sizeof fake.device);
+            f.Region(WXL_GX_CAPTURE_REGION_STATES, fake.states, sizeof fake.states);
+        };
+        const wxl_gx_batch batch{3, 0, 6, 0, 5};
+        auto drawChunk = [&]() {
+            const size_t c = f.Begin(WXL_GX_CAPTURE_DRAW);
+            f.Put(&batch, sizeof batch);
+            f.Put32(0);
+            f.End(c);
+        };
+
+        // Black, then the programs' red quad.
+        state();
+        s = f.Begin(WXL_GX_CAPTURE_CLEAR);
+        f.Put32(3);
+        f.Put32(Argb(0, 0, 0));
+        f.End(s);
+        fake.StateP(vk::gxfront::kVertexShader, reinterpret_cast<void*>(vsId));
+        fake.StateP(vk::gxfront::kPixelShader, reinterpret_cast<void*>(psId));
+        buffer(0);
+        state();
+        drawChunk();
+        // TexCopy of the back buffer's (0,0)-(2,2) into the 2x2 texture.
+        s = f.Begin(WXL_GX_CAPTURE_COPY);
+        f.Put32(0);
+        f.Put64(copyId);
+        for (int32_t v : {0, 0, 0, 0, 2, 2, 0, 0}) f.Put32(static_cast<uint32_t>(v));
+        f.End(s);
+        // The 4x4 target, named first by the RTGT: cleared to blue.
+        fake.device.m_textureTarget[0].m_texture = reinterpret_cast<engine::CGxTex*>(targetId);
+        fake.device.m_curWindowRect              = {0.0f, 0.0f, 4.0f, 4.0f};
+        state();
+        s = f.Begin(WXL_GX_CAPTURE_TARGET);
+        f.Put32(0);
+        f.Put64(targetId);
+        f.Put32(0);
+        f.End(s);
+        s = f.Begin(WXL_GX_CAPTURE_CLEAR);
+        f.Put32(1);
+        f.Put32(Argb(0, 0, 255));
+        f.End(s);
+        fake.device.m_textureTarget[0].m_texture = nullptr;
+        fake.device.m_curWindowRect              = {0.0f, 0.0f, static_cast<float>(h), static_cast<float>(w)};
+        state();
+        s = f.Begin(WXL_GX_CAPTURE_TARGET);
+        f.Put32(0);
+        f.Put64(0);
+        f.Put32(0);
+        f.End(s);
+        // Fixed function: the target, then the copy, texel for texel.
+        fake.StateP(vk::gxfront::kVertexShader, nullptr);
+        fake.StateP(vk::gxfront::kPixelShader, nullptr);
+        fake.State(vk::gxfront::kColorOp0, 0);
+        fake.State(vk::gxfront::kAlphaOp0, 0);
+        fake.StateP(vk::gxfront::kTexture0, reinterpret_cast<void*>(targetId));
+        buffer(6 * sizeof(Vertex));
+        state();
+        drawChunk();
+        texture(copyId, 2); // the capture reads the copied texture back when a draw names it: the replay keeps its own
+        fake.StateP(vk::gxfront::kTexture0, reinterpret_cast<void*>(copyId));
+        buffer(12 * sizeof(Vertex));
+        state();
+        drawChunk();
+
+        std::vector<uint32_t> shot(static_cast<size_t>(w) * h, Argb(0, 0, 0));
+        for (uint32_t y = 0; y < 2; ++y)
+            for (uint32_t x = 0; x < 2; ++x) shot[y * w + x] = shot[y * w + 8 + x] = Argb(255, 0, 0);
+        for (uint32_t y = 0; y < 4; ++y)
+            for (uint32_t x = 4; x < 8; ++x) shot[y * w + x] = Argb(0, 0, 255);
+        s = f.Begin(WXL_GX_CAPTURE_SHOT);
+        f.Put32(w);
+        f.Put32(h);
+        f.Put(shot.data(), shot.size() * 4);
+        f.End(s);
+        s = f.Begin(WXL_GX_CAPTURE_END);
+        f.End(s);
+
+        if (!live.Begin()) return;
+        wxl::gx::capture::Replay replay;
+        std::string              why;
+        const bool               ran = replay.Run(f.out.data(), f.out.size(), live.renderer, why);
+        if (!ran) std::printf("  replay: %s\n", why.c_str());
+        std::vector<uint32_t> p     = live.End();
+        const auto&           stats = replay.Counters();
+        Check(ran && stats.draws == 3 && stats.recorded == 3 && stats.programs == 2 && stats.targets == 2 && stats.copies == 1 &&
+                  stats.copied == 1,
+              "a capture's translated programs, target and copy replayed");
+        const wxl::gx::capture::Comparison c = wxl::gx::capture::Compare(p, replay.Shot(), 0);
+        if (c.matching != c.pixels)
+            std::printf("  %llu of %llu pixels match, worst %u\n", static_cast<unsigned long long>(c.matching),
+                        static_cast<unsigned long long>(c.pixels), c.worst);
+        Check(ran && c.pixels && c.matching == c.pixels, "the replayed world frame matches its SHOT on every pixel");
+        replay.Release();
+    }
+
     void DrawPureCases()
     {
         BlendTableCases();
@@ -1147,8 +1579,12 @@ namespace wxl::vk::test
         StageCases(live, fake, pool);
         ProgramCases(live, fake, pool);
         PoolAndUploadCases(live, fake, pool);
+        fake.Reset(live.width, live.height);
+        fake.pools[0] = pool;
+        WorldCases(live, fake, pool);
         live.renderer.DestroyPool(pool);
         ReplayCases(live);
+        ReplayWorldCases(live);
 
         const draw::Renderer::Stats& s = live.renderer.Counters();
         std::printf("  renderer: %llu draws, %llu pipelines, %llu pass breaks, %llu bytes uploaded, %llu refused\n",

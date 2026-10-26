@@ -28,6 +28,11 @@ namespace wxl::vk::test
     void DrawPureCases();
     bool DrawLiveCases();
 
+    /// The translator of the client's DX9 programs: what it refuses, its cache and pack (pure); and
+    /// programs assembled here drawn on the driver against D3D9's formulas (live).
+    void TranslatePureCases();
+    bool TranslateLiveCases();
+
     /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
     /// build has no validator (SPIRV-Tools is built in the native test tree only).
     bool SpirvValidation();
