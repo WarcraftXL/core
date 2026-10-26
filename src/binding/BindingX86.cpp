@@ -6,6 +6,7 @@
 #include "binding/Binding.hpp"
 #include "binding/BindingX86.hpp"
 #include "binding/CallX86.hpp"
+#include "binding/HighlightDrawX86.hpp"
 #include "binding/ModelDrawX86.hpp"
 
 #include "common/Log.hpp"
@@ -209,6 +210,19 @@ namespace
 namespace wxl::core::binding::x86
 {
     void Prepare() { g_mainThread = GetCurrentThreadId(); }
+
+    // wxl.highlight keeps a batch's draw to draw it again: the device, the engine's copy of the
+    // vertex constants (CGxDevice::s_shadowConstants[1], after the pixel program's [0]) and
+    // whether the client draws with shaders at all (HighlightDrawX86.hpp).
+    gx::d3d9::highlight::Source HighlightSource()
+    {
+        gx::d3d9::highlight::Source source;
+        source.device = [] { return GxDevice(); };
+        source.vertexShadow =
+            reinterpret_cast<uint8_t*>(WXL_STATIC("CGxDevice::s_shadowConstants")) + x86::highlight_draw::kShadowSize;
+        source.enableShaders = reinterpret_cast<const int32_t*>(WXL_STATIC("CShaderEffect::s_enableShaders"));
+        return source;
+    }
 }
 
 namespace wxl::core::binding

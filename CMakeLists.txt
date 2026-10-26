@@ -169,6 +169,33 @@ set(WXL_CORE_GX_SOURCES
     src/gx/Vulkan.cpp
     src/gx/vk/gxfront/Front.cpp)
 
+# --- wxl.highlight's Direct3D 9 passes (src/gx/d3d9/, the stock client) ---------------------------
+# Its programs are HLSL compiled when the runtime is built, by wxl-core-d3d9-shaders with the
+# system's d3dcompiler_47 (Wine's when built from Linux: the tool then runs under
+# CMAKE_CROSSCOMPILING_EMULATOR), and held to what shaders.txt allows each one to read. The bytecode
+# lands in generated/d3d9_shaders.inc, the disassembly beside it. The recompiled client draws
+# highlights through its own renderer, so x64 builds none of this.
+set(WXL_CORE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+if(WXL_CORE_X86)
+    if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
+        message(FATAL_ERROR "The x86 runtime compiles its Direct3D 9 programs with a Windows tool when it is built: "
+            "building it from another system needs CMAKE_CROSSCOMPILING_EMULATOR (Wine), e.g. "
+            "export CMAKE_CROSSCOMPILING_EMULATOR=$HOME/scratch/build/tools/wine-run.sh")
+    endif()
+    add_executable(wxl-core-d3d9-shaders tools/shaders/compile_d3d9.cpp)
+    target_compile_options(wxl-core-d3d9-shaders PRIVATE /W4 /permissive-)
+    target_compile_definitions(wxl-core-d3d9-shaders PRIVATE ${WXL_CORE_DEFS})
+    set(WXL_D3D9_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/gx/d3d9/shaders")
+    set(WXL_D3D9_SHADERS "${WXL_CORE_GENERATED_DIR}/d3d9_shaders.inc")
+    add_custom_command(OUTPUT "${WXL_D3D9_SHADERS}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${WXL_CORE_GENERATED_DIR}"
+        COMMAND wxl-core-d3d9-shaders "${WXL_D3D9_SHADER_DIR}/shaders.txt" "${WXL_D3D9_SHADERS}"
+        DEPENDS wxl-core-d3d9-shaders "${WXL_D3D9_SHADER_DIR}/shaders.txt" "${WXL_D3D9_SHADER_DIR}/highlight.hlsl"
+        COMMENT "Compiling the runtime's Direct3D 9 programs"
+        VERBATIM)
+    list(APPEND WXL_CORE_GX_SOURCES src/gx/d3d9/Highlight.cpp "${WXL_D3D9_SHADERS}")
+endif()
+
 # The launch's log (its settings file, its header and its end, the crash report, the client's fatal
 # errors) and the code the client accepts.
 set(WXL_CORE_SESSION_SOURCES
@@ -202,6 +229,7 @@ add_library(wxl-core SHARED
     src/services/InputService.cpp
     src/services/WorldService.cpp
     src/services/PoseService.cpp
+    src/services/HighlightService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -215,7 +243,7 @@ set_target_properties(wxl-core PROPERTIES OUTPUT_NAME "WarcraftXL" PREFIX "")
 # follow, and neither matters to what ships.
 set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
-target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}")
+target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
 target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
 target_compile_definitions(wxl-core PRIVATE
@@ -252,6 +280,7 @@ add_executable(wxl-core-seam-harness
     src/services/InputService.cpp
     src/services/WorldService.cpp
     src/services/PoseService.cpp
+    src/services/HighlightService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -259,7 +288,7 @@ add_executable(wxl-core-seam-harness
     ${WXL_OBJECT_READS})
 # The same build as the DLL, so --bench measures what ships rather than something near it.
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}")
+target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
 target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
 target_compile_definitions(wxl-core-seam-harness PRIVATE

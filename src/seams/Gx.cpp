@@ -13,6 +13,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/FootprintService.hpp"
+#include "services/HighlightService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/InputService.hpp"
 
@@ -69,8 +70,13 @@ namespace wxl::core::gx
 {
     void ResourcesLost(bool device_objects)
     {
-        // ImGui's device objects go with the game's, and come back at its next frame.
-        if (device_objects) wxl::core::services::imgui::DeviceLost();
+        // ImGui's device objects go with the game's, and come back at its next frame; so do
+        // wxl.highlight's targets and programs.
+        if (device_objects)
+        {
+            wxl::core::services::imgui::DeviceLost();
+            wxl::core::services::highlight::DeviceLost();
+        }
 
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;

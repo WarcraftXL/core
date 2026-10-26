@@ -10,6 +10,7 @@
 #include "objects/Objects.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
+#include "services/HighlightService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -21,6 +22,9 @@ namespace wxl::seam::WorldFrame::RenderWorld
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 
+        // The batches of highlighted objects are kept from here (wxl.highlight).
+        wxl::core::services::highlight::WorldBegin();
+
         wxl_frame_args args{};
         if (!wxl::core::frame::Current(args)) return;
         host->Raise(WXL_EV_WorldRenderBegin, &args);
@@ -31,7 +35,9 @@ namespace wxl::seam::WorldFrame::RenderWorld
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 
-        // The world and the text in it are drawn, and nothing of the interface over it yet.
+        // The world and the text in it are drawn, and nothing of the interface over it yet: the
+        // highlights go onto it first, then the mods' own passes.
+        wxl::core::services::highlight::WorldEnd();
         wxl_frame_args args{};
         if (!wxl::core::frame::Current(args)) return;
         host->Raise(WXL_EV_WorldRenderEnd, &args);

@@ -22,6 +22,7 @@
 #include "services/CameraService.hpp"
 #include "services/InputService.hpp"
 #include "services/PoseService.hpp"
+#include "services/HighlightService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -125,8 +126,9 @@ namespace
         // The camera goes back to the client, the pointer is let go.
         wxl::core::services::camera::ForgetMod(token);
         wxl::core::services::input::ForgetMod(token);
-        // Its heads go back to their animations.
+        // Its heads go back to their animations, its highlights come off.
         wxl::core::services::pose::ForgetMod(token);
+        wxl::core::services::highlight::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

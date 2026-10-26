@@ -8,6 +8,7 @@
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
+#include "services/HighlightService.hpp"
 #include "services/M2Service.hpp"
 
 #include "wxl/events.h"
@@ -17,6 +18,10 @@ namespace wxl::seam::M2::DrawBatch
 {
     void WXL_CALL After(void* self)
     {
+        // A batch of a highlighted object is kept for wxl.highlight, which draws it again after
+        // the world; two flags are read while nothing is highlighted.
+        wxl::core::services::highlight::Batch(self);
+
         // Thousands of batches a frame: one flag is read while no mod listens.
         if (!wxl::seam::Listening(WXL_EV_ModelBatchDrawn)) return;
         wxl::host::ModHost* host = wxl::core::Host();

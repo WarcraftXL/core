@@ -173,7 +173,10 @@ type CGxDeviceD3d Engine/Source/Gx/CGxDeviceD3d/CGxDeviceD3d.h CGxDeviceD3d
   m_hwCursorDirty                         engine/GxDevice:kD3dCursorDirty
   m_texture3B58                           engine/GxDevice:kD3dPlaceholderTex
   m_d3dCurrentVertexDecl                  -                                            # wxl.gx invalidate_state
+  m_d3dCurrentIndexBuf                    -                                            # wxl.highlight: a batch's draw
   m_d3dVertexStreamBuf                    -
+  m_d3dVertexStreamOfs                    -
+  m_d3dVertexStreamStride                 -
   sizeof(m_d3dVertexStreamBuf)            -
   m_deviceStates                          -
   sizeof(m_deviceStates)                  -
@@ -182,7 +185,10 @@ type CGxDeviceD3d9Ex Engine/Source/Gx/CGxDeviceD3d9Ex/CGxDeviceD3d9Ex.h CGxDevic
   sizeof                                  engine/GxDevice:kD3d9ExObjectSize            # CGxDevice::NewD3d9Ex allocation
   m_d3dDevice                             -                                            # wxl.gx: the D3D9Ex device
   m_d3dCurrentVertexDecl                  -
+  m_d3dCurrentIndexBuf                    -
   m_d3dVertexStreamBuf                    -
+  m_d3dVertexStreamOfs                    -
+  m_d3dVertexStreamStride                 -
   sizeof(m_d3dVertexStreamBuf)            -
   m_deviceStates                          -
   sizeof(m_deviceStates)                  -
