@@ -348,14 +348,19 @@ runtimes; what draws is the runtime's renderer. On the stock client it is
 
 - `WorldFrame.RenderWorld` Before opens the pass; at its first `M2.DrawBatch` (the camera is placed
   by then) the objects' top models are found, and every opaque batch of theirs drawn to the
-  screen is kept: its numbers (`gx_model_draw`), what the device had bound and the vertex
-  program's constants, read from the engine's own copy (`src/binding/HighlightDrawX86.hpp`): the
-  game makes its device pure, so Direct3D cannot be asked.
+  screen is kept: its numbers (`gx_model_draw`), what the device had bound, its first texture and
+  alpha test and the vertex program's constants, read from the engine's own copy
+  (`src/binding/HighlightDrawX86.hpp`): the game makes its device pure, so Direct3D cannot be asked.
 - `WorldFrame.RenderWorld` After, before `WorldRenderEnd`, draws them again with the game's vertex
   program into two masks against the scene's depth, never writing it (multisampled like that
-  depth, then resolved), blurs the second at half size, and finds the outline and adds the glow in
-  one full-screen pass. The registers it set are marked for the engine to send again, the state it
-  changed that the engine keeps no copy of is put back, and `gx_invalidate_state` does the rest.
+  depth, then resolved), dropping the texels the game's alpha test drops, blurs the second at half
+  size, and finds the outline and adds the glow in one full-screen pass, with widths scaled from
+  1080 lines to the render's height. Then the device is put back as the engine believes it: the
+  vertex registers the batches overwrote get the engine's values again (the passes' own register,
+  c250, is above the game's), the declaration, index buffer and streams the engine's copy holds
+  are bound again (the engine binds its index buffer again only when it changes its own, so a draw
+  of the interface after the pass would otherwise use a model's), the states the engine never sets
+  go back to their value, and `gx_invalidate_state` has it send the rest.
 - `Gx.ReleaseD3dResources` takes its targets and programs; they are made again at the next draw.
 
 Its programs are HLSL (`src/gx/d3d9/shaders/highlight.hlsl`), compiled when the runtime is built
