@@ -27,6 +27,8 @@
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
+#include "services/TextureService.hpp"
+#include "imaging/Imaging.hpp"
 #include <imgui.h>
 #include <implot.h>
 #include "services/DataService.hpp"
@@ -5390,6 +5392,271 @@ namespace
         reply.result = result;
         if (count && values[0].type == WXL_VALUE_STRING) reply.first.assign(values[0].as.string.data, values[0].as.string.size);
         if (count > 1 && values[1].type == WXL_VALUE_NUMBER) reply.number = values[1].as.number;
+    }
+
+    // --- wxl.texture: textures made from an SVG or a PNG, served to the client ----------------------
+
+    /// A file as the client reads it: opened through its file stack, read whole; "<none>" when
+    /// it does not open.
+    std::vector<uint8_t> ClientRead(const char* path)
+    {
+        void* file = FakeFileOpen(path);
+        if (!file) return {};
+        std::vector<uint8_t> bytes(static_cast<size_t>(FakeFileSize(file)));
+        const uint32_t       got = bytes.empty() ? 0 : FakeFileRead(file, bytes.data(), static_cast<uint32_t>(bytes.size()));
+        FakeFileClose(file);
+        bytes.resize(got);
+        return bytes;
+    }
+
+    /// A pixel of a BLP's first mip, straight: 0xAARRGGBB, or 0 when there is none.
+    uint32_t BlpPixel(const std::vector<uint8_t>& blp, uint32_t x, uint32_t y)
+    {
+        uint32_t       w = 0, h = 0;
+        const uint8_t* bgra = nullptr;
+        if (!wxl::core::imaging::BlpMip(blp, 0, &w, &h, &bgra) || x >= w || y >= h) return 0;
+        const uint8_t* p = bgra + (static_cast<size_t>(y) * w + x) * 4;
+        return (static_cast<uint32_t>(p[3]) << 24) | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[0];
+    }
+
+    wxl_texture_group TextureGroup(const char* id, uint32_t set, uint32_t color, float width, bool visible)
+    {
+        wxl_texture_group group{};
+        group.struct_size = sizeof group;
+        group.id          = Str(id);
+        group.set         = set;
+        group.color       = color;
+        group.width       = width;
+        group.visible     = visible ? WXL_TRUE : WXL_FALSE;
+        return group;
+    }
+
+    wxl_result MakeTexture(const char* source, uint32_t w, uint32_t h, std::vector<wxl_texture_group> groups, uint32_t tint,
+                           wxl_texture& out)
+    {
+        wxl_texture_request request{};
+        request.struct_size = sizeof request;
+        request.source      = Str(source);
+        request.width       = w;
+        request.height      = h;
+        request.groups      = groups.empty() ? nullptr : groups.data();
+        request.group_count = static_cast<uint32_t>(groups.size());
+        request.tint        = tint;
+        out                 = wxl_texture{};
+        out.struct_size     = sizeof out;
+        return wxl::core::services::TextureApi().make(&request, &out);
+    }
+
+    void CheckTexture()
+    {
+        namespace fs      = std::filesystem;
+        namespace texture = wxl::core::services::texture;
+        const wxl_texture_api& api     = wxl::core::services::TextureApi();
+        const wxl_storage_api& storage = wxl::core::services::StorageApi();
+        Check(api.struct_size == sizeof(wxl_texture_api) && api.make && api.stats, "wxl.texture has the layout texture.h declares");
+
+        BuildFakeStack();
+        g_files.clear();
+        texture::Clear();
+        Mute(WXL_EV_FileOpen);
+        Mute(WXL_EV_FileOpened);
+
+        // The owner's reticle shape: an outline group under a fill group, centred on (10, 10.5).
+        const std::string reticle =
+            "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='21' viewBox='0 0 20 21'>"
+            "<g id='outline'><circle cx='10' cy='10.5' r='3' fill='#17120C' stroke='#17120C' stroke-width='2' "
+            "fill-opacity='0.6' stroke-opacity='0.6'/></g>"
+            "<g id='fill'><circle cx='10' cy='10.5' r='3' fill='#F6F6EE'/></g></svg>";
+        Check(storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), reticle.data(), static_cast<uint32_t>(reticle.size()),
+                            0) == WXL_OK,
+              "texture: an add-on's SVG served to read from");
+
+        // --- made, named, served ---
+        wxl_texture made{};
+        const std::vector<wxl_texture_group> red = {
+            TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFFFF4040u, 0, true),
+            TextureGroup("outline", WXL_TEXTURE_SET_COLOR | WXL_TEXTURE_SET_WIDTH, 0x99000000u, 2.0f, true)};
+        Check(MakeTexture("Interface/AddOns/WxlTest/Reticle.svg", 40, 42, red, 0, made) == WXL_OK && !made.reused &&
+                  std::strncmp(made.path, "Interface\\WXL\\WxlTest\\Reticle_40x42_", 35) == 0 &&
+                  std::strcmp(made.path + std::strlen(made.path) - 4, ".blp") == 0,
+              "texture: made under Interface\\WXL\\<add-on>\\<name>_<w>x<h>_<hash>.blp");
+        Check(made.width == 40 && made.height == 42 && made.texture_width == 64 && made.texture_height == 64 &&
+                  made.right == 40.0f / 64.0f && made.bottom == 42.0f / 64.0f,
+              "texture: a 64 x 64 texture, the picture's corner at 40/64, 42/64");
+        const std::string first = made.path;
+        const std::vector<uint8_t> blp = ClientRead(first.c_str());
+        Check(blp.size() == wxl::core::imaging::kBlpHeaderSize + (4096 + 1024 + 256 + 64 + 16 + 4 + 1) * 4u &&
+                  std::memcmp(blp.data(), "BLP2", 4) == 0 && blp[8] == 3 && blp[9] == 8,
+              "texture: the client reads it through its file stack: a raw BLP2, eight bits of alpha, seven levels");
+        // At twice the drawing's size the centre (20, 21) is the fill, recoloured; the outline at
+        // twice its width (4 units, from 1 to 5) covers column 28 (4.25 units out) at 0x99, dark.
+        const uint32_t centre = BlpPixel(blp, 20, 21), ring = BlpPixel(blp, 28, 21), beyond = BlpPixel(blp, 31, 21);
+        Check(centre == 0xFFFF4040u, "texture: the fill group in its colour, ff4040");
+        Check((ring >> 24) >= 0x99 - 12 && (ring >> 24) <= 0x99 + 2 && (ring & 0xFFFFFFu) == 0,
+              "texture: the outline group in its colour (black, alpha 0x99) at its width");
+        Check((beyond >> 24) < 16, "texture: nothing past the outline's width");
+        Check(BlpPixel(blp, 50, 50) >> 24 == 0, "texture: the padding is transparent");
+
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, {red[1], red[0]}, 0, made) == WXL_OK &&
+                  made.reused && first == made.path,
+              "texture: the same request, its groups in any order, answers the same path without drawing again");
+
+        const std::vector<wxl_texture_group> thin = {
+            TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFFFF4040u, 0, true),
+            TextureGroup("outline", WXL_TEXTURE_SET_COLOR | WXL_TEXTURE_SET_WIDTH, 0x99000000u, 0.0f, true)};
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, thin, 0, made) == WXL_OK && first != made.path,
+              "texture: another width is another path");
+        const std::string noOutline = made.path;
+        const std::vector<uint8_t> bare = ClientRead(noOutline.c_str());
+        Check(BlpPixel(bare, 26, 21) >> 24 == 0 && BlpPixel(bare, 20, 21) == 0xFFFF4040u,
+              "texture: width 0 takes the outline off, the fill stays");
+        Check(!ClientRead(first.c_str()).empty(), "texture: the earlier texture is still served");
+
+        const std::vector<wxl_texture_group> blue = {TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFF4040FFu, 0, true),
+                                                     TextureGroup("outline", WXL_TEXTURE_SET_VISIBLE, 0, 0, false)};
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, blue, 0, made) == WXL_OK && first != made.path &&
+                  BlpPixel(ClientRead(made.path), 20, 21) == 0xFF4040FFu && BlpPixel(ClientRead(made.path), 26, 21) >> 24 == 0,
+              "texture: another colour is another path; a hidden group draws nothing");
+
+        // Natural size, and one edge in proportion.
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 0, 0, {}, 0, made) == WXL_OK && made.width == 20 &&
+                  made.height == 21 && made.texture_width == 32 && made.texture_height == 32,
+              "texture: 0 x 0 is the SVG's own size");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 0, {}, 0, made) == WXL_OK && made.width == 40 &&
+                  made.height == 42,
+              "texture: one edge given, the other in proportion");
+
+        // The source changes: a new path; the old one still answers what it was.
+        const std::string changed = reticle.substr(0, reticle.size() - 6) + "<rect x='0' y='0' width='1' height='1'/></svg>";
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), changed.data(), static_cast<uint32_t>(changed.size()), 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, red, 0, made) == WXL_OK && !made.reused &&
+                  first != made.path && ClientRead(first.c_str()) == blp,
+              "texture: a source that changed makes a new path; the old path still reads as it was");
+
+        // --- a PNG ---
+        static const uint8_t png[] = {
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x06, 0x00, 0x00, 0x00, 0x72, 0xb6, 0x0d, 0x24, 0x00, 0x00, 0x00, 0x13, 0x49,
+            0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x0c, 0x81, 0x34, 0x08, 0x30, 0x00, 0x00, 0x48,
+            0xc9, 0x08, 0xf8, 0x71, 0xc5, 0x31, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Dots.png"), png, sizeof png, 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {}, 0, made) == WXL_OK && made.width == 2 &&
+                  made.texture_width == 8 && made.right == 0.25f,
+              "texture: a PNG at its own size, in the smallest texture the client makes (8 x 8)");
+        const std::vector<uint8_t> dots = ClientRead(made.path);
+        Check(BlpPixel(dots, 0, 0) == 0xFFFF0000u && BlpPixel(dots, 1, 0) == 0xFF00FF00u && BlpPixel(dots, 0, 1) == 0xFF0000FFu &&
+                  BlpPixel(dots, 1, 1) >> 24 == 0,
+              "texture: its pixels as they were");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {}, 0x80FFFFFFu, made) == WXL_OK &&
+                  BlpPixel(ClientRead(made.path), 0, 0) == 0x80FF0000u,
+              "texture: a tint multiplies it");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {red[0]}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "is a PNG, which has no groups") != nullptr,
+              "texture: groups on a PNG are refused, and say a tint colours it");
+
+        // --- a mod's folder ---
+        const fs::path root = fs::temp_directory_path() / "wxl-harness-texture";
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+        WriteFileAt(root / "Mods" / "wxl.reticles" / "assets" / "dot.svg", reticle);
+        texture::UseModsDirectory(root / "Mods");
+        Check(MakeTexture("Mods\\wxl.reticles\\assets\\dot.svg", 16, 0, {}, 0, made) == WXL_OK &&
+                  std::strncmp(made.path, "Interface\\WXL\\wxl.reticles\\dot_16x17_", 37) == 0,
+              "texture: a file of a mod's folder, named after the mod's folder");
+        Check(MakeTexture(".\\assets\\dot.svg", 16, 0, {}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "no mod is calling") != nullptr,
+              "texture: \".\\\\\" with no mod calling is refused, and says how an add-on names its file");
+
+        // --- refusals ---
+        Check(MakeTexture("Mods\\wxl.reticles\\assets\\none.svg", 16, 16, {}, 0, made) == WXL_E_NOT_FOUND &&
+                  std::strstr(made.reason, "no file") != nullptr,
+              "texture: no such file is not found");
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Notes.txt"), "plain words", 11, 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Notes.txt", 16, 16, {}, 0, made) == WXL_E_UNSUPPORTED &&
+                  std::strstr(made.reason, "neither an SVG nor a PNG") != nullptr,
+              "texture: a file neither SVG nor PNG is unsupported");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 4096, 16, {}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "2048") != nullptr,
+              "texture: a size past 2048 is refused");
+        Check(MakeTexture("Mods\\..\\Wow.exe", 16, 16, {}, 0, made) == WXL_E_INVALID && std::strstr(made.reason, "..") != nullptr &&
+                  MakeTexture("C:\\x.svg", 16, 16, {}, 0, made) == WXL_E_INVALID,
+              "texture: a name going up a folder, or a path of the disk, is refused");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 16, 16, {red[0], red[0]}, 0, made) == WXL_E_INVALID &&
+                  MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 16, 16, {TextureGroup("", 1, 0, 0, true)}, 0, made) ==
+                      WXL_E_INVALID,
+              "texture: a group given twice, or with no id, is refused");
+
+        // --- WxlTexture in the interface ---
+        // The fake VM outlives its contexts, unlike the client's: the earlier contexts' globals go.
+        g_vm.closures.clear();
+        g_vm.live = true;
+        wxl::seam::FrameScript::Initialize::After(1, 0);
+        const char* clientNames[] = {"PLAYER_LOGIN"};
+        wxl::seam::FrameScript::CreateEvents::After(clientNames, 1);
+        Check(g_vm.closures.count("__wxl_texture") == 1 && !g_vm.ran.empty() &&
+                  g_vm.ran.back().find("WarcraftXL\\WxlTexture: ") == 0 &&
+                  g_vm.ran.back().find("function WxlTexture(source, width, height, groups, tint)") != std::string::npos,
+              "texture: a context coming up gets WxlTexture, run before the mods hear of it");
+        bool found = false;
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), reticle.data(), static_cast<uint32_t>(reticle.size()), 0);
+        std::vector<FakeValue> results =
+            CallGlobal("__wxl_texture",
+                       {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42),
+                        String("fill\tff4040ff\t\t\noutline\t@2566914048\t2\t"), FakeValue{}},
+                       &found);
+        Check(found && results.size() == 5 && results[0].string == first && results[1].number == 40.0 / 64.0 &&
+                  results[3].number == 64.0,
+              "texture: the interface's call answers the path a mod's same request does, then the coordinates and sizes");
+        results = CallGlobal("__wxl_texture",
+                             {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42),
+                              String("outline\t\t0\t\nfill\t#ff4040\t\t"), FakeValue{}},
+                             &found);
+        Check(results.size() == 5 && results[0].string != first, "texture: \"#rrggbb\" and a width alone read");
+        results = CallGlobal("__wxl_texture",
+                             {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42), String("fill\tred\t\t"),
+                              FakeValue{}},
+                             &found);
+        Check(results.size() == 2 && results[0].type == WXL_VALUE_NIL &&
+                  results[1].string.find("group 'fill': \"red\" is not a colour") != std::string::npos,
+              "texture: a bad colour answers nil and a reason naming the group");
+        results = CallGlobal("__wxl_texture", {String(".\\x.svg"), Number(8), Number(8), String(""), FakeValue{}}, &found);
+        Check(results.size() == 2 && results[1].string.find("no mod is calling") != std::string::npos,
+              "texture: an add-on has no \".\\\\\" folder");
+        results = CallGlobal("__wxl_texture", {Number(3)}, &found);
+        Check(results.size() == 2 && results[1].string.find("'source' (argument 1)") != std::string::npos,
+              "texture: a source that is not a name is refused");
+        wxl::seam::FrameScript::Destroy::Before();
+        g_vm.live = false;
+        g_vm.closures.clear();
+
+        // --- the budget ---
+        wxl_texture_stats stats{};
+        stats.struct_size = sizeof stats;
+        Check(api.stats(&stats) == WXL_OK && stats.textures >= 8 && stats.resident == stats.textures && stats.reused >= 2 &&
+                  stats.bytes > 0 && stats.byte_limit == (64ull << 20),
+              "texture: stats count the textures, the ones in memory, their bytes and the budget");
+        const uint64_t madeBefore = stats.made;
+        texture::SetLimits(1, 2048);
+        api.stats(&stats);
+        Check(stats.resident == 0 && stats.bytes == 0 && stats.released >= 8 && stats.textures >= 8,
+              "texture: past the budget the bytes are let go, the names kept");
+        Check(ClientRead(first.c_str()) == blp, "texture: a name let go is drawn again when the client asks, the same bytes");
+        api.stats(&stats);
+        Check(stats.made == madeBefore + 1, "texture: once");
+        texture::SetLimits(64ull << 20, 1);
+        api.stats(&stats);
+        Check(stats.textures == 1 && ClientRead(noOutline.c_str()).empty(),
+              "texture: past the count the least used names are forgotten, and no longer answer");
+
+        texture::Clear();
+        texture::UseModsDirectory(fs::path());
+        Check(ClientRead(first.c_str()).empty(), "texture: cleared, nothing is served");
+        for (const char* name : {"Interface\\AddOns\\WxlTest\\Reticle.svg", "Interface\\AddOns\\WxlTest\\Dots.png",
+                                 "Interface\\AddOns\\WxlTest\\Notes.txt"})
+            storage.unserve(Str(name));
+        fs::remove_all(root, ignored);
+        Unmute(WXL_EV_FileOpen);
+        Unmute(WXL_EV_FileOpened);
     }
 
     void CheckAssetBricks()
@@ -11837,6 +12104,7 @@ int main(int argc, char** argv)
     CheckMouseLookBlock();
     CheckPose();
     CheckSelectionCircle();
+    CheckTexture();
     CheckHighlight();
     CheckImGuiService();
     CheckStorage();
