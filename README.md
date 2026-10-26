@@ -189,7 +189,8 @@ cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test
    not drawn through Vulkan yet: the device is released and the client renders through D3D9 as
    before. `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
    or a part of the name>` picks the device on a machine with several; `frames_in_flight = 1..3`
-   (2) and `present_filter = linear|nearest` (linear) serve the recompiled client.
+   (2), `present_filter = linear|nearest` (linear) and `async_pipelines = 0|1` (1: a draw whose
+   pipeline is still compiling is left out rather than waited for) serve the recompiled client.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own
@@ -214,7 +215,13 @@ its window, the swapchain, the frame's clear, the world and the game's interface
 engine draws into (the minimap, portraits, full-screen effects), Dear ImGui and the pointer. The
 client's shaders are its own records translated from DX9 bytecode to SPIR-V on the player's
 machine, once each (kept in `WarcraftXL\cache\vk\`, with the pipelines compiled); a record the
-translator refuses leaves its draws out, counted. A machine or a window Vulkan cannot serve keeps
+translator refuses leaves its draws out, counted. The pipelines are compiled on worker threads
+(linked at once from parts where the driver has graphics pipeline libraries); until one is ready,
+a draw into the frame that needs it is left out rather than waited for, which
+`[gx] async_pipelines = 0` turns into a wait. The pipelines drawn are kept beside the cache and
+compiled ahead at the next launch. `gxMultisample` gives a multisampled frame, resolved for the
+screen, the copies of the full-screen effects and the readbacks; the screenshot key and the
+portraits read the frame back as D3D9 does. A machine or a window Vulkan cannot serve keeps
 D3D9, with one line in the log. D3D9 stays the
 default. The console commands `gxVkSimulateLoss` (the device's loss and return, under Vulkan) and
 `gxCapture` (the next frame of the D3D9 device recorded to `WarcraftXL\captures\` in the format of
