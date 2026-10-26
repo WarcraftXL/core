@@ -11107,12 +11107,22 @@ namespace
         device.Put<void*>(WXL_FIELD("CGxDevice", "m_hwRenderStates.m_data"), states.At());
         states.Put<void*>(hd::kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"), shader.At());
         shader.Put<void*>(WXL_FIELD("CGxShader", "m_apiSpecific"), &program);
+        Block texture(WXL_TYPE_SIZE("CGxTex"));
+        int   d3dTexture = 0;
+        texture.Put<void*>(WXL_FIELD("CGxTex", "m_apiSpecificData"), &d3dTexture);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), texture.At());
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 224);
 
         hd::State state;
         Check(hd::ReadState(device.At(), state) && state.declaration == &decl && state.indices == &index &&
                   state.streams[0] == &stream0 && state.streams[1] == nullptr && state.streams[2] == &stream2 &&
                   state.offsets[2] == 640 && state.strides[0] == 48 && state.strides[2] == 8 && state.vertexShader == &program,
               "a D3D9Ex device's declaration, index buffer, streams and vertex program are read from its copy");
+        Check(state.texture0 == &d3dTexture && state.alphaRef == 224, "with its first texture and its alpha test's reference");
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 0);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), nullptr);
+        Check(hd::ReadState(device.At(), state) && state.texture0 == nullptr && state.alphaRef == 0,
+              "a draw without texture or alpha test has neither");
         states.Put<void*>(hd::kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"), nullptr);
         Check(hd::ReadState(device.At(), state) && state.vertexShader == nullptr, "no vertex program: the fixed pipeline");
 
@@ -11129,24 +11139,21 @@ namespace
         d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_intF5C"), 0);
         d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), 0);
         Check(!hd::ReadState(d3d.At(), state) && !hd::ReadState(nullptr, state), "nor an OpenGL one, nor none");
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), hd::kApiD3d9);
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_context"), 0);
+        Check(hd::ReadBindings(d3d.At(), state) && state.indices == &index,
+              "what the engine believes bound is read whatever the device's state, to be put back");
 
         Check(!hd::IntoTexture(device.At()), "the device draws to the screen");
         device.Put<void*>(WXL_FIELD("CGxDevice", "m_textureTarget[0].m_apiSpecific"), &decl);
         Check(hd::IntoTexture(device.At()), "or into a texture (a portrait)");
 
-        // The engine's shadow: FLT_MAX where nothing was set this frame, and its dirty range.
+        // The engine's shadow: FLT_MAX where nothing was set this frame.
         std::vector<uint8_t> shadow(hd::kShadowSize, 0);
         float* rows = reinterpret_cast<float*>(shadow.data());
         for (uint32_t i = 0; i < hd::kRows * 4; ++i) rows[i] = FLT_MAX;
         rows[4 * 31] = 1.0f;
         Check(!hd::RowSet(rows) && hd::RowSet(rows + 4 * 31), "a register set this frame is told from one left unset");
-        const uint32_t clean[2] = {0, 255}; // dirtyMax 0, dirtyMin 255: nothing to send
-        std::memcpy(shadow.data() + hd::kShadowMax, clean, sizeof clean);
-        hd::MarkDirty(shadow.data(), 31, 40);
-        hd::MarkDirty(shadow.data(), 0, 0);
-        uint32_t range[2];
-        std::memcpy(range, shadow.data() + hd::kShadowMax, sizeof range);
-        Check(range[0] == 40 && range[1] == 0, "registers marked dirty widen the range the engine sends next");
     }
 
     // --- wxl.highlight on x86: the passes, over a device that records them -----------------------
@@ -11183,6 +11190,8 @@ namespace
             DWORD  zEnable, zWrite, blend;
             float  bone;  ///< c31.x as the draw saw it
             float  color; ///< the mask's red, c200.x or c30.x
+            float  alpha; ///< the mask's alpha reference, c202.x or c29.x
+            IDirect3DBaseTexture9* texture0;
         };
         std::vector<Drawn> draws;
         std::vector<std::pair<IDirect3DSurface9*, IDirect3DSurface9*>> resolves;
@@ -11270,7 +11279,8 @@ namespace
             const bool model3 = programVersion >= 0xFFFE0300u;
             draws.push_back(Drawn{targets[0], targets[1], boundDepth, vs, ps, indexed, baseVertex, startIndex, primitives,
                                   State(D3DRS_ZENABLE), State(D3DRS_ZWRITEENABLE), State(D3DRS_ALPHABLENDENABLE),
-                                  vertexConstants[31][0], model3 ? pixelConstants[200][0] : pixelConstants[30][0]});
+                                  vertexConstants[31][0], model3 ? pixelConstants[200][0] : pixelConstants[30][0],
+                                  model3 ? pixelConstants[202][0] : pixelConstants[29][0], textures[0]});
         }
         void DrawIndexed(D3DPRIMITIVETYPE, INT baseVertex, UINT, UINT, UINT startIndex, UINT primitives) override
         {
@@ -11325,9 +11335,11 @@ namespace
         float* rows = reinterpret_cast<float*>(shadow.data());
         for (uint32_t i = 0; i < hd::kRows * 4; ++i) rows[i] = FLT_MAX;
         for (uint32_t i = 28; i < 34; ++i) rows[4 * i] = static_cast<float>(i);
-        const uint32_t clean[2] = {0, 255};
-        std::memcpy(shadow.data() + hd::kShadowMax, clean, sizeof clean);
         static int32_t shaders = 1;
+        static Block   texture(WXL_TYPE_SIZE("CGxTex"));
+        static int     d3dTexture = 0;
+        texture.Put<void*>(WXL_FIELD("CGxTex", "m_apiSpecificData"), &d3dTexture);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), texture.At());
 
         Check(api.set(target, 0xFF0000u, 2.0f, 8.0f, 0.5f) == WXL_E_UNSUPPORTED && api.supported() == WXL_FALSE,
               "with no device to draw on, a highlight is refused as unsupported");
@@ -11362,12 +11374,35 @@ namespace
             g_gxDrew                 = true;
             wxl::seam::M2::DrawBatch::After(&render);
         };
+        // What the game has bound when the world ends, which the interface goes on drawing with:
+        // the engine's copy says another declaration, index buffer and stream than the batch's, and
+        // the device holds them; c0-c3 hold a matrix the engine set in an earlier frame (its copy
+        // has FLT_MAX there), c28-c33 what it set this frame.
+        static int laterDecl = 0, laterIndex = 0, laterStream = 0;
+        auto gameBindings = [&] {
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &laterDecl);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &laterIndex);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), &laterStream);
+            engine.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamStride"), 24);
+            device.declaration = reinterpret_cast<IDirect3DVertexDeclaration9*>(&laterDecl);
+            device.indices     = reinterpret_cast<IDirect3DIndexBuffer9*>(&laterIndex);
+            device.streams[0]  = reinterpret_cast<IDirect3DVertexBuffer9*>(&laterStream);
+            for (int r = 0; r < 4; ++r) device.vertexConstants[r][0] = 0.5f + static_cast<float>(r);
+            for (uint32_t r = 28; r < 34; ++r) device.vertexConstants[r][0] = rows[4 * r];
+            device.vertexConstants[250][0] = 0.0f;
+        };
+        auto bindingsBack = [&] {
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &decl);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &index);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), &stream);
+        };
         const int invalidated = g_gxInvalidated;
         wxl::seam::WorldFrame::RenderWorld::Before(&world);
         drawBatch(&g_charModel, 0);
         drawBatch(&other, 0);
         drawBatch(&g_charModel, 2); // translucent: not the silhouette
         rows[4 * 31] = 999.0f;      // the engine moves on to other models' bones
+        gameBindings();
         wxl::seam::WorldFrame::RenderWorld::After(&world);
 
         Check(api.drawn() == 1 && device.draws.size() == 4, "the object's one opaque batch is drawn again, then three passes");
@@ -11381,6 +11416,8 @@ namespace
                       mask.zEnable == D3DZB_TRUE && mask.zWrite == FALSE && mask.blend == FALSE,
                   "into two masks, tested against the scene's depth and never writing it");
             Check(std::fabs(mask.color - 0xE0 / 255.0f) < 1e-5f, "in the highlight's colour");
+            Check(mask.alpha < 0.0f && mask.texture0 == reinterpret_cast<IDirect3DBaseTexture9*>(&d3dTexture),
+                  "an opaque batch keeps every texel of its first texture");
             Check(device.draws[1].target0 != device.scene && device.draws[2].target0 != device.scene &&
                       device.draws[1].depth == nullptr && !device.draws[1].indexed,
                   "the glow is blurred across and down, with no depth buffer");
@@ -11388,26 +11425,40 @@ namespace
             Check(composite.target0 == device.scene && composite.target1 == nullptr && composite.blend == TRUE &&
                       composite.zEnable == D3DZB_FALSE,
                   "and the outline and the glow are blended onto the scene");
-            Check(device.pixelConstants[200][2] == WXL_HIGHLIGHT_MAX_OUTLINE, "an outline wider than 16 pixels is drawn 16 wide");
+            Check(std::fabs(device.pixelConstants[200][2] - WXL_HIGHLIGHT_MAX_OUTLINE * 900.0f / 1080.0f) < 1e-3f,
+                  "an outline wider than 16 pixels is 16 at 1080 lines, scaled to the render's 900");
         }
-        uint32_t range[2];
-        std::memcpy(range, shadow.data() + hd::kShadowMax, sizeof range);
+        Check(device.declaration == reinterpret_cast<IDirect3DVertexDeclaration9*>(&laterDecl) &&
+                  device.indices == reinterpret_cast<IDirect3DIndexBuffer9*>(&laterIndex) &&
+                  device.streams[0] == reinterpret_cast<IDirect3DVertexBuffer9*>(&laterStream) && device.streams[1] == nullptr,
+              "the declaration, index buffer and streams the engine believes bound are bound again (the interface "
+              "draws with them without binding them anew)");
+        bool constantsKept = device.vertexConstants[250][0] != 0.0f;
+        for (int r = 0; r < 4; ++r) constantsKept = constantsKept && device.vertexConstants[r][0] == 0.5f + static_cast<float>(r);
+        for (uint32_t r = 28; r < 34; ++r) constantsKept = constantsKept && device.vertexConstants[r][0] == rows[4 * r];
+        Check(constantsKept, "the vertex registers the batches overwrote hold the engine's values again, those it set in an "
+                             "earlier frame were never touched, the quad's own register is above the game's");
         Check(device.targets[0] == device.scene && device.targets[1] == nullptr && device.boundDepth == device.depth &&
                   device.textures[0] == nullptr && device.textures[2] == nullptr && device.State(D3DRS_ZENABLE) == D3DZB_TRUE &&
                   device.State(D3DRS_COLORWRITEENABLE1) == 0xF && g_gxInvalidated == invalidated + 1,
               "the scene's target and depth are put back, the passes' textures let go, and the game told to send its state");
-        Check(range[1] == 0 && range[0] >= 33, "the vertex registers the passes set are sent again by the engine");
         Check(device.released == 2, "and the scene's target and depth are let go");
         Check(device.resolves.empty(), "a scene without multisampling needs no resolve");
 
         // Multisampling: masks of the depth's kind, resolved into the textures the passes read.
         device.samples = D3DMULTISAMPLE_4_SAMPLES;
         device.draws.clear();
+        bindingsBack();
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 224);
         wxl::seam::WorldFrame::RenderWorld::Before(&world);
         drawBatch(&g_charModel, 1);
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 0);
+        gameBindings();
         wxl::seam::WorldFrame::RenderWorld::After(&world);
         Check(device.resolves.size() == 2 && device.draws.size() == 4 && device.draws[0].target0 == device.resolves[0].first,
               "a multisampled depth gets multisampled masks, resolved after the batches");
+        Check(device.draws.size() == 4 && std::fabs(device.draws[0].alpha - 224.0f / 255.0f) < 1e-5f,
+              "an alpha-tested batch (hair, a mane, leaves) keeps only the texels its test keeps");
 
         // A vertex program of shader model 2 is paired with the mask program of model 2.
         static int program2 = 0;
