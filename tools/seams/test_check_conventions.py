@@ -722,6 +722,11 @@ GROUND_TRUTH = {
     "Gx.NotifyOnDeviceRestored":       ("0x006843B0", "thiscall", ["ecx"], 0),
     "SimpleTop.OnLayerRender":         ("0x00495410", "thiscall", ["ecx"], 0),
     "WorldFrame.RenderWorld":          ("0x004FAF90", "cdecl", [], 1),
+    # The world renderer's points (V6). RenderDetailDoodads opens a frame of its own and reads no
+    # [ebp+N]; RenderLiquidPass has no frame, reads nothing on the stack and ends in a tail `jmp`
+    # to CMap::RenderWaterRipples (0x00790AA7). Both are class statics reached through thunks.
+    "WorldScene.RenderDetailDoodads":  ("0x007984A0", "cdecl", [], 0),
+    "WorldScene.RenderLiquidPass":     ("0x00790A80", "cdecl", [], 0),
     # Reads its title alone; the two flags are pushed and cleaned by its one caller
     # (0x00406B28 `push 1; push 1; push eax; call; add esp, 0xc`).
     "ConsoleDevice.Initialize":        ("0x0076AB80", "cdecl", [], 1),

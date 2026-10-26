@@ -43,6 +43,10 @@ namespace wxl::vk::test
     void TranslatePureCases();
     bool TranslateLiveCases();
 
+    /// wxl.render and wxl.highlight on the driver: passes, batches drawn again, the scene's copies,
+    /// buffers, GPU zones, the device made again, and the highlight against the Direct3D 9 algorithm.
+    bool RenderLiveCases();
+
     /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
     /// build has no validator (SPIRV-Tools is built in the native test tree only).
     bool SpirvValidation();

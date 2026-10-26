@@ -42,8 +42,10 @@ set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-tools" spirv-tools EXCLUDE_FROM_ALL)
 
 add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp translate_tests.cpp
-    v4_tests.cpp parity_tests.cpp)
+    v4_tests.cpp parity_tests.cpp render_tests.cpp)
 target_link_libraries(wxl-vk-tests PRIVATE wxl-vk SPIRV-Tools-static)
+include("${CMAKE_CURRENT_SOURCE_DIR}/programs.cmake")
+wxl_vk_add_test_programs(wxl-vk-tests)
 target_compile_definitions(wxl-vk-tests PRIVATE WXL_VK_SPIRV_VAL)
 
 # A frame capture drawn again on this machine's driver and compared with its D3D9 back buffer:

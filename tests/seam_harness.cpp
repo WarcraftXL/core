@@ -41,6 +41,7 @@
 #include "services/Assets.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
+#include "services/RenderService.hpp"
 #include "services/StorageService.hpp"
 
 #include <chrono>
@@ -1397,6 +1398,9 @@ namespace
     wxl_model_batch_args g_gxDraw{};
     bool                 g_gxDrew = false;
 
+    /// The API the fake device runs on: Direct3D 9.
+    int32_t WXL_CALL FakeGxDeviceApi() { return 1; }
+
     wxl_bool WXL_CALL FakeGxModelDraw(const void* render, wxl_model_batch_args* out)
     {
         if (!render || !out || !g_gxDrew) return WXL_FALSE;
@@ -2074,6 +2078,7 @@ namespace
         init.gx_window_visible      = &FakeGxWindowVisible;
         init.gx_window_size         = &FakeGxWindowSize;
         init.gx_model_draw          = &FakeGxModelDraw;
+        init.gx_device_api          = &FakeGxDeviceApi;
         init.gx_invalidate_state    = &FakeGxInvalidate;
         init.component_wearer       = &FakeComponentWearer;
         init.m2_object_model        = &FakeObjectModel;
@@ -4751,12 +4756,15 @@ namespace
         wxl::seam::SimpleTop::OnLayerRender::After(&top);
         present();
 
-        const wxl_event order[] = {WXL_EV_FrameBegin, WXL_EV_WorldRenderBegin, WXL_EV_WorldRenderEnd,
-                                   WXL_EV_UiRenderEnd, WXL_EV_FrameEnd};
-        bool inOrder = g_received.size() == 5;
-        for (size_t i = 0; inOrder && i < 5; ++i) inOrder = g_received[i].event == order[i];
-        Check(inOrder, "a frame raises FrameBegin, the world pass, the interface's end and "
-                       "FrameEnd, in that order");
+        const wxl_event order[] = {WXL_EV_FrameBegin,  WXL_EV_WorldRenderBegin, WXL_EV_RenderPoint, WXL_EV_WorldRenderEnd,
+                                   WXL_EV_UiRenderEnd, WXL_EV_RenderPoint,      WXL_EV_FrameEnd};
+        bool inOrder = g_received.size() == 7;
+        for (size_t i = 0; inOrder && i < 7; ++i) inOrder = g_received[i].event == order[i];
+        Check(inOrder, "a frame raises FrameBegin, the world pass with the point after the world, the interface's end, "
+                       "the point after it and FrameEnd, in that order");
+        Check(inOrder && g_received[2].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_WORLD &&
+                  g_received[5].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_UI,
+              "the points are after the world, then after the interface");
 
         uint64_t first = 0;
         if (inOrder)
@@ -4764,7 +4772,8 @@ namespace
             first     = g_received[0].As<wxl_frame_args>().index;
             bool same = first != 0;
             for (const Received& received : g_received)
-                same = same && received.As<wxl_frame_args>().index == first;
+                same = same && (received.event == WXL_EV_RenderPoint ? received.As<wxl_render_point_args>().frame
+                                                                     : received.As<wxl_frame_args>().index) == first;
             Check(same, "and every slot of it carries that frame's index");
         }
 
@@ -11527,8 +11536,9 @@ namespace
                   drawn->As<wxl_model_batch_args>().base_vertex == 12 &&
                   drawn->As<wxl_model_batch_args>().start_index == 300 &&
                   drawn->As<wxl_model_batch_args>().primitive_count == 40 &&
-                  drawn->As<wxl_model_batch_args>().viewport_max_z == 1.0f,
-              "a drawn batch raises ModelBatchDrawn with the numbers of the device's draw");
+                  drawn->As<wxl_model_batch_args>().viewport_max_z == 1.0f &&
+                  drawn->As<wxl_model_batch_args>().batch == nullptr,
+              "a drawn batch raises ModelBatchDrawn with the numbers of the device's draw, and no batch for wxl.render on D3D9");
 
         g_received.clear();
         wxl::seam::M2::DrawBatch::After(&render);
@@ -11540,6 +11550,74 @@ namespace
         Check(gx.struct_size == sizeof(wxl_gx_api) && gx.d3d9_device() == nullptr,
               "wxl.gx answers no device where the client hands none over");
         gx.invalidate_state(); // nothing to invalidate: it must not fault
+#if !defined(_M_IX86)
+        Check(gx.api() == WXL_GX_BACKEND_D3D9, "wxl.gx 2 answers the API the client's device runs on: Direct3D 9 here");
+#else
+        Check(gx.api() <= WXL_GX_BACKEND_VULKAN, "wxl.gx 2 answers an API the contract names");
+#endif
+    }
+
+    // --- wxl.render, wxl.vk and the points of the frame on a device the renderer does not drive -------
+
+    void CheckRenderService()
+    {
+        const wxl_render_api& r = wxl::core::services::RenderApi();
+        const wxl_vk_api&     v = wxl::core::services::VkApi();
+        const wxl_str         why = r.unsupported_reason();
+        Check(r.struct_size == sizeof(wxl_render_api) && r.supported() == WXL_FALSE &&
+                  std::string_view(why.data, why.size).find("Direct3D 9") != std::string_view::npos,
+              "wxl.render says it does not drive Direct3D 9, and why");
+        wxl_render_pipeline_desc desc{};
+        desc.struct_size = sizeof desc;
+        wxl_render_pass pass{};
+        pass.struct_size = sizeof pass;
+        uint64_t address = 0;
+        Check(r.create_image(8, 8, WXL_RENDER_FORMAT_RGBA8, 1) == WXL_HANDLE_NONE && r.create_screen_image(2, WXL_RENDER_FORMAT_RGBA8, 0) == WXL_HANDLE_NONE &&
+                  r.create_buffer(64) == WXL_HANDLE_NONE && r.create_pipeline(&desc) == WXL_HANDLE_NONE &&
+                  r.image_slot(16) == WXL_RENDER_NO_SLOT && r.buffer_address(16, &address) == WXL_E_UNSUPPORTED,
+              "no resource is made on it");
+        int batch = 0;
+        Check(r.begin(&pass) == WXL_E_UNSUPPORTED && r.draw(16, 3, 1, nullptr, 0) == WXL_E_UNSUPPORTED &&
+                  r.draw_batch(&batch, 16, nullptr, 0) == WXL_E_UNSUPPORTED && r.keep_batch(&batch) == nullptr &&
+                  r.scene_color_slot() == WXL_RENDER_NO_SLOT && r.scene_depth_slot() == WXL_RENDER_NO_SLOT,
+              "no pass, no draw, no batch kept, no copy of the scene");
+        const uint32_t word = 0x07230203u;
+        Check(r.replace_shader(wxl_str{"Diffuse", 7}, 1, &word, 4) == WXL_E_UNSUPPORTED &&
+                  r.restore_shader(wxl_str{"Diffuse", 7}, 1) == WXL_E_UNSUPPORTED,
+              "no shader of the client is replaced");
+        r.end();
+        r.destroy_image(16);
+        uint64_t out = 0;
+        Check(v.struct_size == sizeof(wxl_vk_api) && !v.instance() && !v.device() && !v.queue() && !v.command_buffer() &&
+                  v.api_version() == 0 && v.frame(&out) == WXL_E_UNSUPPORTED && v.image(16, WXL_FALSE, &out) == WXL_E_UNSUPPORTED,
+              "wxl.vk hands out nothing of a Vulkan device there is not");
+#if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
+        const wxl_profile_api& profile = wxl::core::profile::Api();
+        Check(profile.gpu_zone_begin(wxl_str{"zone", 4}) == WXL_E_UNSUPPORTED, "a GPU zone is refused where wxl.render does not draw");
+        profile.gpu_zone_end();
+#endif
+
+        // The points: inside a frame the client paints, each where its seam is, with the frame's index.
+        g_gxContext = g_gxVisible = true;
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(g_received.empty(), "outside a frame no point is raised");
+        wxl::seam::Scrn::OnPaint::Before(nullptr, nullptr);
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(g_received.size() == 2 && g_received[0].event == WXL_EV_RenderPoint &&
+                  g_received[0].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_OPAQUE_WORLD &&
+                  g_received[1].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_LIQUIDS &&
+                  g_received[0].As<wxl_render_point_args>().frame != 0 && g_received[0].As<wxl_render_point_args>().samples == 0,
+              "after the opaque world and after the liquids, RenderPoint with the frame's index (no samples: D3D9 is not drawn by the runtime)");
+        Mute(WXL_EV_RenderPoint);
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        Check(g_received.empty(), "a point nobody listens to costs a flag");
+        Unmute(WXL_EV_RenderPoint);
+        wxl::seam::Gx::ScenePresent::Before();
     }
 
     // --- Component: AppearanceChanged, and models kept on the copies the client strips ------------
@@ -12361,7 +12439,7 @@ namespace
 #if !defined(_M_IX86)
         const wxl_str why = api.unsupported_reason();
         Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("Vulkan") != std::string_view::npos,
-              "the recompiled client says it draws no highlight yet, and why: its Vulkan renderer");
+              "the recompiled client on Direct3D 9 draws no highlight, and says why: its Vulkan renderer draws them");
         Check(api.set(target, 0xFF0000u, 2.0f, 8.0f, 0.5f) == WXL_E_UNSUPPORTED && api.clear(target) == WXL_E_NOT_FOUND &&
                   api.drawn() == 0,
               "a highlight is refused as unsupported, and nothing is drawn");
@@ -12678,6 +12756,7 @@ int main(int argc, char** argv)
     CheckProfile();
 #endif
     CheckModelBatch();
+    CheckRenderService();
     CheckAppearance();
     CheckM2Service();
     CheckM2World();
