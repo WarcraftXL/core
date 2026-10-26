@@ -6,6 +6,8 @@
 #include "wxl/seams/seams.h"
 
 #include "binding/Binding.hpp"
+#include "gx/Vulkan.hpp"
+#include "runtime/Session.hpp"
 #include "runtime/Stages.hpp"
 
 namespace wxl::seam::ConsoleDevice::Initialize
@@ -14,6 +16,8 @@ namespace wxl::seam::ConsoleDevice::Initialize
     {
         // The function returns only with a device -- each failure ends the process -- but the
         // stage means a device exists, so that is what is asked rather than assumed.
-        if (wxl::core::binding::gx_device_exists()) wxl::core::stages::Reach(WXL_STAGE_GRAPHICS);
+        if (!wxl::core::binding::gx_device_exists()) return;
+        wxl::core::gx::DeviceReady(wxl::core::session::CurrentSettings());
+        wxl::core::stages::Reach(WXL_STAGE_GRAPHICS);
     }
 }

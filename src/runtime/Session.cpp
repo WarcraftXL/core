@@ -261,6 +261,25 @@ namespace
 #endif
     }
 
+    /// The graphics line: the API [gx] asks for, if any, and the Vulkan settings.
+    void Graphics()
+    {
+        using wxl::core::settings::GxApi;
+        if (g_settings.gx_api == GxApi::client)
+        {
+            Line("graphics: the client's own choice of API; [gx] api = vulkan in WarcraftXL.ini tries Vulkan");
+            return;
+        }
+        if (g_settings.gx_api == GxApi::d3d9)
+        {
+            Line("graphics: [gx] api = d3d9: D3D9, a Vulkan request of the client's included");
+            return;
+        }
+        Line("graphics: [gx] api = vulkan: Vulkan is tried when the client makes its device, D3D9 if this machine "
+             "cannot; validation %s, gpu %s",
+             g_settings.gx_validation ? "on" : "off", g_settings.gx_gpu[0] ? g_settings.gx_gpu : "the best one");
+    }
+
     void Settings(const wxl::log::SessionFiles& files)
     {
         using wxl::log::LevelName;
@@ -307,6 +326,7 @@ namespace
             Line("log %s; %u earlier log(s) in Logs\\", path, files.kept);
         }
         Profiler();
+        Graphics();
         if (files.fallback)
             wxl::log::WriteUnfilteredF(Level::Warn, kTag,
                                        "Logs\\WarcraftXL.log is held by another process (a second client from this "

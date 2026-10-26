@@ -10,7 +10,10 @@
 // Creates the graphics device: picks the API and retries CreateGxDevice until one is made. Its one
 // caller is InitializeGlobal, once, at process start (0x00406B28). It returns only with a device:
 // every failure -- no device to be had, or one without two texture units -- shows a message and
-// ends the process (exit(0)). After announces WXL_STAGE_GRAPHICS when the device exists.
+// ends the process (exit(0)). After announces WXL_STAGE_GRAPHICS when the device exists. Before
+// that, on the stock client, `[gx] api = vulkan` in WarcraftXL.ini makes the Vulkan device beside
+// the client's own, logs it and releases it (the stock client has no Vulkan adapter); the
+// recompiled client made it already, through its CGxDeviceVk.
 //
 // It falls between the other stages: InitializeGlobal reads its first client database
 // (Startup_Strings.dbc, through SFile::OpenEx) just before calling this, and InitializeClient

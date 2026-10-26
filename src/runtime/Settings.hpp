@@ -16,6 +16,14 @@ namespace wxl::core::settings
     /// The file's name, next to the client executable.
     constexpr wchar_t kFileName[] = L"WarcraftXL.ini";
 
+    /// `[gx] api`: which graphics API the client creates, over its own choice.
+    enum class GxApi : uint8_t
+    {
+        client, ///< no line: the client's own choice (gxApi, its command line)
+        d3d9,   ///< D3D9, a Vulkan request included
+        vulkan, ///< Vulkan, a D3D9 or D3D9Ex request included; D3D9 when the machine cannot
+    };
+
     /// What the file says. Every member has the value the runtime uses without the file.
     struct Settings
     {
@@ -38,6 +46,10 @@ namespace wxl::core::settings
         uint16_t profile_port        = 8086;
         bool     profile_any         = false; ///< listen = any: every interface, not 127.0.0.1 only
 
+        GxApi    gx_api        = GxApi::client;
+        bool     gx_validation = false;  ///< [gx] validation = 1: Vulkan's validation layer, when installed
+        char     gx_gpu[64]    = {};     ///< [gx] gpu: the device's index, or a part of its name
+
         /// Lines of the file that were not understood, as messages for the log, at most 8.
         char     problems[8][160] = {};
         unsigned problem_count    = 0;
@@ -56,7 +68,7 @@ namespace wxl::core::settings
     /**
      * @brief Reads settings from the text of an ini file.
      *
-     * Two sections are read, `[log]` and `[profile]`:
+     * Three sections are read, `[log]`, `[profile]` and `[gx]`:
      *
      *     [log]
      *     level = debug          ; trace, debug, info, warn, error or off
@@ -67,6 +79,11 @@ namespace wxl::core::settings
      *     enabled = 1            ; 0 or 1: the Tracy profiler, off without this line
      *     port = 8086            ; the TCP port a viewer connects to, 1 to 65535
      *     listen = localhost     ; localhost (127.0.0.1 only) or any (every interface)
+     *
+     *     [gx]
+     *     api = vulkan           ; vulkan or d3d9; without it, the client's own choice
+     *     validation = 1         ; 0 or 1: Vulkan's validation layer, when it is installed
+     *     gpu = 1                ; the Vulkan device: its index, or a part of its name
      *
      * `;` and `#` start a comment. Other sections are left for later uses; an unknown key or a
      * value that does not read is noted in `problems` and otherwise ignored.

@@ -53,6 +53,7 @@ namespace wxl::core::settings
             other,
             log,
             profile,
+            gx,
         };
         Section  section = Section::other;
         unsigned number = 0;
@@ -77,8 +78,9 @@ namespace wxl::core::settings
                     continue;
                 }
                 const std::string_view name = Trim(line.substr(1, line.size() - 2));
-                section = SameWord(name, "log") ? Section::log
+                section = SameWord(name, "log")       ? Section::log
                           : SameWord(name, "profile") ? Section::profile
+                          : SameWord(name, "gx")      ? Section::gx
                                                       : Section::other;
                 if (section == Section::profile) out.has_profile = true;
                 continue;
@@ -93,6 +95,35 @@ namespace wxl::core::settings
             }
             const std::string_view key   = Trim(line.substr(0, equals));
             const std::string_view value = Trim(line.substr(equals + 1));
+
+            if (section == Section::gx)
+            {
+                if (SameWord(key, "api"))
+                {
+                    if (SameWord(value, "vulkan")) out.gx_api = GxApi::vulkan;
+                    else if (SameWord(value, "d3d9")) out.gx_api = GxApi::d3d9;
+                    else Problem(out, number, "not vulkan or d3d9:", value);
+                }
+                else if (SameWord(key, "validation"))
+                {
+                    if (value == "0" || value == "1") out.gx_validation = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
+                else if (SameWord(key, "gpu"))
+                {
+                    if (!value.empty() && value.size() < sizeof out.gx_gpu)
+                    {
+                        std::memcpy(out.gx_gpu, value.data(), value.size());
+                        out.gx_gpu[value.size()] = '\0';
+                    }
+                    else Problem(out, number, "not a device index or a part of its name (1 to 63 characters):", value);
+                }
+                else
+                {
+                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu):", key);
+                }
+                continue;
+            }
 
             if (section == Section::profile)
             {

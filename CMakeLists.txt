@@ -60,9 +60,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 enable_language(CXX)
-if(WXL_CORE_X86)
-    enable_language(C) # MinHook
-endif()
+enable_language(C) # volk on both architectures, MinHook on x86
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL WXL_CORE_POINTER_SIZE)
     math(EXPR have "${CMAKE_SIZEOF_VOID_P} * 8")
@@ -158,6 +156,16 @@ add_custom_target(wxl-core-build-ids
     COMMENT "Reading the commits WarcraftXL.dll is built from"
     VERBATIM)
 
+# --- The Vulkan renderer (src/gx/vk/, wxl::vk) --------------------------------------------------
+# Its modules, one static library each, with volk, VMA, Vulkan-Headers and SPIRV-Headers from deps/
+# (cmake/wxl_vk.cmake, which the native test tree of tests/vk/ builds from too). The runtime's side
+# of it is src/gx/: WarcraftXL.ini's [gx] api, the table the recompiled client's CGxDeviceVk calls
+# (include/wxl/core/gx_vk.h) and the device made on the stock client.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/wxl_vk.cmake")
+set(WXL_CORE_GX_SOURCES
+    src/gx/Select.cpp
+    src/gx/Vulkan.cpp)
+
 # The launch's log (its settings file, its header and its end, the crash report, the client's fatal
 # errors) and the code the client accepts.
 set(WXL_CORE_SESSION_SOURCES
@@ -193,6 +201,7 @@ add_library(wxl-core SHARED
     src/services/PoseService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
+    ${WXL_CORE_GX_SOURCES}
     ${WXL_SEAM_BODIES}
     ${WXL_OBJECT_READS})
 set_target_properties(wxl-core PROPERTIES OUTPUT_NAME "WarcraftXL" PREFIX "")
@@ -205,7 +214,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui bcrypt)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -242,24 +251,26 @@ add_executable(wxl-core-seam-harness
     src/services/PoseService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
+    ${WXL_CORE_GX_SOURCES}
     ${WXL_SEAM_BODIES}
     ${WXL_OBJECT_READS})
 # The same build as the DLL, so --bench measures what ships rather than something near it.
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui bcrypt)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk bcrypt)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
 # --- The log ---------------------------------------------------------------------------------------
 # The session files (a launch's log renamed for the next, the oldest pruned), the levels by tag,
-# the settings file, against a scratch folder.
+# the settings file and the graphics API it selects, against a scratch folder.
 add_executable(wxl-core-log-tests
     tests/log_tests.cpp
     src/common/Log.cpp
-    src/runtime/Settings.cpp)
-target_include_directories(wxl-core-log-tests PRIVATE src include)
+    src/runtime/Settings.cpp
+    src/gx/Select.cpp)
+target_include_directories(wxl-core-log-tests PRIVATE src include "${WXL_SDK_DIR}/include")
 target_compile_definitions(wxl-core-log-tests PRIVATE ${WXL_CORE_DEFS})
 
 # --- Tracy (BSD-3-Clause, deps/tracy, its own license file) -----------------------------------------
@@ -292,9 +303,18 @@ if(WXL_PROFILE)
     target_compile_definitions(wxl-core-seam-harness PRIVATE WXL_CORE_PROFILE=1)
 endif()
 
+# --- The Vulkan renderer's lower modules on the machine's driver --------------------------------------
+# The same program as the native tree of tests/vk/: the device floor and choice, a device made and
+# refused, VMA, the timeline, a clear read back. Skipped (77) on a machine without a Vulkan 1.3 device.
+add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp)
+target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
+target_compile_options(wxl-core-vk-tests PRIVATE /W4 /permissive-)
+
 enable_testing()
 add_test(NAME seams COMMAND wxl-core-seam-harness)
 add_test(NAME log COMMAND wxl-core-log-tests "${CMAKE_CURRENT_BINARY_DIR}/log-scratch")
+add_test(NAME vk COMMAND wxl-core-vk-tests)
+set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 
 install(TARGETS wxl-core RUNTIME DESTINATION "bin/${WXL_CORE_ARCH_DIR}" COMPONENT core)
 install(FILES "$<TARGET_PDB_FILE:wxl-core>" DESTINATION "bin/${WXL_CORE_ARCH_DIR}"
