@@ -1,85 +1,103 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// wxl.glue-unlock: bypasses the client's Lua/XML signature check so custom interface code loads.
-//
-// Byte set ported from a third-party extension pack (MIT, (c) Alyst3r).
+// wxl.glue-unlock: the client loads a changed interface -- its own GlueXML and FrameXML, the
+// Blizzard add-ons -- as it loads the one it shipped with, and leaves loose interface folders on
+// disk where they are.
 
-#include <cstdio>
+#include <string_view>
 
 #include "wxl/sdk.hpp"
-#include "wxl/services/patch.h"
-
-#include "wxl/offsets/site.hpp"
 
 namespace
 {
     constexpr const char* kTag = "glue-unlock";
 
-    /// One site: the bytes the stock client has there, and the bytes that bypass the check.
-    struct Edit
+    /// An add-on's .toc, as the client names it: "Interface\AddOns\<name>\<name>.toc".
+    bool IsAddOn(std::string_view file)
     {
-        const char* name;
-        uintptr_t   address;
-        uint8_t     stock[8];
-        uint8_t     patched[8];
-        uint32_t    size;
-    };
+        constexpr std::string_view kAddOns = "interface\\addons\\";
+        if (file.size() < kAddOns.size()) return false;
+        for (std::size_t i = 0; i < kAddOns.size(); ++i)
+        {
+            char c = file[i];
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c == '/') c = '\\';
+            if (c != kAddOns[i]) return false;
+        }
+        return true;
+    }
 
-    // The signature check runs in FrameXML_CheckSignature; DeleteInterfaceFiles is where the
-    // client discards an interface it judged unsigned. Each edit either turns a conditional
-    // branch into an unconditional one (jz/jnz/jg -> jmp) or replaces the status the check
-    // returns with the "signed" value, 3.
-    const Edit kEdits[] = {
-        { "DeleteInterfaceFiles+2F",     WXL_SITE("DeleteInterfaceFiles", 0x2F),        { 0x74 }, { 0xEB }, 1 },
-        { "FrameXML_CheckSignature+45",  WXL_SITE("FrameXML_CheckSignature", 0x45),     { 0x75 }, { 0xEB }, 1 },
-        { "FrameXML_CheckSignature+5F",  WXL_SITE("FrameXML_CheckSignature", 0x5F),     { 0x01 }, { 0x03 }, 1 },
-        { "FrameXML_CheckSignature+B5",  WXL_SITE("FrameXML_CheckSignature", 0xB5),     { 0x01 }, { 0x03 }, 1 },
-        { "FrameXML_CheckSignature+166", WXL_SITE("FrameXML_CheckSignature", 0x166),    { 0x7F }, { 0xEB }, 1 },
-        { "FrameXML_CheckSignature+17F", WXL_SITE("FrameXML_CheckSignature", 0x17F),
-          { 0x83, 0xC0, 0x03, 0x5E, 0x8B, 0xE5, 0x5D }, { 0xB8, 0x03, 0x00, 0x00, 0x00, 0xEB, 0xED }, 7 },
-    };
+    /// Answers the client's signature checks and its clearing of loose folders.
+    class Unlock final : public wxl::LuaScript
+    {
+    public:
+        // The login screens' GlueXML and the game's FrameXML are taken as signed whatever the
+        // verdict: anything short of it leaves the login screens empty or closes the client. An
+        // add-on is taken as signed only when it ships a .sig (corrupt or modified: one of the
+        // client's own, which would load tainted or not at all); one without a .sig loads as
+        // every user add-on does, as insecure code.
+        void OnInterfaceSignature(std::string_view file, std::string_view, wxl_interface_signature verdict,
+                                  wxl::Answer accepted) override
+        {
+            if (verdict == WXL_INTERFACE_SIGNATURE_SIGNED) return;
+            if (IsAddOn(file) && verdict == WXL_INTERFACE_SIGNATURE_MISSING) return;
+            if (!accepted.Set()) return;
+            ++accepted_;
+            wxl::Log(WXL_LOG_DEBUG, kTag, "{}: {}, taken as signed", file, Name(verdict));
+        }
 
-    wxl::Service<wxl_patch_api> g_patch(WXL_PATCH_SERVICE, WXL_PATCH_SERVICE_VERSION);
+        // Loose Interface\GlueXML, Interface\FrameXML and Interface\AddOns\Blizzard* folders stay
+        // and load, instead of being renamed to .old.
+        void OnInterfaceCleanupRequest(wxl::Answer refused) override
+        {
+            if (!refused.Set()) return;
+            ++kept_;
+            wxl::Log(WXL_LOG_DEBUG, kTag, "loose interface folders kept on disk");
+        }
+
+        unsigned Accepted() const { return accepted_; }
+        unsigned Kept() const { return kept_; }
+
+    private:
+        static const char* Name(wxl_interface_signature verdict)
+        {
+            switch (verdict)
+            {
+            case WXL_INTERFACE_SIGNATURE_MISSING:  return "no signature";
+            case WXL_INTERFACE_SIGNATURE_CORRUPT:  return "corrupt signature";
+            case WXL_INTERFACE_SIGNATURE_MODIFIED: return "modified";
+            default:                               return "unknown verdict";
+            }
+        }
+
+        unsigned accepted_ = 0;
+        unsigned kept_     = 0;
+    };
 
     class GlueUnlockMod final : public wxl::Mod
     {
     public:
         wxl_result OnLoad() override
         {
-            if (!g_patch)
+            if (!wxl::Raises(WXL_EV_InterfaceSignature))
             {
-                wxl::Log(WXL_LOG_ERROR, kTag, "wxl.patch is not published; nothing applied");
+                wxl::Log(WXL_LOG_ERROR, kTag, "this runtime raises no InterfaceSignature: the client checks signatures as it ships");
                 return WXL_E_UNSUPPORTED;
             }
-
-            wxl_patch applied[sizeof kEdits / sizeof kEdits[0]];
-            unsigned  count = 0, present = 0;
-            char      line[160];
-            for (const Edit& edit : kEdits)
-            {
-                // A client whose executable already carries the edit (a static patch) is left
-                // as it is: the check is bypassed either way.
-                if (g_patch->matches(edit.address, edit.patched, edit.size))
-                {
-                    ++present;
-                    continue;
-                }
-                const wxl_patch patch = g_patch->apply(edit.name, edit.address, edit.stock, edit.patched, edit.size);
-                if (patch == WXL_PATCH_NONE)
-                {
-                    std::snprintf(line, sizeof line, "%s @0x%08X refused; undoing %u edit(s) and standing down", edit.name, static_cast<unsigned>(edit.address), count);
-                    wxl::Log(WXL_LOG_ERROR, kTag, line);
-                    while (count) g_patch->restore(applied[--count]);
-                    return WXL_E_FAILED;
-                }
-                applied[count++] = patch;
-            }
-
-            std::snprintf(line, sizeof line, "signature check bypassed: %u edit(s) applied, %u already present", count, present);
-            wxl::Log(WXL_LOG_INFO, kTag, line);
+            wxl::ScriptMgr::Add(&unlock_);
+            wxl::Log(WXL_LOG_INFO, kTag, "interface files load whatever their signature");
             return WXL_OK;
         }
+
+        void OnShutdown() override
+        {
+            wxl::Log(WXL_LOG_INFO, kTag, "this session: {} interface file(s) taken as signed, loose folders kept {} time(s)",
+                     unlock_.Accepted(), unlock_.Kept());
+        }
+
+    private:
+        Unlock unlock_;
     };
 } // namespace
 

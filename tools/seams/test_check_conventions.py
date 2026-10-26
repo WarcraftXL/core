@@ -788,6 +788,11 @@ GROUND_TRUTH = {
     "ConsoleVar.Initialize":           ("0x00768340", "cdecl", [], 1),
     "ConsoleVar.DeleteCharacterCVars": ("0x00767350", "cdecl", [], 0),
     "ConsoleVar.DeleteAccountCVars":   ("0x007673A0", "cdecl", [], 0),
+    # FrameXML_CheckSignature reads its .toc at [ebp+8] (0x008165EA), its extra file at [ebp+0xC]
+    # and its digest at [ebp+0x14] (0x008166BE) and ends in bare `ret`s (0x00816647, 0x00816757);
+    # DeleteInterfaceFiles reads no stack and ends in a bare `ret` (0x005F4E2F).
+    "FrameXML.CheckSignature":         ("0x008165E0", "cdecl", [], 4),
+    "AddOns.DeleteInterfaceFiles":     ("0x005F4D90", "cdecl", [], 0),
     "Unit.SendMovementUpdate":         ("0x0071F0C0", "thiscall", ["ecx"], 7),
     # OnUpdateMoney is a mirror handler and reads none of its arguments; CallMirrorFunctions
     # (0x004D5238-0x004D5256) pushes the six dwords of MIRRORHANDLERFUNC, calls through
@@ -1023,6 +1028,16 @@ GROUND_TRUTH = {
     "CVarCall.Lookup":                 ("0x00767440", "cdecl", [], 1),
     "CVarCall.Register":               ("0x00767FC0", "cdecl", [], 9),
     "CVarCall.Set":                    ("0x007668C0", "thiscall", ["ecx"], 5),
+    # The interface signature's calls (calls_x86.def), read by hand: CheckSignature as its seam
+    # row; MD5Init reads its context at [ebp+8] (0x00779343) and ends in a bare `ret`
+    # (0x0077936A); ProcessFileForMakeSign reads up to [ebp+0x10] (0x008162B6) and ends in a bare
+    # `ret` (0x008164C4); MD5Update reads its length at [ebp+0x10] (0x00779A3E), MD5Final its
+    # context at [ebp+0xC] (0x00779AE7), both ending in bare `ret`s (0x00779B96 for MD5Final).
+    "InterfaceCall.CheckSignature":         ("0x008165E0", "cdecl", [], 4),
+    "InterfaceCall.MD5Init":                ("0x00779340", "cdecl", [], 1),
+    "InterfaceCall.ProcessFileForMakeSign": ("0x008162B0", "cdecl", [], 3),
+    "InterfaceCall.MD5Update":              ("0x00779A30", "cdecl", [], 3),
+    "InterfaceCall.MD5Final":               ("0x00779AE0", "cdecl", [], 2),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read

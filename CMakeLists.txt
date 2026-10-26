@@ -25,7 +25,9 @@ project(wxl-core VERSION 0.2.0 LANGUAGES NONE)
 
 set(WXL_CORE_ARCH "" CACHE STRING
     "Architecture of this build tree (win-x86 or win-x64). Set by the superbuild; empty builds every target.")
-option(WXL_CORE_MODS "Build the mods under mods/ (x86 only: both require wxl.patch)" ON)
+option(WXL_CORE_MODS "Build the mods under mods/, each for the architectures it lists" ON)
+set(WXL_CORE_MODS_DIR "" CACHE PATH
+    "Where the mods of mods/ land, as <dir>/<id>/{mod.json,bin/<arch>/}. Empty: <this tree>/<Config>/Mods")
 option(WXL_CORE_LUA "Build wxl.lua, the runtime of the Lua mods, from the SDK and ship it in Mods/" ON)
 option(WXL_PROFILE "Carry the Tracy profiler client, on demand, and publish wxl.profile; WarcraftXL.ini's [profile] starts it; OFF leaves no trace of it" ON)
 
@@ -507,8 +509,6 @@ if(WXL_CORE_LUA)
 endif()
 
 # --- The mods this runtime ships -------------------------------------------------------------------
-if(WXL_CORE_MODS AND WXL_CORE_X86)
+if(WXL_CORE_MODS)
     add_subdirectory(mods)
-elseif(WXL_CORE_MODS)
-    message(STATUS "wxl-core: mods skipped on ${WXL_CORE_ARCH} (both are win-x86 only)")
 endif()

@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Interface domain of the client binding: the client's judgement of an interface's
+// signature, as the FrameXML seam asks for it. Main thread only.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including interface.def"
+#endif
+
+// The client's verdict on a .toc: FrameXML_CheckSignature(toc, extra, modulus, digest), 0 no
+// .sig, 1 a corrupt one, 2 modified, 3 signed; `digest` written for 2 and 3. Called from inside
+// the FrameXML.CheckSignature gate, which lets this call through to the client's own check.
+// -1 outside the client.
+WXL_BINDING(interface_check_signature, int32_t, (const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest), (toc, extra, modulus, digest), -1)
+
+// The digest the client holds an interface to, computed as FrameXML_CheckSignature computes it
+// (CalculateSignatureMD5): MD5 over the .toc and every file it lists, as ProcessFileForMakeSign
+// walks them, then the bytes of `extra` when it exists (null or empty for none). WXL_FALSE
+// outside the client.
+WXL_BINDING(interface_signature_digest, wxl_bool, (const char* toc, const char* extra, uint8_t* digest), (toc, extra, digest), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

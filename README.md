@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.31-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.32-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -90,7 +90,7 @@ build/dist/
     bin/x86/WarcraftXL.dll
     bin/x86/wxl-core-patcher.exe
     bin/x64/WarcraftXL.dll
-    Mods/wxl.glue-unlock/{mod.json,bin/x86/glue-unlock.dll}
+    Mods/wxl.glue-unlock/{mod.json,bin/x86/glue-unlock.dll,bin/x64/glue-unlock.dll}
     Mods/wxl.named-archives/{mod.json,bin/x86/named-archives.dll}
     Mods/wxl.lua/{mod.json,LICENSE-LuaJIT.txt,bin/x86/wxl-lua.dll,bin/x64/wxl-lua.dll}
 ```
@@ -455,6 +455,8 @@ source. Everything else observes.
 | `Storm.SMemReAlloc` | `SMemReAlloc(void* ptr, size_t bytes, const char* filename, int32_t line, uint32_t flags)` | nothing: before, the block leaves the counts; after, what the call left comes back, under the file that moved it |
 | `Storm.SErrDisplayError` | `SErrDisplayError(uint32_t errorcode, const char* filename, int32_t linenumber, const char* description, int32_t recoverable, uint32_t exitcode, uint32_t unknown)`, Storm's error display: every fatal error, assertion and the exception filter's dialog | nothing: before, the error goes to `WarcraftXL.log`, flushed; a fatal one with its stack, the running mod, the last events and the session's end line |
 | `Os.ValidateFunctionPointer` (gated) | `OsValidateFunctionPointer(const void* ptr)`, the check of every C function the client's Lua calls, Lua hook, console command handler and CVar callback | nothing: the gate takes the call for a pointer in the runtime's image or a binary the mod host loaded; any other goes on to the client's check, fatal outside its `.text` |
+| `FrameXML.CheckSignature` (gated) | `FrameXML_CheckSignature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)`, the client's verdict on GlueXML.toc, FrameXML.toc and each add-on's .toc | `InterfaceSignature` with the .toc, the file hashed with it and the client's verdict, while a mod listens: the gate has the client judge, then answers its verdict, or signed for a file a mod accepted (the digest made as the client makes it where the verdict left it unwritten) |
+| `AddOns.DeleteInterfaceFiles` (gated) | `DeleteInterfaceFiles()`, at the login screens' start: loose `Interface\GlueXML`, `Interface\FrameXML` and `Interface\AddOns\Blizzard*` folders renamed to `.old` | `InterfaceCleanupRequest`; a mod that refuses it keeps the folders |
 | `Combat.UnitCombatLogAuraDose`, `Combat.UnitCombatLogAuraRefreshed` | `UnitCombatLogAuraDose(...)`, `UnitCombatLogAuraRefreshed(...)`, the combat log of an aura that stays in its slot | `UnitAuraRefreshed`, with the slot and the count before |
 | `Unit.MountDisplayIDUpdateHandler` | the mirror handler of `UNIT_FIELD_MOUNTDISPLAYID` | `UnitMountChanged` |
 | `Loot.SetObject` | `CGLootInfo::SetObject(CGObject_C*, int32_t coins, LOOT_ACQUIRE)`, the loot window put on an object or on nothing | `LootClosed` for the window it closes, `LootOpened` and a `LootSlot` per item for the new one |
@@ -487,16 +489,16 @@ the ABI and is appended, never renamed or dropped.
 
 ## 🧩 The mods it ships
 
-Two mods that do what a patcher used to do, so the patcher only has to bootstrap. Both are
-32-bit only and both declare `wxl.patch` as required, so any other runtime refuses them cleanly.
+Two mods that do what a patcher used to do, so the patcher only has to bootstrap.
 
-| Mod | What it does |
-|---|---|
-| `wxl.glue-unlock` | bypasses the Lua/XML signature check, so custom interface code loads |
-| `wxl.named-archives` | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted |
+| Mod | Clients | What it does |
+|---|---|---|
+| `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
+| `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
 
-Both read memory before writing: if the bytes are already in the patched state they log
-`already present` and do nothing.
+`wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
+logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it
+logs each file it took as signed (debug) and a count when the session ends.
 
 ## 📂 Layout
 

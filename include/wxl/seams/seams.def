@@ -133,6 +133,8 @@
 #include "wxl/seams/inputcontrol.def"
 #include "wxl/seams/corpse.def"
 #include "wxl/seams/projecttex.def"
+#include "wxl/seams/framexml.def"
+#include "wxl/seams/addons.def"
 
 #ifdef WXL_SEAM_RAISES_DEFAULTED
     #undef WXL_SEAM_RAISES

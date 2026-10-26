@@ -986,6 +986,41 @@ namespace wxl::core::binding
         std::memcpy(static_cast<uint8_t*>(cvar) + WXL_FIELD("CVar", "m_flags"), &flags, sizeof flags);
     }
 
+    // --- interface.def: an interface's signature ------------------------------------------
+
+    int32_t interface_check_signature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)
+    {
+        // FrameXML_CheckSignature(toc, extra, modulus, digest): cdecl, four dwords (0x008165E0).
+        // Its detour is the FrameXML.CheckSignature gate, which lets this call through.
+        if (!IsClient() || !OnMainThread() || !toc || !digest) return -1;
+        return x86::CallFree<int32_t>(WXL_SITE("FrameXML_CheckSignature", 0), toc, extra, modulus, digest);
+    }
+
+    wxl_bool interface_signature_digest(const char* toc, const char* extra, uint8_t* digest)
+    {
+        // CalculateSignatureMD5 (0x008164D0) takes `extra` in ESI; its steps are made here
+        // instead, by the same calls: MD5Init, ProcessFileForMakeSign(ctx, toc, ""), the bytes of
+        // `extra` read whole through the client's files, MD5Final(digest, ctx).
+        if (!IsClient() || !OnMainThread() || !toc || !digest) return WXL_FALSE;
+        alignas(8) uint8_t context[WXL_TYPE_SIZE("MD5_CTX")];
+        x86::CallFree<void>(WXL_SITE("MD5Init", 0), static_cast<void*>(context));
+        x86::CallFree<int32_t>(WXL_SITE("ProcessFileForMakeSign", 0), static_cast<void*>(context), toc, "");
+        if (extra && *extra)
+        {
+            if (void* file = file_open(extra))
+            {
+                std::vector<uint8_t> bytes(static_cast<std::size_t>(file_size(file)));
+                const uint32_t got = bytes.empty() ? 0 : file_read(file, bytes.data(), static_cast<uint32_t>(bytes.size()));
+                file_close(file);
+                if (got && got == bytes.size())
+                    x86::CallFree<void>(WXL_SITE("MD5Update", 0), static_cast<void*>(context),
+                                        static_cast<const uint8_t*>(bytes.data()), got);
+            }
+        }
+        x86::CallFree<void>(WXL_SITE("MD5Final", 0), digest, static_cast<void*>(context));
+        return WXL_TRUE;
+    }
+
     uint32_t m2_children(const void* model, void** out, uint32_t capacity)
     {
         if (!IsClient() || !model) return 0;

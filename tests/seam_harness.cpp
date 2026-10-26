@@ -431,6 +431,45 @@ namespace
         if (cvar) static_cast<FakeCVar*>(cvar)->flags = flags;
     }
 
+    // The client's signature check as the fake client answers it: the verdict to give, how many
+    // times it was asked, and whether the gate at its top let the runtime's own call through.
+    int32_t  g_sigVerdict     = 2;
+    uint32_t g_sigChecks      = 0;
+    uint32_t g_sigDigests     = 0;
+    bool     g_sigLetThrough  = false;
+
+    /// What the client's check does once the gate at its top has let it run: the digest written
+    /// for a verdict that gets that far (modified or signed).
+    int32_t FakeJudge(uint8_t* digest)
+    {
+        ++g_sigChecks;
+        if (g_sigVerdict >= WXL_INTERFACE_SIGNATURE_MODIFIED && digest) std::memset(digest, 0xAB, 16);
+        return g_sigVerdict;
+    }
+
+    /// The client's FrameXML_CheckSignature as the fork has it: the gate first, then the check.
+    int32_t (*g_sigClient)(const char*, const char*, const uint8_t*, uint8_t*) =
+        [](const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest) -> int32_t
+    {
+        int32_t  answer = -2;
+        uint8_t* out    = digest;
+        g_sigLetThrough = !wxl::seam::FrameXML::CheckSignature::Gate(&answer, &toc, &extra, &modulus, &out);
+        return g_sigLetThrough ? FakeJudge(digest) : answer;
+    };
+
+    int32_t WXL_CALL FakeCheckSignature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)
+    {
+        return g_sigClient(toc, extra, modulus, digest);
+    }
+
+    wxl_bool WXL_CALL FakeSignatureDigest(const char* toc, const char*, uint8_t* digest)
+    {
+        if (!toc || !digest) return WXL_FALSE;
+        ++g_sigDigests;
+        std::memset(digest, 0xCD, 16);
+        return WXL_TRUE;
+    }
+
     const char* WXL_CALL FakeGlueScreen(void) { return g_glueScreen; }
 
     /// A login object as the fake client keeps it: what its GetLoginServerType answers.
@@ -2154,6 +2193,8 @@ namespace
         init.cvar_register          = &FakeCVarRegister;
         init.cvar_set               = &FakeCVarSet;
         init.cvar_write_flags       = &FakeCVarWriteFlags;
+        init.interface_check_signature  = &FakeCheckSignature;
+        init.interface_signature_digest = &FakeSignatureDigest;
         init.glue_current_screen    = &FakeGlueScreen;
         init.login_server_type      = &FakeLoginServerType;
         init.chat_pending_last      = &FakePendingLast;
@@ -7434,6 +7475,89 @@ namespace
         g_host->SwapCurrentMod(previous);
     }
 
+    std::string_view SigText(wxl_str text) { return std::string_view(text.data ? text.data : "", text.size); }
+
+    /// Has every interface taken as signed, as wxl.glue-unlock does with GlueXML and FrameXML.
+    void WXL_CALL AcceptSignature(void*, const void* args)
+    {
+        *static_cast<const wxl_interface_signature_args*>(args)->accepted = WXL_TRUE;
+    }
+
+    /// Keeps the loose interface folders on disk.
+    void WXL_CALL RefuseCleanup(void*, const void* args)
+    {
+        *static_cast<const wxl_interface_cleanup_args*>(args)->refused = WXL_TRUE;
+    }
+
+    void CheckInterfaceSignature()
+    {
+        namespace sig = wxl::seam::FrameXML::CheckSignature;
+        uint8_t        digest[16]{};
+        const char*    toc    = "Interface\\FrameXML\\FrameXML.toc";
+        const char*    extra  = "Interface\\FrameXML\\Bindings.xml";
+        const uint8_t* key    = digest;
+        uint8_t*       out    = digest;
+        int32_t        result = -5;
+
+        g_sigChecks = g_sigDigests = 0;
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+        Mute(WXL_EV_InterfaceSignature);
+        Check(!sig::Gate(&result, &toc, &extra, &key, &out) && g_sigChecks == 0 && result == -5,
+              "FrameXML.CheckSignature: with nobody listening, the client checks alone");
+        Unmute(WXL_EV_InterfaceSignature);
+
+        g_received.clear();
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_MODIFIED &&
+                  g_sigChecks == 1 && g_sigLetThrough && digest[0] == 0xAB,
+              "listened to, the gate has the client judge (its own call let through) and answers the client's verdict");
+        const Received* judged = Only(WXL_EV_InterfaceSignature);
+        Check(judged && SigText(judged->As<wxl_interface_signature_args>().file) == toc &&
+                  SigText(judged->As<wxl_interface_signature_args>().extra) == extra &&
+                  judged->As<wxl_interface_signature_args>().verdict == WXL_INTERFACE_SIGNATURE_MODIFIED,
+              "and raises InterfaceSignature once, with the .toc, the file hashed with it and the verdict");
+
+        const wxl_subscription accept = g_host->Events().Subscribe(WXL_EV_InterfaceSignature, &AcceptSignature, nullptr, 0);
+        std::memset(digest, 0, sizeof digest);
+        result = -5;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED &&
+                  digest[0] == 0xAB && g_sigDigests == 0,
+              "a modified interface a handler accepts answers signed, with the digest the client made");
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MISSING;
+        std::memset(digest, 0, sizeof digest);
+        const char* glue = "Interface\\GlueXML\\GlueXML.toc";
+        const char* none = nullptr;
+        g_received.clear();
+        Check(sig::Gate(&result, &glue, &none, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED &&
+                  digest[0] == 0xCD && g_sigDigests == 1,
+              "one with no .sig answers signed too, its digest made as the client makes it, which it had not");
+        judged = Only(WXL_EV_InterfaceSignature);
+        Check(judged && judged->As<wxl_interface_signature_args>().extra.size == 0 &&
+                  judged->As<wxl_interface_signature_args>().verdict == WXL_INTERFACE_SIGNATURE_MISSING,
+              "GlueXML.toc is hashed alone: its extra file is empty");
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_SIGNED;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED && g_sigDigests == 1,
+              "a signed interface stays signed, nothing made again");
+        g_host->Events().Unsubscribe(accept);
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_CORRUPT;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_CORRUPT && g_sigDigests == 1,
+              "with no handler accepting, the client's verdict stands");
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+
+        namespace cleanup = wxl::seam::AddOns::DeleteInterfaceFiles;
+        Mute(WXL_EV_InterfaceCleanupRequest);
+        Check(!cleanup::Gate(), "AddOns.DeleteInterfaceFiles: with nobody listening, the client clears its folders");
+        Unmute(WXL_EV_InterfaceCleanupRequest);
+        g_received.clear();
+        Check(!cleanup::Gate() && Count(WXL_EV_InterfaceCleanupRequest) == 1,
+              "a request nobody refuses raises InterfaceCleanupRequest and lets the client clear them");
+        const wxl_subscription keep = g_host->Events().Subscribe(WXL_EV_InterfaceCleanupRequest, &RefuseCleanup, nullptr, 0);
+        Check(cleanup::Gate(), "a handler that refuses it takes the call: the folders stay");
+        g_host->Events().Unsubscribe(keep);
+    }
+
     void WXL_CALL OnGlueScreen(void* user, const void* args)
     {
         StrWatch&                   watch  = *static_cast<StrWatch*>(user);
@@ -9358,6 +9482,66 @@ namespace
         Check(g_espBefore == g_espAfter && g_ediAfter == reinterpret_cast<uintptr_t>(heap.get()) && g_validatorFatal == 1,
               "and hands any other pointer to the client's check, its fatal path, with the stack and EDI as they were");
         ValidateLink::original = nullptr;
+    }
+
+    // --- FrameXML_CheckSignature and DeleteInterfaceFiles, through their detours ---------------
+
+    /// The client's check behind the detour: what runs once the gate lets the call through.
+    __declspec(noinline) int32_t __cdecl FakeCheckOriginal(const char*, const char*, const uint8_t*, uint8_t* digest)
+    {
+        return FakeJudge(digest);
+    }
+
+    uint32_t g_cleared = 0;
+    __declspec(noinline) void __cdecl FakeDeleteOriginal() { ++g_cleared; }
+
+    using SignatureLink = wxl::core::seams::GateOf<wxl::seam::FrameXML::CheckSignature::Convention,
+                                                   wxl::seam::FrameXML::CheckSignature::Signature>::
+        Link<&wxl::seam::FrameXML::CheckSignature::Gate>;
+    using CleanupLink = wxl::core::seams::GateOf<wxl::seam::AddOns::DeleteInterfaceFiles::Convention,
+                                                 wxl::seam::AddOns::DeleteInterfaceFiles::Signature>::
+        Link<&wxl::seam::AddOns::DeleteInterfaceFiles::Gate>;
+    using SignatureFn = int32_t(__cdecl*)(const char*, const char*, const uint8_t*, uint8_t*);
+
+    void CheckInterfaceSignatureDetour()
+    {
+        // As on the stock client: the binding's call to the client's address enters the detour
+        // again, whose gate lets it through to the original.
+        SignatureLink::original = Opaque(&FakeCheckOriginal);
+        static SignatureFn detour;
+        detour = Opaque(reinterpret_cast<SignatureFn>(&SignatureLink::Detour));
+        auto* const before = g_sigClient;
+        g_sigClient = [](const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest) -> int32_t
+        { return detour(toc, extra, modulus, digest); };
+
+        uint8_t digest[16]{};
+        g_sigChecks = g_sigDigests = 0;
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+        Check(detour("Interface\\FrameXML\\FrameXML.toc", "Interface\\FrameXML\\Bindings.xml", nullptr, digest) ==
+                      WXL_INTERFACE_SIGNATURE_MODIFIED && g_sigChecks == 1,
+              "the FrameXML_CheckSignature detour, listened to: the client judges once, through the detour again");
+        const wxl_subscription accept = g_host->Events().Subscribe(WXL_EV_InterfaceSignature, &AcceptSignature, nullptr, 0);
+        Check(detour("Interface\\FrameXML\\FrameXML.toc", "Interface\\FrameXML\\Bindings.xml", nullptr, digest) ==
+                      WXL_INTERFACE_SIGNATURE_SIGNED && g_sigChecks == 2 && digest[0] == 0xAB,
+              "and answers signed in EAX for a file a handler accepts, the stack as the caller left it");
+        g_host->Events().Unsubscribe(accept);
+        Mute(WXL_EV_InterfaceSignature);
+        Check(detour("Interface\\GlueXML\\GlueXML.toc", nullptr, nullptr, digest) == WXL_INTERFACE_SIGNATURE_MODIFIED &&
+                  g_sigChecks == 3,
+              "with nobody listening, straight to the client's check");
+        Unmute(WXL_EV_InterfaceSignature);
+        g_sigClient = before;
+        SignatureLink::original = nullptr;
+
+        CleanupLink::original = Opaque(&FakeDeleteOriginal);
+        void (*const clear)() = Opaque(reinterpret_cast<void (*)()>(&CleanupLink::Detour));
+        g_cleared = 0;
+        clear();
+        const wxl_subscription keep = g_host->Events().Subscribe(WXL_EV_InterfaceCleanupRequest, &RefuseCleanup, nullptr, 0);
+        clear();
+        g_host->Events().Unsubscribe(keep);
+        Check(g_cleared == 1, "the DeleteInterfaceFiles detour runs the client's clearing unless a handler refuses it");
+        CleanupLink::original = nullptr;
     }
 
     // --- SFile::OpenEx's two rows, chained as Install links them, and CMapObj::Load ---------------
@@ -12477,6 +12661,7 @@ int main(int argc, char** argv)
     CheckWorldZoneMouseoverClick();
     CheckConsoleVar();
     CheckCVarService();
+    CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();
     CheckGlue();
     CheckChat();
@@ -12515,6 +12700,7 @@ int main(int argc, char** argv)
     CheckFindFileDetour();
     CheckValidatorDetour();
     CheckGameplayDetours();
+    CheckInterfaceSignatureDetour();
 #endif
     CheckEngineService();
     CheckPointTable();

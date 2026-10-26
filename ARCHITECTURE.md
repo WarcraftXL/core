@@ -333,6 +333,16 @@ Whatever path the click comes by, `PerformDefaultAction` is where the game acts 
 (`seams/worldframe.def`) raises `WorldClickRequest` with what the press noted under the pointer,
 and a mod that refuses it keeps the game from selecting, talking, looting or walking.
 
+The interface's signature is one function on both clients, `FrameXML_CheckSignature`, which the
+glue, the game and the add-on list each call for a .toc. Its gate (`seams/framexml.def`) has the
+client judge the file first, through the binding (`interface_check_signature`), whose call reaches
+the same gate again and is let through: on x86 the binding calls the client's address, which is
+the detour; on x64 the fork's function, whose first line is the gate. It then raises
+`InterfaceSignature` with the verdict and answers it, or signed for a file a mod accepted. The
+callers hold what they load to the digest the check wrote, which a missing or corrupt `.sig` leaves
+unwritten; `interface_signature_digest` makes it then as `CalculateSignatureMD5` does (on x86 by
+its own steps, since that function takes an argument in ESI).
+
 `wxl.pose` (`src/services/PoseService.cpp`) keeps the heads mods turned; after each
 `CGUnit_C::PreAnimate` (`Unit.PreAnimate`), where the game sets its own twist, the head moves on
 towards its target and is written as the head key bone's procedural transform.
