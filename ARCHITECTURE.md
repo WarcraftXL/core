@@ -397,6 +397,30 @@ alpha kept as a factor, so the game's own fades still play. Textures are made wi
 `CreateTexture` once per path and closed with their last look. With no look set, a circle costs
 the drawer's two calls and one load at the gate.
 
+### Textures from SVG and PNG
+
+`wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
+A request names a source (a mod's folder, read off the disk; any other name read through
+`wxl.storage`, so archives, served bytes and providers answer, with the disk beside the client as a
+fallback for `Interface\AddOns\`), a size, restyled groups and a tint. The source's bytes are
+hashed (FNV-1a) with the rest of the request into the texture's name,
+`Interface\WXL\<origin>\<stem>_<w>x<h>_<hash>.blp`: a name already known is answered at once. A new one
+is drawn by `src/imaging/` (nanosvg for SVG, its parsed shapes restyled by id before they are
+rasterized; stb_image for PNG, resampled with a Mitchell filter widened by the ratio; everything
+premultiplied in floats), padded to power-of-two edges (`GxTexCreate` refuses any other 2D texture
+and anything under 8), given its mips and written as an uncompressed BLP2 (colour encoding 3, alpha
+8, preferred ARGB8888: `PumpBlpTextureAsync` points the device's mips straight into the file),
+straight alpha with transparent pixels coloured from their neighbours. The bytes reach the client
+through one provider of the runtime's own (mod 0, priority 1000, `src/services/Assets.cpp`), which
+answers only names under `Interface\WXL\`: every loader on every thread reads them as a loose file,
+on both clients and under D3D9 and Vulkan alike. Names and their recipes (the source's bytes when
+under 1 MB) are kept up to 2048, the textures' bytes up to 64 MB; past the budget the least used
+bytes are let go and drawn again at the client's next open, past the count the least used name is
+forgotten. The interface's `WxlTexture` is a Lua wrapper run with no taint at each
+`FrameScript.CreateEvents` that starts a context, before the mods hear of it: it flattens the
+groups table (the binding reads no table) and calls a native function it keeps as an upvalue,
+taking it out of the globals. No new call into `Wow.exe`.
+
 ### The profiler
 
 WarcraftXL.dll carries the process's one Tracy client (`deps/tracy`, v0.14.1), compiled with

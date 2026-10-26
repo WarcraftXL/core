@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.29-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.30-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -255,6 +255,7 @@ What a mod can reach **today**, by build:
 | `wxl.imgui` (Dear ImGui, ImPlot) | yes: one context, drawn at the present with the D3D9 device (the SDK's copy and its Win32 and DX9 backends), the window's messages fed at the window procedure's gate | the same |
 | `wxl.highlight` (outline and glow) | yes: the batches of a highlighted object kept at `M2.DrawBatch` (bindings, vertex program, first texture and alpha test, and constants read from the engine's copy, the device being pure), drawn again after the world into two masks against the scene's depth with the game's alpha test, the device's bindings and registers put back as the engine believes them, the glow blurred at half size and the outline found in a full-screen pass, with programs compiled at build time (`src/gx/d3d9/`) | not yet: `supported` false, its reason the Vulkan renderer's render points to come |
 | `wxl.selectioncircle` (the game's circles) | yes: around each drawer of a circle (the target's, a corpse's, the pet's target's, the move marker's) a mod's texture is put in `CGObject_C::s_selectionTexture`, and `ProjectTex::Render2d`'s gate skips a hidden circle or points the projection at a scaled box and another colour; textures made with the client's `CreateTexture` | the same, the calls in the fork |
+| `wxl.texture` (SVG and PNG made into textures) | yes: an SVG rasterized (nanosvg) or a PNG decoded (stb_image) at the size asked, its groups restyled, written as an uncompressed BLP2 with its mips and served under `Interface\WXL\...` by a provider of the runtime's own, which every loader reads through the client's file stack; `WxlTexture` in both script contexts of the interface | the same |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -543,6 +544,10 @@ deps/spirv-headers/              SPIRV-Headers vulkan-sdk-1.4.357.0, Khronos (MI
 deps/glslang/                    glslang vulkan-sdk-1.4.357.0, BSD-3-Clause and others, built for the build
                                  machine only: it compiles the renderer's GLSL, nothing of it ships
 deps/spirv-tools/                SPIRV-Tools vulkan-sdk-1.4.357.0, Apache-2.0, built by the tests only (spirv-val)
+deps/nanosvg/                    nanosvg 239e102 (2026-07-10), zlib, unmodified: SVG parsed and rasterized (wxl.texture)
+deps/stb/                        stb_image 2.30 (stb 003501f), MIT or public domain, unmodified: PNG decoded (wxl.texture)
+src/imaging/                     wxl.texture's pictures: SVG groups restyled, the resampler, the mips, the BLP2 writer
+tests/imaging_tests.cpp          src/imaging/ pixel by pixel
 tools/seams/                     check the seam table against the fork and against Wow.exe
 tools/offsets/, tools/layouts/   regenerate the tables from the decompiled client
 tools/fields/                    regenerate the SDK's update-field table from the decompiled client
@@ -581,7 +586,8 @@ MIT. See [LICENSE](LICENSE).
 MinHook, under `deps/minhook/`, is BSD-2-Clause and keeps its own license file. Tracy's client,
 under `deps/tracy/`, is BSD-3-Clause and keeps its own license file. SafetyHook, under
 `deps/safetyhook/`, is BSL-1.0, and Zydis with Zycore, under `deps/zydis/`, are MIT; each keeps its
-own license file.
+own license file. nanosvg, under `deps/nanosvg/`, is under the zlib license, and stb_image, under
+`deps/stb/`, is MIT or public domain; each keeps its license file.
 
 <div align="center">
 
