@@ -104,8 +104,11 @@ of each table lists its shapes and columns.
 3. If its `conv` is `regparm`, a thunk in `core/src/seams/RegparmX86.cpp`.
 4. The calls in the fork, for the sides the row declares: `Before` at the top of the function,
    `After` before every return, `Gate` as a test at the top. A call that is busy and whose body only
-   raises one event goes inside `if (wxl::seam::Listening(WXL_EV_...))`. If the file's library is new to the
-   seams, add it to `WXL_SEAM_LIBRARIES` in `client/WarcraftXL/CMakeLists.txt`.
+   raises one event goes inside `if (wxl::seam::Listening(WXL_EV_...))`; a service of the runtime
+   whose work rides on such a seam holds that event's flag up while it needs the calls
+   (`listening::RuntimeWants`, `src/runtime/Listening.hpp`), or the client would skip them while no
+   mod listens. If the file's library is new to the seams, add it to `WXL_SEAM_LIBRARIES` in
+   `client/WarcraftXL/CMakeLists.txt`.
 5. A check in `core/tests/seam_harness.cpp` that drives the body.
 6. A row of hand-verified ground truth in `core/tools/seams/test_check_conventions.py`, and a
    `WXL_SEAM_WITNESS` row when the function's own code does not show what it takes (see
@@ -379,6 +382,13 @@ runtimes; what draws is the runtime's renderer. On the stock client it is
   of the interface after the pass would otherwise use a model's), the states the engine never sets
   go back to their value, and `gx_invalidate_state` has it send the rest.
 - `Gx.ReleaseD3dResources` takes its targets and programs; they are made again at the next draw.
+- While a highlight is set the service holds up `ModelBatchDrawn`'s flag, so that the x64 client
+  calls `M2.DrawBatch` with no mod listening to the event. Each world pass is counted (highlights,
+  top models found, model batches drawn, the highlighted models' ones, kept, drawn into the masks,
+  composed onto the scene): at `Gx.ScenePresent` one line under the `highlight` tag, at debug
+  level, about once a second while highlights are set, and every reason something was left out
+  (no model batch reached the service, no record of a draw, the fixed function, a refused pass)
+  logged once. `drawn` counts the batches of a pass that reached the scene, 0 when it did not.
 
 Its programs are HLSL (`src/gx/d3d9/shaders/highlight.hlsl`), compiled when the runtime is built
 by `wxl-core-d3d9-shaders` (`tools/shaders/compile_d3d9.cpp`, the system's d3dcompiler_47: under
@@ -682,9 +692,12 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   a seam body asks it before it reads the client for an event's args. The host tells the runtime
   when an event gains its first handler or loses its last (`SetListenHandler`), and the runtime
   keeps one byte per event, `wxl_core_listening` (`wxl/core/init.h`), which the x64 client tests
-  through `wxl::seam::Listening` before calling a seam whose body would only raise that event:
-  the busy ones (`Texture.Create`, `Storage.OpenEx`, the doodad and update seams) cost a load and
-  a branch there while nobody listens. On x86 the detour still runs; the body returns at once.
+  through `wxl::seam::Listening` before calling a busy seam that raises that event: the busy ones
+  (`Texture.Create`, `Storage.OpenEx`, the doodad and update seams, `M2.DrawBatch`) cost a load and
+  a branch there while nobody needs them. The byte is the mods' word or the runtime's own
+  (`src/runtime/Listening.cpp`): `wxl.highlight` holds up `ModelBatchDrawn`'s while a highlight is
+  set, since it keeps its batches at `M2.DrawBatch`. On x86 the detour still runs; the body returns
+  at once.
 - **Client and runtime come from one tree.** `WarcraftXLInit` compares the client's binding rows with
   its own and refuses a client built from a different table.
 
