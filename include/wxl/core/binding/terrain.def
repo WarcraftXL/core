@@ -53,8 +53,9 @@ WXL_BINDING(unit_fall_local, void, (const void* unit), (unit), (void)0)
 // the device. False for a null chunk or more than 4 layers.
 WXL_BINDING(terrain_render_chunk, wxl_bool, (const void* chunk, wxl_core_render_chunk* out), (chunk, out), WXL_FALSE)
 
-// The map's WDT as the client loaded it: its name and its MPHD flags (CMap::wdtFilename,
-// CMap::header.m_flags), which the caller may change before the map's tiles load. False without a client.
+// The map's WDT as the client loaded it: its name, its MPHD flags (CMap::wdtFilename,
+// CMap::header.m_flags) and its MAIN (CMap::m_areaInfo), which the caller may change before the
+// map's tiles load, and the map's folder and name. False without a client.
 WXL_BINDING(map_wdt, wxl_bool, (wxl_core_wdt* out), (out), WXL_FALSE)
 
 // The client checks its terrain programs against the map's flags again (CMap::ValidateShaders),

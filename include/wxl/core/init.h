@@ -183,8 +183,11 @@ typedef struct wxl_core_render_chunk
 /// The map's WDT as the client loaded it (binding map_wdt).
 typedef struct wxl_core_wdt
 {
-    const char* path;  ///< CMap::wdtFilename
-    uint32_t*   flags; ///< &CMap::header.m_flags: MPHD's flags, as the client reads them
+    const char* path;      ///< CMap::wdtFilename
+    uint32_t*   flags;     ///< &CMap::header.m_flags: MPHD's flags, as the client reads them
+    uint32_t*   tiles;     ///< CMap::m_areaInfo: MAIN, 4096 x {flags (1: the tile exists), unused}, 64 * y + x
+    const char* map_path;  ///< CMap::mapPath ("World\Maps\<map>")
+    const char* map_name;  ///< CMap::mapName
 } wxl_core_wdt;
 
 /// The ADT an area of the map was read from (binding terrain_area_file): CMapArea.

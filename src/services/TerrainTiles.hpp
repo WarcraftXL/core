@@ -43,6 +43,13 @@ namespace wxl::core::services::terrain_tiles
     bool CreateRefs(void* chunk, void* area, const uint32_t* refs, uint32_t doodadRefs, uint32_t mapObjRefs);
     void AreaFreeing(void* area);
 
+    /// The map's WDT was read (seam Map.LoadWdt After, after terrain_layers::WdtLoaded). For a WDT
+    /// of later clients (MPHD 0x80 or 0x200, or MAID), each tile MAIN marks present whose root
+    /// (<map path>\<map>_<x>_<y>.adt) the client's files do not have is marked absent: the client
+    /// would end on it (CMap::SafeOpen's fatal error in CMapArea::Load). One warning lists them.
+    /// A WDT of 3.3.5a's layout is left as it is. Answers how many were marked absent.
+    uint32_t WdtLoaded();
+
     /// The client shuts down.
     void Clear();
 
@@ -59,6 +66,7 @@ namespace wxl::core::services::terrain_tiles
         uint64_t liquidFormats = 0; ///< MH2O instances given a vertex format this client reads
         uint64_t liquidTypes = 0;   ///< MH2O instances given a liquid type this client has
         uint64_t liquidsDropped = 0; ///< MH2O chunks out of bounds, left dry
+        uint64_t tilesAbsent = 0;    ///< tiles a later WDT marks present, absent from the files
     };
     const Counters& Count();
     /// Areas held now.

@@ -77,7 +77,12 @@ namespace wxl::seam::Map::CreateDoodadDefInMapObj
 
 namespace wxl::seam::Map::LoadWdt
 {
-    void WXL_CALL After() { wxl::core::services::terrain_layers::WdtLoaded(); }
+    void WXL_CALL After()
+    {
+        wxl::core::services::terrain_layers::WdtLoaded();
+        // Tiles a later client's WDT announces that the files do not have are not loaded.
+        wxl::core::services::terrain_tiles::WdtLoaded();
+    }
 }
 
 namespace wxl::seam::Map::Unload

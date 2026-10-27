@@ -1215,6 +1215,9 @@ namespace wxl::core::binding
         if (!IsClient() || !out) return WXL_FALSE;
         out->path  = reinterpret_cast<const char*>(WXL_STATIC("CMap::wdtFilename"));
         out->flags = reinterpret_cast<uint32_t*>(WXL_STATIC("CMap::header")); // SMMapHeader::m_flags, its first field
+        out->tiles    = reinterpret_cast<uint32_t*>(WXL_STATIC("CMap::m_areaInfo")); // SMAreaInfo[4096]: m_flags, m_unused
+        out->map_path = reinterpret_cast<const char*>(WXL_STATIC("CMap::mapPath"));
+        out->map_name = reinterpret_cast<const char*>(WXL_STATIC("CMap::mapName"));
         return WXL_TRUE;
     }
 

@@ -17,6 +17,7 @@
 #include "wxl/host/mod_host.hpp"
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -589,6 +590,39 @@ namespace wxl::core::services::terrain_tiles
     }
 
     void AreaFreeing(void* area) { Drop(area); }
+
+    uint32_t WdtLoaded()
+    {
+        wxl_core_wdt wdt{};
+        if (wxl::core::binding::map_wdt(&wdt) != WXL_TRUE || !wdt.flags || !wdt.tiles || !wdt.map_path || !wdt.map_name) return 0;
+        // A WDT of later clients: height texturing (0x80), MAID (0x200, or the chunk itself).
+        const std::vector<uint8_t>& bytes = terrain_layers::Wdt();
+        bool                        later = (*wdt.flags & (0x80u | 0x200u)) != 0;
+        for (size_t at = 0; !later && at + 8 <= bytes.size();)
+        {
+            later = std::memcmp(bytes.data() + at, "DIAM", 4) == 0;
+            at += 8 + static_cast<size_t>(Get32(bytes.data() + at + 4));
+        }
+        if (!later) return 0;
+        uint32_t    missing = 0, present = 0;
+        std::string listed;
+        char        name[300];
+        for (uint32_t i = 0; i < 4096; ++i)
+        {
+            if (!(wdt.tiles[2 * i] & 1u)) continue;
+            ++present;
+            std::snprintf(name, sizeof name, "%s\\%s_%u_%u.adt", wdt.map_path, wdt.map_name, i % 64, i / 64);
+            if (wxl::core::binding::file_exists(name) == WXL_TRUE) continue;
+            wdt.tiles[2 * i] &= ~1u;
+            ++missing;
+            if (listed.size() < 600) listed += (listed.empty() ? "" : " ") + std::to_string(i % 64) + "_" + std::to_string(i / 64);
+        }
+        g_counters.tilesAbsent += missing;
+        if (missing)
+            WLOG_WARN(kTag, "%s marks %u of its %u tile(s) present that its files do not have (x_y: %s%s): they are not loaded, the ground there is empty",
+                      wdt.path ? wdt.path : "the map's WDT", missing, present, listed.c_str(), listed.size() >= 600 ? " ..." : "");
+        return missing;
+    }
 
     void Clear()
     {
