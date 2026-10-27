@@ -4294,6 +4294,39 @@ namespace
         layers::Clear();
     }
 
+    // A tile whose chunks name more layers than the client holds: cut to 4 before its chunks are walked.
+    void CheckTerrainLayerLimit()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        std::vector<uint8_t> file;
+        const auto put = [&file](uint32_t v) {
+            for (int i = 0; i < 4; ++i) file.push_back(static_cast<uint8_t>(v >> (8 * i)));
+        };
+        put(0x4D564552u); // MVER
+        put(4);
+        put(18);
+        const uint32_t named[3] = {8, 4, 6};
+        size_t         at[3]    = {};
+        for (int c = 0; c < 3; ++c)
+        {
+            put(0x4D434E4Bu); // MCNK, its 128-byte header and nothing else
+            put(128);
+            at[c] = file.size();
+            file.resize(file.size() + 128, 0);
+            std::memcpy(&file[at[c] + 0x0C], &named[c], 4);
+        }
+        const uint64_t before = layers::Count().chunks_cut;
+        const uint32_t cut    = layers::TileLoading(file.data(), static_cast<uint32_t>(file.size()));
+        uint32_t       now[3];
+        for (int c = 0; c < 3; ++c) std::memcpy(&now[c], &file[at[c] + 0x0C], 4);
+        Check(cut == 2 && now[0] == 4 && now[1] == 4 && now[2] == 4 && layers::Count().chunks_cut == before + 2,
+              "terrain layers: an MCNK naming 8 or 6 layers is cut to the client's 4 as its tile is read, one of 4 left");
+        file.resize(file.size() - 64); // the last MCNK cut short: not read past the end
+        std::memcpy(&file[at[2] + 0x0C], &named[2], 4);
+        Check(layers::TileLoading(file.data(), static_cast<uint32_t>(file.size())) == 0, "terrain layers: a chunk running past the file's end is left");
+        Check(layers::TileLoading(nullptr, 64) == 0, "terrain layers: no bytes, nothing");
+    }
+
     // abi 0.1.43: a program made from a shader provider's answer, on Direct3D 9 and Vulkan.
     void CheckShaderCode()
     {
@@ -15390,6 +15423,7 @@ int main(int argc, char** argv)
     CheckTerrainService();
     CheckTerrainLayers();
     CheckTerrainLayerExtras();
+    CheckTerrainLayerLimit();
     CheckShaderCode();
     CheckDraw();
     CheckInterfaceSignature();
