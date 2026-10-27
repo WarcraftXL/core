@@ -1,0 +1,12 @@
+#version 460
+// A COMPUTE program of the tests: row i of the buffer at an address becomes (i / 255, g, b, 1).
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer Rows { vec4 rows[]; };
+layout(push_constant) uniform Push { uvec2 rows; uint count; uint pad; vec4 color; } pc;
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i < pc.count) Rows(pc.rows).rows[i] = vec4(float(i) / 255.0, pc.color.g, pc.color.b, 1.0);
+}

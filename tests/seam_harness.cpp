@@ -11588,6 +11588,14 @@ namespace
         Check(r.replace_shader(wxl_str{"Diffuse", 7}, 1, &word, 4) == WXL_E_UNSUPPORTED &&
                   r.restore_shader(wxl_str{"Diffuse", 7}, 1) == WXL_E_UNSUPPORTED,
               "no shader of the client is replaced");
+        desc.kind = WXL_RENDER_PIPELINE_COMPUTE;
+        desc.compute = &word;
+        desc.compute_size = 4;
+        const float matrix[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        uint64_t    palette    = 1;
+        Check(r.create_pipeline(&desc) == WXL_HANDLE_NONE && r.dispatch(16, 1, 1, 1, nullptr, 0) == WXL_E_UNSUPPORTED &&
+                  r.bone_palette(matrix, sizeof matrix, &palette) == WXL_E_UNSUPPORTED && palette == 0,
+              "no compute pipeline, no dispatch, no bone palette");
         r.end();
         r.destroy_image(16);
         uint64_t out = 0;

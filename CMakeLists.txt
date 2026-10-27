@@ -359,7 +359,7 @@ endif()
 # refused, VMA, the timeline, a clear read back. Skipped (77) on a machine without a Vulkan 1.3 device.
 add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cpp tests/vk/capture_tests.cpp
     tests/vk/draw_tests.cpp tests/vk/spirv_tests.cpp tests/vk/translate_tests.cpp tests/vk/v4_tests.cpp
-    tests/vk/parity_tests.cpp tests/vk/render_tests.cpp)
+    tests/vk/parity_tests.cpp tests/vk/render_tests.cpp tests/vk/v7_tests.cpp)
 target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
 include(tests/vk/programs.cmake)
 wxl_vk_add_test_programs(wxl-core-vk-tests)

@@ -392,6 +392,7 @@ int main()
     if (live) wxl::vk::test::ParityLiveCases();
     if (live) wxl::vk::test::TranslateLiveCases();
     if (live) wxl::vk::test::RenderLiveCases();
+    if (live) wxl::vk::test::V7LiveCases();
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
     if (g_failures) return 1;

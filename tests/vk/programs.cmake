@@ -12,6 +12,9 @@ function(wxl_vk_add_test_programs target)
         render_flat_frag=${glsl}/render_flat.frag
         render_pulled_vert=${glsl}/render_pulled.vert
         render_pulled_frag=${glsl}/render_pulled.frag
+        render_rows_frag=${glsl}/render_rows.frag
+        render_fill_comp=${glsl}/render_fill.comp
+        render_bones_frag=${glsl}/render_bones.frag
         # The SDK's example mod wxl.outline, its programs drawn here as the mod draws them.
         outline_mask_frag=${WXL_SDK_DIR}/examples/outline/shaders/mask.frag
         outline_edge_frag=${WXL_SDK_DIR}/examples/outline/shaders/edge.frag)

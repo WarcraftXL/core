@@ -47,6 +47,11 @@ namespace wxl::vk::test
     /// buffers, GPU zones, the device made again, and the highlight against the Direct3D 9 algorithm.
     bool RenderLiveCases();
 
+    /// V7 on the driver: the bone palette read by skinned programs (past 64 bones, beside the
+    /// fixed-function pixel program, in a batch drawn again), 32-bit index pools, 4096 and 8192
+    /// textures, wxl.render's compute pipelines, dispatches and palettes.
+    bool V7LiveCases();
+
     /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
     /// build has no validator (SPIRV-Tools is built in the native test tree only).
     bool SpirvValidation();
