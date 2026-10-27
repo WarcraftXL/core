@@ -6,6 +6,7 @@
 
 #include "gx/x86/Adapter.hpp"
 
+#include "services/TerrainLayers.hpp"
 #include "common/Log.hpp"
 #include "hook/Engine.hpp"
 #include "runtime/Session.hpp"
@@ -1215,9 +1216,11 @@ namespace wxl::core::gx::x86::slots
     {
         engine::CGxDevice* dev = Dev(self);
         if (!dev->m_context || dev->m_intF5C || !g.made) return;
+        wxl::core::services::terrain_layers::BeforeDraw(batch); // before the state is flushed, as the D3D9 devices' seams
         ShaderConstantsFlush(self);
         S().GxCall_IRsSync(self, nullptr, 0);
         g.vk->draw(self, static_cast<const wxl_gx_batch*>(batch), count);
+        wxl::core::services::terrain_layers::AfterDraw(batch);
     }
 
     void __fastcall PoolSizeSet(void* self, void*, void* pool, uint32_t size)

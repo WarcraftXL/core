@@ -167,6 +167,26 @@ typedef struct wxl_core_terrain_chunk
     uint32_t holes;   ///< m_header->m_holes: the 16-bit hole mask
 } wxl_core_terrain_chunk;
 
+/// A terrain render chunk's layers (binding terrain_render_chunk): CMapRenderChunk.
+typedef struct wxl_core_render_chunk
+{
+    uint32_t    layers;            ///< m_layersCount: 0 to 4
+    uint32_t    render_flags;      ///< m_renderFlags: 0x4 the first layer specular (its texture stage a reflection map)
+    uint32_t    layer_flags[4];    ///< each layer's m_flags (MCLY's)
+    uint32_t    layer_texture[4];  ///< each layer's m_textureId: its MTEX index
+    const void* batch;             ///< &m_batch: what every draw of the chunk's layers hands the device
+    const void* map_chunk;         ///< m_mapChunks[0]: the CMapChunk it draws
+} wxl_core_render_chunk;
+
+/// The ADT an area of the map was read from (binding terrain_area_file): CMapArea.
+typedef struct wxl_core_area_file
+{
+    int32_t     tile_x; ///< m_index.x
+    int32_t     tile_y; ///< m_index.y
+    const void* data;   ///< m_fileBuffer: the whole file, MVER first
+    uint32_t    size;   ///< m_fileSize
+} wxl_core_area_file;
+
 /// How the world is being drawn (binding gx_world_view): the engine's matrices, rows a..d of
 /// C44Matrix, which a point taken from `eye` is multiplied by on the left: clip = [p 1] * view *
 /// projection.

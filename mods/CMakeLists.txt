@@ -35,6 +35,7 @@ endfunction()
 # wxl_add_mod builds a mod for the tree's architecture whatever its TARGETS, so a mod that lists one
 # architecture is only added on that one.
 add_subdirectory(wxl.glue-unlock)
+add_subdirectory(wxl.modern-adt)
 if(WXL_CORE_X86)
     add_subdirectory(wxl.named-archives)
 endif()

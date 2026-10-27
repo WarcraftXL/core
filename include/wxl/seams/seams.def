@@ -137,6 +137,7 @@
 #include "wxl/seams/framexml.def"
 #include "wxl/seams/addons.def"
 #include "wxl/seams/worldscene.def"
+#include "wxl/seams/maprenderchunk.def"
 
 #ifdef WXL_SEAM_RAISES_DEFAULTED
     #undef WXL_SEAM_RAISES

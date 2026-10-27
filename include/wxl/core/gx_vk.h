@@ -247,6 +247,15 @@ typedef struct wxl_gx_vk_backend
      *        d1), (a2 b2 c2 d2)). It stays until the next one.
      */
     void(WXL_CALL* bone_palette)(void* device, const float* bones, uint32_t count);
+
+    /**
+     * @brief A draw of the engine begins (first thing in CGxDevice::Draw, before its constants and
+     *        render states are flushed) and ends (after `draw`): what the runtime changes in the
+     *        engine's state for one draw (wxl.terrain's layers) is set, then given back; the D3D9
+     *        devices do the same through the seams Gx.D3dDraw and Gx.D3d9ExDraw.
+     */
+    void(WXL_CALL* draw_begin)(void* device, const wxl_gx_batch* batch, int32_t count);
+    void(WXL_CALL* draw_end)(void* device, const wxl_gx_batch* batch, int32_t count);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

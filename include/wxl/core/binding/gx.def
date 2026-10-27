@@ -52,6 +52,18 @@ WXL_BINDING(gx_world_view, wxl_bool, (wxl_core_world_view* out), (out), WXL_FALS
 // no device. For wxl.draw, which draws with it outside the engine's states.
 WXL_BINDING(gx_texture_ready, void*, (void* texture), (texture), 0)
 
+// Vertex program constants rows `first` to `first + count - 1`, as the engine sets them
+// (GxShaderConstantsSet(GxSh_Vertex, ...)): kept by the device and sent at its next draw.
+WXL_BINDING(gx_vertex_constants_set, void, (uint32_t first, const float* rows, uint32_t count), (first, rows, count), (void)0)
+
+// The matrix at the top of the device's transform stack `xform` (EGxXform: GxXform_Tex0 + i for
+// texture stage i), 16 floats row by row; false without a device.
+WXL_BINDING(gx_xform_get, wxl_bool, (uint32_t xform, float* matrix), (xform, matrix), WXL_FALSE)
+
+// The top of transform stack `xform` set to `matrix` as the engine sets it (GxXformSet): sent at
+// the device's next draw.
+WXL_BINDING(gx_xform_set, void, (uint32_t xform, const float* matrix), (xform, matrix), (void)0)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

@@ -48,6 +48,8 @@ WXL_BINDING_CALL_X86(ObjectCall, CanHighlight, "CGGameObject_C::CanHighlight", b
 WXL_BINDING_CALL_X86(TextureCall, CreateTexture, "CreateTexture", void*, cdecl, (const char* path, void* status))
 WXL_BINDING_CALL_X86(TextureCall, GetGlobalStatusObj, "GetGlobalStatusObj", void*, cdecl, ())
 WXL_BINDING_CALL_X86(TextureCall, HandleClose, "HandleClose", void, cdecl, (void* handle))
+WXL_BINDING_CALL_X86(GxCall, ShaderConstantsSet, "GxShaderConstantsSet", void, cdecl, (uint32_t target, uint32_t index, const float* constants, uint32_t count))
+WXL_BINDING_CALL_X86(GxCall, XformSet, "GxXformSet", void, cdecl, (uint32_t xf, const void* matrix))
 WXL_BINDING_CALL_X86(CVarCall, Lookup, "CVar::Lookup", void*, cdecl, (const char* name))
 WXL_BINDING_CALL_X86(CVarCall, Register, "CVar::Register", void*, cdecl, (const char* name, const char* help, uint32_t flags, const char* value, void* callback, uint32_t category, uint8_t set_command, void* arg, uint8_t unk))
 WXL_BINDING_CALL_X86(CVarCall, Set, "CVar::Set@0x007668C0", bool, thiscall, (void* self, const char* value, uint8_t set_value, uint8_t set_reset, uint8_t set_default, uint8_t set_needs_save))

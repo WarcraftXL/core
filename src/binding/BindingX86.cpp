@@ -817,6 +817,33 @@ namespace wxl::core::binding
         return Read<void*>(gx, WXL_FIELD("CGxTex", "m_apiSpecificData")) ? gx : nullptr;
     }
 
+    void gx_vertex_constants_set(uint32_t first, const float* rows, uint32_t count)
+    {
+        // GxShaderConstantsSet(target, index, constants, count): cdecl, four dwords (0x00408210);
+        // GxSh_Vertex is 0.
+        if (IsClient() && OnMainThread() && rows && count && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxShaderConstantsSet", 0), uint32_t{0}, first, rows, count);
+    }
+
+    wxl_bool gx_xform_get(uint32_t xform, float* matrix)
+    {
+        const void* device = IsClient() ? GxDevice() : nullptr;
+        if (!device || !matrix || xform > 10) return WXL_FALSE;
+        const std::size_t stack = WXL_FIELD("CGxDevice", "m_xforms") + xform * WXL_TYPE_SIZE("CGxMatrixStack");
+        uint32_t          level = Read<uint32_t>(device, stack + WXL_FIELD("CGxMatrixStack", "m_level"));
+        if (level > 3) level = 3;
+        std::memcpy(matrix, static_cast<const char*>(device) + stack + WXL_FIELD("CGxMatrixStack", "m_mtx") + level * 16 * sizeof(float),
+                    16 * sizeof(float));
+        return WXL_TRUE;
+    }
+
+    void gx_xform_set(uint32_t xform, const float* matrix)
+    {
+        // GxXformSet(xf, matrix): cdecl, two dwords (0x0057C450): the stack's top, marked dirty.
+        if (IsClient() && OnMainThread() && matrix && xform <= 10 && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxXformSet", 0), xform, static_cast<const void*>(matrix));
+    }
+
     void* gx_d3d9_device()
     {
         // Under Vulkan the device keeps D3D9's EGxApi (so the engine takes D3D9's paths), but no
@@ -1089,6 +1116,40 @@ namespace wxl::core::binding
     {
         // HandleClose(handle): cdecl, one dword (0x0047BF30).
         if (IsClient() && OnMainThread() && texture) x86::CallFree<void>(WXL_SITE("HandleClose", 0), texture);
+    }
+
+    wxl_bool terrain_render_chunk(const void* chunk, wxl_core_render_chunk* out)
+    {
+        if (!IsClient() || !chunk || !out) return WXL_FALSE;
+        const uint32_t layers = Read<uint8_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_layersCount"));
+        if (layers > 4) return WXL_FALSE;
+        *out              = wxl_core_render_chunk{};
+        out->layers       = layers;
+        out->render_flags = Read<uint16_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_renderFlags"));
+        for (uint32_t i = 0; i < layers; ++i)
+        {
+            const std::size_t at   = WXL_FIELD("CMapRenderChunk", "m_layers") + i * WXL_TYPE_SIZE("CMapRenderChunkLayer");
+            out->layer_flags[i]   = Read<uint16_t>(chunk, at + WXL_FIELD("CMapRenderChunkLayer", "m_flags"));
+            out->layer_texture[i] = Read<uint32_t>(chunk, at + WXL_FIELD("CMapRenderChunkLayer", "m_textureId"));
+        }
+        out->batch     = static_cast<const char*>(chunk) + WXL_FIELD("CMapRenderChunk", "m_batch");
+        out->map_chunk = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+        return WXL_TRUE;
+    }
+
+    wxl_bool terrain_area_file(const void* area, wxl_core_area_file* out)
+    {
+        if (!IsClient() || !area || !out) return WXL_FALSE;
+        out->tile_x = Read<int32_t>(area, WXL_FIELD("CMapArea", "m_index.x"));
+        out->tile_y = Read<int32_t>(area, WXL_FIELD("CMapArea", "m_index.y"));
+        out->data   = Read<const void*>(area, WXL_FIELD("CMapArea", "m_fileBuffer"));
+        out->size   = Read<uint32_t>(area, WXL_FIELD("CMapArea", "m_fileSize"));
+        return out->data && out->size ? WXL_TRUE : WXL_FALSE;
+    }
+
+    const float* terrain_vertex_constants()
+    {
+        return IsClient() ? reinterpret_cast<const float*>(WXL_STATIC("CMapRenderChunk::s_vertexShaderConsts")) : nullptr;
     }
 
     void* cvar_lookup(const char* name)

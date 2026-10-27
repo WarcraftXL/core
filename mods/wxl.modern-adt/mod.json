@@ -1,0 +1,15 @@
+{
+  "$schema": "../../../sdk/schema/mod.json",
+  "id": "wxl.modern-adt",
+  "name": "Modern ADT",
+  "version": "1.0.0",
+  "abi": "0.1.42",
+  "description": "Later expansions' ADT data read by the 3.3.5a client: retail's per-texture scale (MTXP, MTXF) on the maps that carry it; height blending and newer chunks to come.",
+  "binaries": {
+    "win-x86": "bin/x86/modern-adt.dll",
+    "win-x64": "bin/x64/modern-adt.dll"
+  },
+  "requires": [
+    { "service": "wxl.terrain", "version": 1 }
+  ]
+}

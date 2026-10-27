@@ -27,6 +27,7 @@
 #include "services/TextureService.hpp"
 #include "services/CVarService.hpp"
 #include "services/TerrainService.hpp"
+#include "services/TerrainLayers.hpp"
 #include "services/DrawService.hpp"
 #include "services/M2Service.hpp"
 #include "services/Hashes.hpp"
@@ -71,6 +72,7 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::texture::Clear();
         wxl::core::services::cvar::Clear();
         wxl::core::services::terrain::Clear();
+        wxl::core::services::terrain_layers::Clear();
         wxl::core::services::draw::Clear();
         wxl::core::services::animation::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
