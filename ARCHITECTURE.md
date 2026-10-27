@@ -839,6 +839,15 @@ first lines of the `Errors\` file written during it (the message and the `Curren
 - **A faulting mod is disabled, not unloaded.** Its handlers are dropped, its later entry points
   skipped, its binary left mapped. A mod that fails where the guard cannot see -- a C++ exception
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
+- **The client's script state is left as it was found.** Between frames the client ends the process
+  when its Lua stack is not empty (`CGGameUI::Idle`, error #134). Every call the runtime makes into
+  the state -- `wxl.script`'s `run`, `fire_event`, `register_function`, its event table, and the
+  raise of `ScriptVmReady` and `ScriptVmClosing`, whose handlers get the state -- goes through
+  `services::script::Keep`: it marks the state (binding `script_mark`) and its top before, runs the
+  call under the guard, and after drops the calls a fault left unfinished (`script_unwind`, what
+  `luaD_pcall` does on an error) and puts back a top that moved, with one warning per path. A
+  fault inside a chunk or an event's handlers fails the call (`WXL_E_FAILED`, one error naming the
+  fault) the way a Lua error would, and does not disable the mod that made it.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
   memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its edits of the ground, its animations on units, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in

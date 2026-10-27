@@ -112,6 +112,8 @@ namespace
     using ScriptExecute    = void(__cdecl*)(const char* source, const char* name, const char* taint);
     using ScriptCreateEvts = void(__cdecl*)(const char** names, uint32_t count);
     using ScriptSignal     = void(__cdecl*)(uint32_t index, void* L, int32_t arg_count);
+    using LuaFClose        = void(__cdecl*)(void* L, void* level);
+    using LuaDReallocCI    = void(__cdecl*)(void* L, int32_t size);
 
     // The client's file layer. STORMAPI is __stdcall, and every one of these has external
     // linkage, so the convention they are declared with is the convention they carry.
@@ -196,6 +198,34 @@ namespace
     ScriptExecute    ScriptExecuteAt() { return reinterpret_cast<ScriptExecute>(WXL_SITE_AT("FrameScript_Execute", 0x00819210, 0)); }
     ScriptCreateEvts ScriptCreateEventsAt() { return reinterpret_cast<ScriptCreateEvts>(WXL_SITE("FrameScript_CreateEvents", 0)); }
     ScriptSignal     ScriptSignalEventAt() { return reinterpret_cast<ScriptSignal>(WXL_SITE_AT("FrameScript_SignalEvent", 0x0081AA00, 0)); }
+    LuaFClose        LuaFCloseAt() { return reinterpret_cast<LuaFClose>(WXL_SITE("luaF_close", 0)); }
+    LuaDReallocCI    LuaDReallocCIAt() { return reinterpret_cast<LuaDReallocCI>(WXL_SITE("luaD_reallocCI", 0)); }
+
+    // --- A mark of the script state: what luaD_pcall keeps before a protected call (ldo.c) -----
+
+    /// The words of a wxl_script_mark on this side.
+    enum MarkWord : uint32_t
+    {
+        kMarkTop,             ///< L->top, as an offset from L->stack
+        kMarkCall,            ///< L->ci, as an offset from L->base_ci
+        kMarkCCalls,          ///< L->nCcalls
+        kMarkAllowHook,       ///< L->allowhook
+        kMarkErrFunc,         ///< L->errfunc
+        kMarkErrorJmp,        ///< L->errorJmp
+        kMarkTainted,         ///< lua_tainted
+        kMarkTaintExpected,   ///< lua_taintexpected
+        kMarkTaintedClosure,  ///< lua_taintedclosure
+    };
+
+    constexpr int32_t kLuaTFunction = 6;     // LUA_TFUNCTION
+    constexpr int32_t kLuaMaxCalls  = 20000; // LUAI_MAXCALLS, the call array's limit
+
+    /// A member of the client's state, by reference.
+    template <typename T>
+    T& Slot(void* base, std::size_t offset)
+    {
+        return *reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset);
+    }
 
     uint32_t ValueType(int32_t luaType)
     {
@@ -539,6 +569,71 @@ namespace wxl::core::binding
     void script_signal_event(uint32_t index, void* state, int32_t arg_count)
     {
         if (IsClient() && state) ScriptSignalEventAt()(index, state, arg_count);
+    }
+
+    void script_mark(void* state, wxl_script_mark* mark)
+    {
+        if (!mark) return;
+        *mark = wxl_script_mark{};
+        if (!IsClient() || !state) return;
+        uint8_t* const stack = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "stack"));
+        uint8_t* const calls = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "base_ci"));
+        mark->words[kMarkTop]       = static_cast<uintptr_t>(Slot<uint8_t*>(state, WXL_FIELD("lua_State", "top")) - stack);
+        mark->words[kMarkCall]      = static_cast<uintptr_t>(Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci")) - calls);
+        mark->words[kMarkCCalls]    = Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls"));
+        mark->words[kMarkAllowHook] = Slot<uint8_t>(state, WXL_FIELD("lua_State", "allowhook"));
+        mark->words[kMarkErrFunc]   = static_cast<uintptr_t>(Slot<int32_t>(state, WXL_FIELD("lua_State", "errfunc")));
+        mark->words[kMarkErrorJmp]  = reinterpret_cast<uintptr_t>(Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp")));
+        mark->words[kMarkTainted]   = *reinterpret_cast<const uintptr_t*>(WXL_STATIC("lua_tainted"));
+        mark->words[kMarkTaintExpected]  = static_cast<uintptr_t>(*reinterpret_cast<const int32_t*>(WXL_STATIC("lua_taintexpected")));
+        mark->words[kMarkTaintedClosure] = static_cast<uintptr_t>(*reinterpret_cast<const int32_t*>(WXL_STATIC("lua_taintedclosure")));
+    }
+
+    wxl_bool script_unwind(void* state, const wxl_script_mark* mark)
+    {
+        if (!IsClient() || !state || !mark) return WXL_FALSE;
+        constexpr std::size_t kCall = WXL_TYPE_SIZE("CallInfo");
+        uint8_t* const calls = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "base_ci"));
+        uint8_t* const call  = calls + mark->words[kMarkCall];
+        uint8_t*       ci    = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci"));
+        // A protected call still open shows in its call, its C-call depth or its recovery point
+        // (the parser's runs at the caller's call level).
+        if (ci == call && Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls")) == mark->words[kMarkCCalls] &&
+            reinterpret_cast<uintptr_t>(Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp"))) == mark->words[kMarkErrorJmp])
+            return WXL_FALSE;
+
+        // A profiled interface counts how deep each Lua function runs; the calls dropped leave it.
+        void* const global = Slot<void*>(state, WXL_FIELD("lua_State", "l_G"));
+        if (Slot<uint8_t>(global, WXL_FIELD("global_State", "profile")))
+            while (ci > call + kCall)
+            {
+                ci -= kCall;
+                void* const func = Slot<void*>(ci, WXL_FIELD("CallInfo", "func"));
+                if (Slot<int32_t>(func, WXL_FIELD("TValue", "tt")) != kLuaTFunction) continue;
+                void* const closure = Slot<void*>(func, WXL_FIELD("TValue", "value"));
+                if (Slot<uint8_t>(closure, WXL_FIELD("LClosure", "isC"))) continue;
+                Slot<int32_t>(Slot<void*>(closure, WXL_FIELD("LClosure", "profile")), WXL_FIELD("Profile", "depth")) -= 1;
+            }
+
+        uint8_t* const top = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "stack")) + mark->words[kMarkTop];
+        LuaFCloseAt()(state, top);
+        Slot<uint8_t*>(state, WXL_FIELD("lua_State", "top"))      = top;
+        Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls"))  = static_cast<uint16_t>(mark->words[kMarkCCalls]);
+        Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci"))       = call;
+        Slot<void*>(state, WXL_FIELD("lua_State", "base"))        = Slot<void*>(call, WXL_FIELD("CallInfo", "base"));
+        Slot<void*>(state, WXL_FIELD("lua_State", "savedpc"))     = Slot<void*>(call, WXL_FIELD("CallInfo", "savedpc"));
+        Slot<uint8_t>(state, WXL_FIELD("lua_State", "allowhook")) = static_cast<uint8_t>(mark->words[kMarkAllowHook]);
+        Slot<int32_t>(state, WXL_FIELD("lua_State", "errfunc"))   = static_cast<int32_t>(mark->words[kMarkErrFunc]);
+        Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp"))    = reinterpret_cast<void*>(mark->words[kMarkErrorJmp]);
+        // restore_stack_limit: a call array grown past its limit by an overflow goes back to it.
+        if (Slot<int32_t>(state, WXL_FIELD("lua_State", "size_ci")) > kLuaMaxCalls &&
+            static_cast<int32_t>((call - calls) / kCall) + 1 < kLuaMaxCalls)
+            LuaDReallocCIAt()(state, kLuaMaxCalls);
+
+        *reinterpret_cast<uintptr_t*>(WXL_STATIC("lua_tainted"))      = mark->words[kMarkTainted];
+        *reinterpret_cast<int32_t*>(WXL_STATIC("lua_taintexpected"))  = static_cast<int32_t>(mark->words[kMarkTaintExpected]);
+        *reinterpret_cast<int32_t*>(WXL_STATIC("lua_taintedclosure")) = static_cast<int32_t>(mark->words[kMarkTaintedClosure]);
+        return WXL_TRUE;
     }
 
     wxl_bool file_exists(const char* path)

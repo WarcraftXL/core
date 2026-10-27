@@ -57,6 +57,20 @@ WXL_BINDING(script_create_events, void, (const char** names, uint32_t count), (n
 // the stack as arguments; the values are left on the stack: FrameScript_SignalEvent(index, L, n).
 WXL_BINDING(script_signal_event, void, (uint32_t index, void* state, int32_t arg_count), (index, state, arg_count), (void)0)
 
+// Where the state's calls stand, kept for script_unwind: what luaD_pcall keeps before a protected
+// call (the top and the running call, as offsets from the stack and the call array, the C-call
+// depth, the hooks' switch, the error handler and the error recovery point) and FrameScript's
+// taint (lua_tainted, lua_taintexpected, lua_taintedclosure).
+WXL_BINDING(script_mark, void, (void* state, wxl_script_mark* mark), (state, mark), (void)0)
+
+// Drops the calls a hardware fault left unfinished on the state since the mark (its running call,
+// its C-call depth or its error recovery point differ from the mark), as luaD_pcall does
+// when a protected call fails: the profiled depths of the Lua functions dropped, the upvalues
+// above the marked top closed, the top, the running call and what the mark kept put back, the
+// call array shrunk back to its limit. Answers whether there were any; when there were none, the
+// state is left as it is, its top included.
+WXL_BINDING(script_unwind, wxl_bool, (void* state, const wxl_script_mark* mark), (state, mark), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

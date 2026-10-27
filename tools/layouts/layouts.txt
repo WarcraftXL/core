@@ -1416,3 +1416,42 @@ type FactionStanding WoW/Source/Ui/ReputationInfo.h FactionStanding
   m_factionId                             -                                            # binding faction_standing
   m_base                                  -                                            # binding faction_standing
   m_standing                              -                                            # binding faction_standing
+
+# =============================================================================================
+# The client's Lua state, as wxl.script puts it back after a fault inside a chunk (binding/script.def)
+# =============================================================================================
+
+type lua_State Engine/Source/lua-5.1/src/lstate.h lua_State
+  top                                     -                                            # binding script_unwind
+  base                                    -                                            # binding script_unwind
+  l_G                                     -                                            # binding script_unwind
+  ci                                      -                                            # binding script_unwind
+  savedpc                                 -                                            # binding script_unwind
+  stack                                   -                                            # binding script_unwind
+  base_ci                                 -                                            # binding script_unwind
+  size_ci                                 -                                            # binding script_unwind
+  nCcalls                                 -                                            # binding script_unwind
+  allowhook                               -                                            # binding script_unwind
+  errorJmp                                -                                            # binding script_unwind
+  errfunc                                 -                                            # binding script_unwind
+
+type CallInfo Engine/Source/lua-5.1/src/lstate.h CallInfo
+  sizeof                                  -                                            # binding script_unwind
+  base                                    -                                            # binding script_unwind
+  func                                    -                                            # binding script_unwind
+  savedpc                                 -                                            # binding script_unwind
+
+type global_State Engine/Source/lua-5.1/src/lstate.h global_State
+  profile                                 -                                            # binding script_unwind
+
+type TValue Engine/Source/lua-5.1/src/lobject.h TValue
+  sizeof                                  -                                            # binding script_unwind
+  value                                   -                                            # binding script_unwind
+  tt                                      -                                            # binding script_unwind
+
+type LClosure Engine/Source/lua-5.1/src/lobject.h LClosure
+  isC                                     -                                            # binding script_unwind
+  profile                                 -                                            # binding script_unwind
+
+type Profile Engine/Source/lua-5.1/src/lobject.h Profile
+  depth                                   -                                            # binding script_unwind

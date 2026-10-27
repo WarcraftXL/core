@@ -33,6 +33,14 @@ extern "C" {
 /// of a global set through the script rows of the binding. Answers how many results it pushed.
 typedef int32_t(WXL_CALL* wxl_script_native_fn)(void* state);
 
+/// Where the client's script state stands, as script_mark keeps it and script_unwind brings it
+/// back: what the client's protected call keeps before it calls. Its words are the client's; the
+/// runtime only hands the mark back.
+typedef struct wxl_script_mark
+{
+    uintptr_t words[12];
+} wxl_script_mark;
+
 /// A function told one name, as the client's SFile::List calls its callback: cdecl on x86
 /// (`call [ebp+0xc]; add esp, 8` at 0x0042509D). Answers nonzero to be told the next.
 typedef int32_t(WXL_CALL* wxl_core_name_fn)(const char* name, void* user);

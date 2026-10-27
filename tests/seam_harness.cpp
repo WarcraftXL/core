@@ -692,6 +692,7 @@ namespace
         std::vector<std::string>              ran;
         std::vector<std::vector<std::string>> eventTables; ///< every table installed, in order
         std::vector<FakeSignal>               signals;
+        uint32_t                              calls = 0; ///< calls running, as L->ci counts them
     };
 
     FakeVm  g_vm;
@@ -814,6 +815,39 @@ namespace
     void WXL_CALL FakeRun(const char* source, const char* name)
     {
         g_vm.ran.push_back(std::string(name) + ": " + source);
+        const std::string chunk(source);
+        // "leak:" leaves a value on the stack, as a C function of the client that pushes and
+        // returns outside a call would.
+        if (chunk.rfind("leak:", 0) == 0) FakePushNumber(&g_vm, 1.0);
+#if defined(_MSC_VER)
+        // "fault:" stops inside a call of the chunk, as GetBindingKey does before the client has
+        // loaded its key bindings (CGUIBindings::s_bindings null): the protected call, the chunk
+        // and the function stay open with their values on the stack.
+        if (chunk.rfind("fault:", 0) == 0)
+        {
+            g_vm.calls += 2;
+            FakePushString(&g_vm, "error handler", 13);
+            FakePushString(&g_vm, "chunk", 5);
+            FakePushString(&g_vm, "TURNLEFT", 8);
+            volatile int* nowhere = nullptr;
+            *nowhere              = 1;
+        }
+#endif
+    }
+
+    void WXL_CALL FakeMark(void* state, wxl_script_mark* mark)
+    {
+        *mark          = wxl_script_mark{};
+        mark->words[0] = Vm(state)->stack.size();
+        mark->words[1] = Vm(state)->calls;
+    }
+
+    wxl_bool WXL_CALL FakeUnwind(void* state, const wxl_script_mark* mark)
+    {
+        if (Vm(state)->calls == mark->words[1]) return WXL_FALSE;
+        Vm(state)->calls = static_cast<uint32_t>(mark->words[1]);
+        Vm(state)->stack.resize(mark->words[0]);
+        return WXL_TRUE;
     }
 
     void WXL_CALL FakeCreateEvents(const char** names, uint32_t count)
@@ -2338,6 +2372,8 @@ namespace
         init.script_run             = &FakeRun;
         init.script_create_events   = &FakeCreateEvents;
         init.script_signal_event    = &FakeSignalEvent;
+        init.script_mark            = &FakeMark;
+        init.script_unwind          = &FakeUnwind;
         init.message_data           = &FakeMessageData;
         init.message_size           = &FakeMessageSize;
         init.message_read           = &FakeMessageRead;
@@ -4428,6 +4464,47 @@ namespace
         Check(api.run(Str("print(1)"), "harness") == WXL_OK && !g_vm.ran.empty() &&
                   g_vm.ran.back() == "harness: print(1)",
               "run hands the chunk and its name to the engine");
+
+        // The client ends the process at its next frame when its script stack is not empty
+        // (CGGameUI::Idle, error #134): every call the runtime makes into the state leaves it as
+        // it found it.
+        g_vm.stack.clear();
+#if defined(_MSC_VER)
+        {
+            // As Dawnlight's ScriptVmReady handler did at a /reload: the chunk runs from a handler
+            // the host guards, and calls GetBindingKey before the client has loaded the bindings.
+            wxl_result ran = WXL_OK;
+            const auto handler = [](void* context)
+            { *static_cast<wxl_result*>(context) = Script().run(Str("fault: GetBindingKey('TURNLEFT')"), "harness"); };
+            wxl::host::Fault fault;
+            const bool       returned = wxl::host::CallGuarded(handler, &ran, &fault);
+            Check(returned && ran == WXL_E_FAILED && g_vm.stack.empty() && g_vm.calls == 0,
+                  "a chunk the client faults inside fails in the handler that ran it, and the calls and values it "
+                  "left are dropped from the state");
+            g_vm.stack.clear();
+            g_vm.calls = 0;
+        }
+        Check(api.run(Str("print(2)"), "harness") == WXL_OK && g_vm.ran.back() == "harness: print(2)",
+              "and the next chunk runs");
+#endif
+        Check(api.run(Str("leak: 1"), "harness") == WXL_OK && g_vm.stack.empty(),
+              "a value a call into the client leaves on its stack is dropped");
+        {
+            namespace script = wxl::core::services::script;
+            auto pushes  = [] { FakePushNil(&g_vm); FakePushNil(&g_vm); };
+            auto pops    = [] { g_vm.stack.pop_back(); };
+            auto stopped = [] { g_vm.calls += 1; FakePushNil(&g_vm); }; // a call a guard further in abandoned
+            Check(script::Keep("harness pushes", pushes, nullptr) && g_vm.stack.empty(),
+                  "Keep drops what its call left on the stack");
+            FakePushNumber(&g_vm, 3.0);
+            FakePushNumber(&g_vm, 4.0);
+            Check(script::Keep("harness pops", pops, nullptr) && g_vm.stack.size() == 2 &&
+                      g_vm.stack[1].type == WXL_VALUE_NIL,
+                  "puts a nil back for a value its call took that it had not pushed");
+            g_vm.stack.clear();
+            Check(script::Keep("harness stopped", stopped, nullptr) && g_vm.stack.empty() && g_vm.calls == 0,
+                  "and drops the calls its call left unfinished");
+        }
 
         // Events: the client's table is installed when the context is announced; a declared
         // event is installed behind it.

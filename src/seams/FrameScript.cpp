@@ -132,7 +132,9 @@ namespace wxl::seam::FrameScript::Destroy
             wxl_script_vm_args args{};
             args.context      = g_context;
             args.native_state = wxl::core::binding::script_state();
-            host->Raise(WXL_EV_ScriptVmClosing, &args);
+            // A handler may call into the state, through wxl.script or the state it is handed.
+            auto raise = [&] { host->Raise(WXL_EV_ScriptVmClosing, &args); };
+            wxl::core::services::script::Keep("the ScriptVmClosing handlers", raise, nullptr);
         }
         wxl::core::services::script::OnContextClosing();
         wxl::core::seams::gameplay::Forget();
@@ -177,7 +179,8 @@ namespace wxl::seam::FrameScript::CreateEvents
         wxl_script_vm_args args{};
         args.context      = g_context;
         args.native_state = state;
-        host->Raise(WXL_EV_ScriptVmReady, &args);
+        auto raise = [&] { host->Raise(WXL_EV_ScriptVmReady, &args); };
+        wxl::core::services::script::Keep("the ScriptVmReady handlers", raise, nullptr);
     }
 }
 
