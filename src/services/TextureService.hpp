@@ -19,6 +19,15 @@ namespace wxl::core::services
 
     namespace texture
     {
+        /// Four channels of data (@p rgba, four bytes a texel, @p width x @p height powers of two)
+        /// served as a BLP under Interface\WXL\Data\, for the client's own texture loading; kept
+        /// whatever the budget until Unserve. The path, empty when it could not be served.
+        std::string ServeData(const char* stem, const uint8_t* rgba, uint32_t width, uint32_t height);
+        void        Unserve(const std::string& path);
+    }
+
+    namespace texture
+    {
         /// A script context is up (FrameScript.CreateEvents, before the mods hear of it): the
         /// interface's WxlTexture is put in it.
         void OnScriptReady();

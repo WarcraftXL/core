@@ -33,10 +33,21 @@ namespace wxl::modern_adt
     {
     public:
         /// @p exists says whether a file is in the client's archives or folders.
-        HeightBlend(Store& store, std::function<bool(const std::string&)> exists) : store_(store), exists_(std::move(exists)) {}
+        HeightBlend(Store& store, std::function<bool(const std::string&)> exists, bool requireMapFlag = true)
+            : store_(store), exists_(std::move(exists)), requireMapFlag_(requireMapFlag)
+        {
+        }
+
+        /// Whether the map (its WDT's bytes) blends by height: MPHD 0x80, as retail decides it, unless
+        /// [height_blend] require_wdt_flag = 0 lets a map made without the flag blend too.
+        bool MapAllows(const void* wdt, uint32_t size);
 
         /// The layer's height texture and numbers, from what the store kept of it (TextureScale::Answer first).
         void Answer(const wxl_terrain_layer& layer, wxl_terrain_layer_look& look);
+
+        /// A texture's height texture and numbers (heightScale, heightOffset, 1, 0): false for one
+        /// MTXP gives no height, or whose _h file is missing. @p path stays valid while this lives.
+        bool Height(const std::string& texture, const adt::TextureInfo& info, const char** path, float params[4]);
 
         /// Other bytecode for a terrain pixel program; false for any other program, or one the rewrite does not take.
         bool Program(const wxl_gx_shader_code& code, std::vector<uint32_t>& out);
@@ -52,6 +63,10 @@ namespace wxl::modern_adt
     private:
         Store&                                    store_;
         std::function<bool(const std::string&)>  exists_;
+        bool                                      requireMapFlag_;
+        const void*                               mapFile_ = nullptr; ///< the WDT last asked of
+        uint32_t                                  mapSize_ = 0;
+        bool                                      mapAllows_ = false;
         std::unordered_map<std::string, bool>     known_; ///< _h files looked for
         uint64_t                                  blended_ = 0, programs_ = 0, refused_ = 0;
         std::string                               lastRefusal_;

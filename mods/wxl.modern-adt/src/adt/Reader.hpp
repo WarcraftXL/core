@@ -28,6 +28,21 @@ namespace wxl::modern_adt::adt
     }
 
     constexpr uint32_t kMVER = Id("MVER"), kMHDR = Id("MHDR"), kMTEX = Id("MTEX"), kMTXF = Id("MTXF"), kMTXP = Id("MTXP");
+    constexpr uint32_t kMCNK = Id("MCNK"), kMCLY = Id("MCLY"), kMCAL = Id("MCAL"), kMPHD = Id("MPHD");
+
+    /// MPHD's flags (a WDT), as retail names them.
+    enum MapFlag : uint32_t
+    {
+        kMapGlobalObject = 0x1,     ///< wdt_uses_global_map_obj
+        kMapVertexColors = 0x2,     ///< adt_has_mccv
+        kMapBigAlpha = 0x4,         ///< adt_has_big_alpha: 4096-byte alpha maps
+        kMapSortedDoodads = 0x8,    ///< adt_has_doodadrefs_sorted_by_size_cat
+        kMapLightVertices = 0x10,   ///< MCLV (Cataclysm and later)
+        kMapHeightTexturing = 0x80, ///< adt_has_height_texturing: the height blend, and 4096-byte alpha maps
+        kMapLod = 0x100,            ///< _lod.adt (Legion and later)
+        kMapFileIds = 0x200,        ///< MAID (8.1 and later)
+    };
+
 
     struct Chunk
     {
@@ -116,6 +131,39 @@ namespace wxl::modern_adt::adt
     /// Every MTEX texture's info, from the file's MTXF and MTXP; as many entries as MTEX names (at
     /// least as many as either chunk has).
     std::vector<TextureInfo> ReadTextures(const Reader& file, Prefer prefer);
+
+    /// A layer of a chunk, as MCLY has it.
+    struct LayerEntry
+    {
+        uint32_t texture = 0; ///< its MTEX index
+        uint32_t flags = 0;   ///< 0x100 has an alpha map, 0x200 compressed
+        uint32_t offset = 0;  ///< of its alpha map in MCAL
+    };
+
+    /// A chunk of a split texture file (_tex0.adt): its layers and its alpha maps.
+    struct SplitChunk
+    {
+        std::vector<LayerEntry> layers;
+        const uint8_t*          mcal = nullptr;
+        uint32_t                mcalSize = 0;
+    };
+
+    /// The MCNKs of a split texture file, in file order (chunk x + 16 * chunk y): no header, their
+    /// sub-chunks from their start, as retail writes them. Fewer than 256 when the file is cut short.
+    std::vector<SplitChunk> ReadSplitChunks(const Reader& file);
+
+    /// A WDT's MPHD flags; false for a file without MPHD.
+    bool MapFlags(const Reader& wdt, uint32_t* flags);
+
+    /// The side of an alpha map.
+    constexpr uint32_t kAlphaSide = 64;
+
+    /// Layer @p layer's alpha map (64 x 64, row by row from the north-west) from its chunk's MCAL:
+    /// run-length coded when its flags say 0x200, else 4096 bytes, else 2048 of four bits (low
+    /// nibble first). False for a layer without one, or one running past MCAL.
+    /// @p big: the map reads uncompressed maps as 4096 bytes (MPHD 0x4 or 0x80), 2048 of four bits
+    /// otherwise; unknown (-1): 4096 when MCAL holds that many past the map.
+    bool DecodeAlpha(const SplitChunk& chunk, uint32_t layer, uint8_t* out, int big = -1);
 
     /// 2^scale, the texture_scale wxl.terrain takes.
     inline float ScaleOf(uint8_t scale) { return static_cast<float>(1u << (scale & 0xF)); }

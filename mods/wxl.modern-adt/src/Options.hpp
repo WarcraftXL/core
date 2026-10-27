@@ -9,6 +9,10 @@
 //
 //   [height_blend]
 //   enabled = 1        ; retail's height blend (MTXP heightScale and heightOffset, the _h textures)
+//   require_wdt_flag = 1 ; only on maps whose WDT says so (MPHD 0x80), as retail; 0 for data made without it
+//
+//   [extra_layers]
+//   enabled = 1        ; up to 8 layers a chunk, from each tile's _tex0.adt (needs height_blend)
 //
 // A missing file or key keeps the default; a line not understood is logged and left out.
 
@@ -27,6 +31,8 @@ namespace wxl::modern_adt
         bool        texture_scale = true;
         adt::Prefer source = adt::Prefer::automatic;
         bool        height_blend = true;
+        bool        require_wdt_flag = true;
+        bool        extra_layers = true;
         std::vector<std::string> problems; ///< lines not understood
     };
 

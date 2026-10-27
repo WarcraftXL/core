@@ -76,16 +76,28 @@ namespace wxl::modern_adt
             }
             else if (Same(section, "height_blend"))
             {
+                if (Same(key, "enabled") || Same(key, "require_wdt_flag"))
+                {
+                    const bool on = value == "1" || Same(value, "true"), off = value == "0" || Same(value, "false");
+                    if (!on && !off) problem("not 0 or 1");
+                    else if (Same(key, "enabled")) out.height_blend = on;
+                    else out.require_wdt_flag = on;
+                }
+                else
+                    problem("an unknown key of [height_blend] (enabled, require_wdt_flag)");
+            }
+            else if (Same(section, "extra_layers"))
+            {
                 if (Same(key, "enabled"))
                 {
-                    if (value == "0" || value == "1") out.height_blend = value == "1";
+                    if (value == "0" || value == "1") out.extra_layers = value == "1";
                     else problem("not 0 or 1");
                 }
                 else
-                    problem("an unknown key of [height_blend] (enabled)");
+                    problem("an unknown key of [extra_layers] (enabled)");
             }
             else
-                problem("an unknown section (texture_scale, height_blend)");
+                problem("an unknown section (texture_scale, height_blend, extra_layers)");
         }
         return out;
     }

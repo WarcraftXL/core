@@ -96,4 +96,89 @@ namespace wxl::modern_adt::adt
         }
         return out;
     }
+
+    std::vector<SplitChunk> ReadSplitChunks(const Reader& file)
+    {
+        std::vector<SplitChunk> chunks;
+        file.Chunks([&chunks](const Chunk& c) {
+            if (c.id != kMCNK) return true;
+            SplitChunk chunk;
+            Reader(c.data, c.size).Chunks([&chunk](const Chunk& sub) {
+                if (sub.id == kMCLY)
+                    for (uint32_t at = 0; at + 16 <= sub.size; at += 16)
+                    {
+                        LayerEntry e;
+                        std::memcpy(&e.texture, sub.data + at, 4);
+                        std::memcpy(&e.flags, sub.data + at + 4, 4);
+                        std::memcpy(&e.offset, sub.data + at + 8, 4);
+                        chunk.layers.push_back(e);
+                    }
+                else if (sub.id == kMCAL)
+                {
+                    chunk.mcal     = sub.data;
+                    chunk.mcalSize = sub.size;
+                }
+                return true;
+            });
+            chunks.push_back(std::move(chunk));
+            return chunks.size() < 256;
+        });
+        return chunks;
+    }
+
+    bool MapFlags(const Reader& wdt, uint32_t* flags)
+    {
+        const Chunk mphd = wdt.Find(kMPHD);
+        if (!mphd || mphd.size < 4) return false;
+        std::memcpy(flags, mphd.data, 4);
+        return true;
+    }
+
+    bool DecodeAlpha(const SplitChunk& chunk, uint32_t layer, uint8_t* out, int big)
+    {
+        if (layer >= chunk.layers.size() || !(chunk.layers[layer].flags & 0x100) || !chunk.mcal) return false;
+        const LayerEntry& l = chunk.layers[layer];
+        if (l.offset >= chunk.mcalSize) return false;
+        const uint8_t* p    = chunk.mcal + l.offset;
+        const size_t   left = chunk.mcalSize - l.offset;
+        constexpr size_t n  = kAlphaSide * kAlphaSide;
+        if (l.flags & 0x200)
+        {
+            // Runs: a byte's top bit fills with the next byte, else copies the next (byte & 0x7F) bytes.
+            size_t in = 0, done = 0;
+            while (done < n && in < left)
+            {
+                const uint8_t head = p[in++];
+                const size_t  count = std::min<size_t>(head & 0x7F, n - done);
+                if (head & 0x80)
+                {
+                    if (in >= left) return false;
+                    std::memset(out + done, p[in++], count);
+                }
+                else
+                {
+                    if (in + count > left) return false;
+                    std::memcpy(out + done, p + in, count);
+                    in += count;
+                }
+                done += count;
+            }
+            return done == n;
+        }
+        if (big != 0 && left >= n)
+        {
+            std::memcpy(out, p, n);
+            return true;
+        }
+        if (big != 1 && left >= n / 2)
+        {
+            for (size_t i = 0; i < n / 2; ++i)
+            {
+                out[2 * i]     = static_cast<uint8_t>((p[i] & 0x0F) * 17);
+                out[2 * i + 1] = static_cast<uint8_t>((p[i] >> 4) * 17);
+            }
+            return true;
+        }
+        return false;
+    }
 }

@@ -12,10 +12,13 @@
 //   height_blend   retail's height blend (MTXP heightScale and heightOffset, each texture's _h.blp):
 //                  the client's single-pass terrain pixel programs rewritten through wxl.gx's
 //                  shader provider, each layer's _h texture and numbers through wxl.terrain's.
+//   extra_layers   a chunk's layers past the client's four (up to 8), from the tile's split
+//                  texture file (<tile>_tex0.adt), through wxl.terrain's chunk_fn.
 //
 // Main thread only, as wxl.terrain and wxl.gx call their providers.
 
 #include "Options.hpp"
+#include "features/ExtraLayers.hpp"
 #include "features/HeightBlend.hpp"
 #include "features/TextureScale.hpp"
 #include "store/Store.hpp"
@@ -45,6 +48,17 @@ namespace
         return g_storage && g_storage->exists && g_storage->exists(wxl::Str(path)) == WXL_TRUE;
     }
 
+    bool ReadFile(const std::string& path, std::vector<uint8_t>& bytes)
+    {
+        uint64_t size = 0;
+        if (!g_storage || !g_storage->size || !g_storage->read || g_storage->size(wxl::Str(path), &size) != WXL_OK || !size ||
+            size > (64u << 20))
+            return false;
+        bytes.resize(static_cast<size_t>(size));
+        uint64_t read = 0;
+        return g_storage->read(wxl::Str(path), bytes.data(), size, &read) == WXL_OK && read == size;
+    }
+
     class ModernAdtMod final : public wxl::Mod
     {
     public:
@@ -54,8 +68,8 @@ namespace
             for (const std::string& line : options_.problems) wxl::Log(WXL_LOG_WARN, kTag, line.c_str());
             store_ = std::make_unique<wxl::modern_adt::Store>(options_.source);
             scale_ = std::make_unique<wxl::modern_adt::TextureScale>(*store_);
-            blend_ = std::make_unique<wxl::modern_adt::HeightBlend>(*store_, &FileExists);
-            if (!options_.texture_scale && !options_.height_blend)
+            blend_ = std::make_unique<wxl::modern_adt::HeightBlend>(*store_, &FileExists, options_.require_wdt_flag);
+            if (!options_.texture_scale && !options_.height_blend && !options_.extra_layers)
             {
                 wxl::Log(WXL_LOG_INFO, kTag, "texture_scale and height_blend off (enabled = 0): no feature runs");
                 return WXL_OK;
@@ -74,6 +88,16 @@ namespace
             provider.fn          = &ModernAdtMod::OnLayer;
             provider.user        = this;
             provider.flags       = blending_ ? WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW : 0u;
+            // Layers past four need the rewritten programs that draw them, so the height blend's part too.
+            layering_ = options_.extra_layers && blending_;
+            if (options_.extra_layers && !layering_)
+                wxl::Log(WXL_LOG_WARN, kTag, "extra_layers needs height_blend's programs (and a runtime of abi 0.1.44): chunks keep their first 4 layers");
+            if (layering_)
+            {
+                extra_         = std::make_unique<wxl::modern_adt::ExtraLayers>(*store_, blend_.get(), &ReadFile);
+                provider.chunk_fn = &ModernAdtMod::OnChunk;
+                tiles_ = wxl::Subscribe(WXL_EV_TerrainTileLoad, &ModernAdtMod::OnTile, this);
+            }
             if (g_terrain->set_layer_provider(&provider) != WXL_OK)
             {
                 wxl::Log(WXL_LOG_ERROR, kTag, "wxl.terrain refused the layer provider");
@@ -103,6 +127,8 @@ namespace
             if (blending_)
                 wxl::Log(WXL_LOG_INFO, kTag,
                          "height_blend on: MTXP's heights and the _h textures, in the single-pass ps_3_0 terrain programs (Direct3D 9 and Vulkan)");
+            if (layering_)
+                wxl::Log(WXL_LOG_INFO, kTag, "extra_layers on: up to 8 layers a chunk from each tile's _tex0.adt, drawn in a second pass");
             return WXL_OK;
         }
 
@@ -110,6 +136,15 @@ namespace
         {
             if (g_terrain && wxl::detail::Carries(g_terrain.Get(), &wxl_terrain_api::set_layer_provider)) g_terrain->set_layer_provider(nullptr);
             if (blending_) g_gx->set_shader_provider(nullptr);
+            tiles_ = wxl::Subscription();
+            if (extra_ && layering_)
+            {
+                char line[200];
+                std::snprintf(line, sizeof line, "extra_layers: %llu split file(s) read, %llu chunk(s) answered, %llu whose first four were not the root's",
+                              static_cast<unsigned long long>(extra_->Files()), static_cast<unsigned long long>(extra_->Chunks()),
+                              static_cast<unsigned long long>(extra_->Mismatched()));
+                wxl::Log(WXL_LOG_INFO, kTag, line);
+            }
             if (blend_ && blending_)
             {
                 char line[320];
@@ -141,6 +176,19 @@ namespace
             if (self->blending_) self->blend_->Answer(*layer, *look);
         }
 
+        static void WXL_CALL OnChunk(void* user, const wxl_terrain_chunk* chunk, wxl_terrain_extra_layers* out)
+        {
+            auto* self = static_cast<ModernAdtMod*>(user);
+            if (chunk && out && self->extra_) self->extra_->Answer(*chunk, *out);
+        }
+
+        static void WXL_CALL OnTile(void* user, const void* args)
+        {
+            auto*       self = static_cast<ModernAdtMod*>(user);
+            const auto* tile = static_cast<const wxl_terrain_tile_args*>(args);
+            if (tile && self->extra_) self->extra_->TileLoaded(std::string_view(tile->path.data, tile->path.size), tile->tile_x, tile->tile_y);
+        }
+
         static wxl_bool WXL_CALL OnProgram(void* user, const wxl_gx_shader_code* code, wxl_gx_shader_answer* answer)
         {
             auto* self = static_cast<ModernAdtMod*>(user);
@@ -170,7 +218,10 @@ namespace
         std::unique_ptr<wxl::modern_adt::Store>        store_;
         std::unique_ptr<wxl::modern_adt::TextureScale> scale_;
         std::unique_ptr<wxl::modern_adt::HeightBlend>  blend_;
+        std::unique_ptr<wxl::modern_adt::ExtraLayers>  extra_;
+        wxl::Subscription                              tiles_;
         bool                                           blending_ = false;
+        bool                                           layering_ = false;
         std::vector<uint32_t>                          program_; ///< the last program answered, read by the runtime before the call returns
     };
 }

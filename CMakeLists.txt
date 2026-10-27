@@ -437,7 +437,8 @@ add_test(NAME imaging COMMAND wxl-core-imaging-tests)
 set(WXL_MODERN_ADT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt")
 add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt_tests.cpp" "${WXL_MODERN_ADT_DIR}/src/Options.cpp"
     "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/features/HeightBlend.cpp" "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp")
+    "${WXL_MODERN_ADT_DIR}/src/features/HeightBlend.cpp" "${WXL_MODERN_ADT_DIR}/src/features/ExtraLayers.cpp"
+    "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
 target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
 add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)

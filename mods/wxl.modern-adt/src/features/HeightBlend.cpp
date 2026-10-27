@@ -8,6 +8,7 @@
 #include "shader/Ps3.hpp"
 
 #include <cctype>
+#include <cstddef>
 #include <cstring>
 
 namespace wxl::modern_adt
@@ -21,25 +22,45 @@ namespace wxl::modern_adt
         return texture.substr(0, texture.size() - 4) + "_h" + texture.substr(texture.size() - 4);
     }
 
-    void HeightBlend::Answer(const wxl_terrain_layer& layer, wxl_terrain_layer_look& look)
+    bool HeightBlend::Height(const std::string& texture, const adt::TextureInfo& info, const char** path, float params[4])
     {
-        if (look.struct_size < sizeof look) return; // a runtime before abi 0.1.43
-        const Layer* kept = store_.LayerAt(layer.chunk_x, layer.chunk_y, layer.layer);
-        const Area&  area = store_.AreaOf(layer.tile_x, layer.tile_y, layer.file, layer.file_size);
-        if (!kept || kept->info.source != adt::Source::mtxp || (kept->info.flags & 1)) return;
-        if (kept->info.height_scale == 0.0f && kept->info.height_offset == 1.0f) return; // retail's "no _h"
-        if (layer.texture >= area.names.size()) return;
-        const std::string name = HeightName(area.names[layer.texture]);
-        if (name.empty()) return;
+        if (info.source != adt::Source::mtxp || (info.flags & 1)) return false;
+        if (info.height_scale == 0.0f && info.height_offset == 1.0f) return false; // retail's "no _h"
+        const std::string name = HeightName(texture);
+        if (name.empty()) return false;
         auto known = known_.find(name);
         if (known == known_.end()) known = known_.emplace(name, exists_ && exists_(name)).first;
-        if (!known->second) return;
-        look.extra_texture = known->first.c_str();
-        look.params[0]     = kept->info.height_scale;
-        look.params[1]     = kept->info.height_offset;
-        look.params[2]     = 1.0f;
-        look.params[3]     = 0.0f;
-        ++blended_;
+        if (!known->second) return false;
+        *path     = known->first.c_str();
+        params[0] = info.height_scale;
+        params[1] = info.height_offset;
+        params[2] = 1.0f;
+        params[3] = 0.0f;
+        return true;
+    }
+
+    bool HeightBlend::MapAllows(const void* wdt, uint32_t size)
+    {
+        if (!requireMapFlag_) return true;
+        if (wdt != mapFile_ || size != mapSize_)
+        {
+            uint32_t flags = 0;
+            mapFile_       = wdt;
+            mapSize_       = size;
+            mapAllows_     = adt::MapFlags(adt::Reader(wdt, size), &flags) && (flags & adt::kMapHeightTexturing);
+        }
+        return mapAllows_;
+    }
+
+    void HeightBlend::Answer(const wxl_terrain_layer& layer, wxl_terrain_layer_look& look)
+    {
+        const bool mapKnown = layer.struct_size >= offsetof(wxl_terrain_layer, map_file_size) + sizeof layer.map_file_size;
+        if (!MapAllows(mapKnown ? layer.map_file : nullptr, mapKnown ? layer.map_file_size : 0)) return;
+        if (look.struct_size < offsetof(wxl_terrain_layer_look, params) + sizeof look.params) return; // a runtime before abi 0.1.43
+        const Layer* kept = store_.LayerAt(layer.chunk_x, layer.chunk_y, layer.layer);
+        const Area&  area = store_.AreaOf(layer.tile_x, layer.tile_y, layer.file, layer.file_size);
+        if (!kept || layer.texture >= area.names.size()) return;
+        if (Height(area.names[layer.texture], kept->info, &look.extra_texture, look.params)) ++blended_;
     }
 
     bool HeightBlend::Program(const wxl_gx_shader_code& code, std::vector<uint32_t>& out)

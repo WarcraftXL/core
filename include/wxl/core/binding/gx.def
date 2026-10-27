@@ -72,6 +72,17 @@ WXL_BINDING(gx_texture_stage_set, void, (uint32_t stage, void* texture), (stage,
 // (GxTexSetWrap(texture, GxTex_Wrap, GxTex_Wrap)).
 WXL_BINDING(gx_texture_wrap, void, (void* texture), (texture), (void)0)
 
+// A render state's value as the engine holds it (m_appRenderStates[which], its first int): EGxBlend
+// for GxRs_BlendingMode (6), 0 or 1 for GxRs_DepthWrite (15). 0 without a device.
+WXL_BINDING(gx_render_state, int32_t, (uint32_t which), (which), 0)
+
+// Sets a render state through the engine (GxRsSet(which, int)), sent to the device at its next draw.
+WXL_BINDING(gx_render_state_set, void, (uint32_t which, int32_t value), (which, value), (void)0)
+
+// The device draws `batch` (a CGxBatch) `count` times with the engine's state as it stands
+// (CGxDevice::Draw, the device vtable's slot 42): another draw of what was just drawn.
+WXL_BINDING(gx_draw, void, (const void* batch, int32_t count), (batch, count), (void)0)
+
 // A program's record (CGxShader): its name ("Terrain1:6"), its target (EGxShTarget: 0 vertex, 4
 // pixel) and the bytecode the device makes it from (m_code). False for a null record.
 WXL_BINDING(gx_shader_record, wxl_bool, (const void* shader, wxl_core_shader_record* out), (shader, out), WXL_FALSE)

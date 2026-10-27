@@ -874,6 +874,30 @@ namespace wxl::core::binding
             x86::CallFree<void>(WXL_SITE("GxTexSetWrap", 0), texture, uint32_t{1}, uint32_t{1});
     }
 
+    int32_t gx_render_state(uint32_t which)
+    {
+        const void* device = IsClient() && which < 100 ? GxDevice() : nullptr;
+        if (!device) return 0;
+        const auto* states = Read<const wxl_gx_app_state*>(device, WXL_FIELD("CGxDevice", "m_appRenderStates.m_data"));
+        return states ? states[which].value.data.i[0] : 0;
+    }
+
+    void gx_render_state_set(uint32_t which, int32_t value)
+    {
+        // GxRsSet(which, int): cdecl, two dwords (0x00408BF0).
+        if (IsClient() && OnMainThread() && GxDevice()) x86::CallFree<void>(WXL_SITE_AT("GxRsSet", 0x00408BF0, 0), which, value);
+    }
+
+    void gx_draw(const void* batch, int32_t count)
+    {
+        // CGxDevice::Draw(batch, count): the device vtable's slot 42, thiscall (every device's own).
+        void* device = IsClient() && OnMainThread() && batch ? const_cast<void*>(GxDevice()) : nullptr;
+        if (!device) return;
+        using DrawFn              = void(__fastcall*)(void* self, void* edx, const void* batch, int32_t count);
+        const void* const* vtable = Read<const void* const*>(device, 0);
+        reinterpret_cast<DrawFn>(const_cast<void*>(vtable[42]))(device, nullptr, batch, count);
+    }
+
     wxl_bool gx_shader_record(const void* shader, wxl_core_shader_record* out)
     {
         if (!IsClient() || !shader || !out) return WXL_FALSE;
@@ -1180,8 +1204,24 @@ namespace wxl::core::binding
             out->layer_texture[i] = Read<uint32_t>(chunk, at + WXL_FIELD("CMapRenderChunkLayer", "m_textureId"));
         }
         out->batch     = static_cast<const char*>(chunk) + WXL_FIELD("CMapRenderChunk", "m_batch");
-        out->map_chunk = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+        out->map_chunk  = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+        out->map_chunk2 = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[1]"));
+        out->pair       = Read<uint8_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_unkFlags")) & 3u;
         return WXL_TRUE;
+    }
+
+    wxl_bool map_wdt(wxl_core_wdt* out)
+    {
+        if (!IsClient() || !out) return WXL_FALSE;
+        out->path  = reinterpret_cast<const char*>(WXL_STATIC("CMap::wdtFilename"));
+        out->flags = reinterpret_cast<uint32_t*>(WXL_STATIC("CMap::header")); // SMMapHeader::m_flags, its first field
+        return WXL_TRUE;
+    }
+
+    void map_validate_shaders()
+    {
+        // CMap::ValidateShaders(): cdecl, nothing (0x007BD8A0).
+        if (IsClient() && OnMainThread()) x86::CallFree<void>(WXL_SITE("CMap::ValidateShaders", 0));
     }
 
     wxl_bool terrain_area_file(const void* area, wxl_core_area_file* out)

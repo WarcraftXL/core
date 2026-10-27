@@ -176,7 +176,16 @@ typedef struct wxl_core_render_chunk
     uint32_t    layer_texture[4];  ///< each layer's m_textureId: its MTEX index
     const void* batch;             ///< &m_batch: what every draw of the chunk's layers hands the device
     const void* map_chunk;         ///< m_mapChunks[0]: the CMapChunk it draws
+    const void* map_chunk2;        ///< m_mapChunks[1]: the second, for a chunk drawn with its neighbour; null for none
+    uint32_t    pair;              ///< m_unkFlags & 3: 1 the second below the first (alpha maps 64 x 128), 2 beside it (128 x 64)
 } wxl_core_render_chunk;
+
+/// The map's WDT as the client loaded it (binding map_wdt).
+typedef struct wxl_core_wdt
+{
+    const char* path;  ///< CMap::wdtFilename
+    uint32_t*   flags; ///< &CMap::header.m_flags: MPHD's flags, as the client reads them
+} wxl_core_wdt;
 
 /// The ADT an area of the map was read from (binding terrain_area_file): CMapArea.
 typedef struct wxl_core_area_file

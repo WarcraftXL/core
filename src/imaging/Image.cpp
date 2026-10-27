@@ -348,6 +348,61 @@ namespace wxl::core::imaging
         return blp;
     }
 
+    std::vector<uint8_t> EncodeBlpData(const uint8_t* rgba, uint32_t width, uint32_t height)
+    {
+        const uint32_t levels = std::min<uint32_t>(LevelCount(width, height), kMipSlots);
+        size_t         total  = kBlpHeaderSize;
+        for (uint32_t i = 0, lw = width, lh = height; i < levels; ++i, lw = lw > 1 ? lw >> 1 : 1, lh = lh > 1 ? lh >> 1 : 1)
+            total += static_cast<size_t>(lw) * lh * 4u;
+        std::vector<uint8_t> blp(total, 0);
+        Put32(&blp[0], kBlpMagic);
+        Put32(&blp[4], 1);
+        blp[8]  = kColorRaw;
+        blp[9]  = kAlpha8;
+        blp[10] = kPixelArgb8888;
+        blp[11] = 1;
+        Put32(&blp[12], width);
+        Put32(&blp[16], height);
+        std::vector<uint8_t> level(rgba, rgba + static_cast<size_t>(width) * height * 4u);
+        uint32_t             lw = width, lh = height;
+        size_t               at = kBlpHeaderSize;
+        for (uint32_t i = 0; i < levels; ++i)
+        {
+            const size_t bytes = static_cast<size_t>(lw) * lh * 4u;
+            Put32(&blp[kOffsetsAt + i * 4], static_cast<uint32_t>(at));
+            Put32(&blp[kSizesAt + i * 4], static_cast<uint32_t>(bytes));
+            for (size_t t = 0; t < bytes; t += 4) // RGBA in, BGRA out
+            {
+                blp[at + t + 0] = level[t + 2];
+                blp[at + t + 1] = level[t + 1];
+                blp[at + t + 2] = level[t + 0];
+                blp[at + t + 3] = level[t + 3];
+            }
+            at += bytes;
+            if (i + 1 == levels) break;
+            const uint32_t       nw = lw > 1 ? lw >> 1 : 1, nh = lh > 1 ? lh >> 1 : 1;
+            std::vector<uint8_t> next(static_cast<size_t>(nw) * nh * 4u);
+            for (uint32_t y = 0; y < nh; ++y)
+                for (uint32_t x = 0; x < nw; ++x)
+                    for (uint32_t c = 0; c < 4; ++c)
+                    {
+                        uint32_t sum = 0, n = 0;
+                        for (uint32_t dy = 0; dy < 2; ++dy)
+                            for (uint32_t dx = 0; dx < 2; ++dx)
+                            {
+                                const uint32_t sx = std::min(lw - 1, x * 2 + dx), sy = std::min(lh - 1, y * 2 + dy);
+                                sum += level[(static_cast<size_t>(sy) * lw + sx) * 4 + c];
+                                ++n;
+                            }
+                        next[(static_cast<size_t>(y) * nw + x) * 4 + c] = static_cast<uint8_t>((sum + n / 2) / n);
+                    }
+            level.swap(next);
+            lw = nw;
+            lh = nh;
+        }
+        return blp;
+    }
+
     bool BlpMip(const std::vector<uint8_t>& blp, uint32_t index, uint32_t* width, uint32_t* height,
                 const uint8_t** bgra)
     {

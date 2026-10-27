@@ -98,6 +98,14 @@ namespace wxl::core::imaging
      */
     std::vector<uint8_t> EncodeBlp(const Picture& picture, uint32_t textureWidth, uint32_t textureHeight);
 
+    /**
+     * @brief Four independent channels of data as an uncompressed BLP2 (as EncodeBlp writes),
+     *        @p width x @p height powers of two, @p rgba four bytes a texel from the top row: each
+     *        channel kept exactly in the first mip and averaged on its own in the next, never
+     *        premultiplied (alpha maps, not a picture).
+     */
+    std::vector<uint8_t> EncodeBlpData(const uint8_t* rgba, uint32_t width, uint32_t height);
+
     /// The bytes of a BLP's header, before its first mip.
     constexpr size_t kBlpHeaderSize = 0x94 + 1024;
 

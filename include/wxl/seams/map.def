@@ -51,6 +51,12 @@ WXL_SEAM_RAISES(Map, CreateDoodadDefInMapObj, DoodadSpawn)
 // glue) and CMap::Destroy. A static with no argument: cdecl, nothing read on the stack, a bare
 // `ret` (0x007C39F9). Before drops every edit wxl.terrain holds of the map's ground and raises
 // TerrainEditsCleared; the chunks' TerrainChunkUnloaded follow as they are freed.
+// Reads the map's WDT header (MVER, MPHD, MAIN and a global map object) as the map loads, before
+// any of its tiles. After, wxl.terrain reads the whole file for layer providers and gives a map
+// flagged 0x80 (height texturing) without 0x4 the 0x4 that has the client read its alpha maps as
+// retail does (4096 bytes uncompressed). cdecl, nothing.
+WXL_SEAM_AFTER(Map, LoadWdt, "CMap::LoadWdt", void, cdecl, ())
+
 WXL_SEAM_BEFORE(Map, Unload, "CMap::Unload", void, cdecl, ())
 WXL_SEAM_RAISES(Map, Unload, TerrainEditsCleared)
 

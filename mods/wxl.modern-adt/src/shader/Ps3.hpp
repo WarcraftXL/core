@@ -22,6 +22,16 @@
 //
 // A chunk whose layers all have e = 0 keeps its alphas bit for bit: the client's own blend. The
 // same bytecode is made by Direct3D 9 and translated by the Vulkan renderer, so both draw it alike.
+//
+// The four-layer programs also weigh a chunk's layers 4 to 7 (wxl.terrain's extra layers): their
+// alphas on sampler 9 (laid over the four as the client lays its own), layers 4 and 5's heights
+// on 10 and 11 (6 and 7 have none: no sampler is left), every layer's coordinates carried from the
+// alpha maps' (c41 + k), and the pass row c40 (x: the second draw, y: the chunk has extra layers).
+// The chunk is drawn twice with this one program: the first draw writes the mix of layers 0 to 3,
+// each shared out among the four; the second, with layers 4 to 7 on samplers 0 to 3, writes theirs
+// and, as its alpha, their share of the whole, S2 / (S1 + S2). Lighting and fog are affine in the
+// mix, so alpha-blending the second over the first gives the eight-layer mix exactly. Every
+// write of the colour goes to a temporary, written out once at the end with that alpha.
 
 #pragma once
 
@@ -37,11 +47,21 @@ namespace wxl::modern_adt::shader
     /// The pixel constant of layer 0's numbers; layer k's is this + k (WXL_TERRAIN_LAYER_PARAM_ROW).
     constexpr uint32_t kParamRow = 32;
 
+    /// The sampler of the alpha maps of layers 4 to 7 (WXL_TERRAIN_EXTRA_ALPHA_SAMPLER).
+    constexpr uint32_t kExtraAlphaSampler = 9;
+    /// The sampler of layer 4's height texture; layer 5's is the next (WXL_TERRAIN_EXTRA_SAMPLER).
+    constexpr uint32_t kExtraHeightSampler = 10;
+    /// The pass row: x 1 in the second draw, y 1 for a chunk with layers past its four.
+    constexpr uint32_t kPassRow = 40;
+    /// Layer k's coordinates from the alpha maps': u = au * x + z, v = av * y + w (c41 + k).
+    constexpr uint32_t kCoordRow = 41;
+
     /// What the rewrite found in a program.
     struct Found
     {
         uint32_t layers = 0;       ///< L
         uint32_t heights = 0;      ///< layers read with a height (2d samplers read at an input's coordinates)
+        bool     extras = false;   ///< a four-layer program, rewritten for layers 4 to 7 too
     };
 
     /// @p code rewritten into @p out; false (and @p why) for a program it does not take: another

@@ -81,6 +81,7 @@ namespace
         Recipe                                      recipe;
         std::shared_ptr<const std::vector<uint8_t>> blp; ///< null once let go
         uint64_t                                    used = 0;
+        bool                                        pinned = false; ///< data served by the runtime: never let go
     };
 
     std::mutex                             g_lock;
@@ -324,7 +325,7 @@ namespace
             Entry*      oldest = nullptr;
             std::string key;
             for (auto& [k, entry] : g_entries)
-                if (entry.blp && k != keep && (!oldest || entry.used < oldest->used))
+                if (entry.blp && !entry.pinned && k != keep && (!oldest || entry.used < oldest->used))
                 {
                     oldest = &entry;
                     key    = k;
@@ -341,7 +342,7 @@ namespace
         {
             auto oldest = g_entries.end();
             for (auto it = g_entries.begin(); it != g_entries.end(); ++it)
-                if (it->first != keep && (oldest == g_entries.end() || it->second.used < oldest->second.used)) oldest = it;
+                if (it->first != keep && !it->second.pinned && (oldest == g_entries.end() || it->second.used < oldest->second.used)) oldest = it;
             if (oldest == g_entries.end()) break;
             if (oldest->second.blp) g_bytes -= oldest->second.blp->size();
             WLOG_DEBUG(kTag, "%s forgotten: more than %u textures", oldest->second.recipe.path.c_str(), g_maxNames);
@@ -803,6 +804,44 @@ end
 namespace wxl::core::services
 {
     const wxl_texture_api& TextureApi() { return g_api; }
+
+    namespace texture
+    {
+        std::string ServeData(const char* stem, const uint8_t* rgba, uint32_t width, uint32_t height)
+        {
+            if (!rgba || !width || !height || (width & (width - 1)) || (height & (height - 1))) return {};
+            const uint64_t hash = img::Hash64(rgba, static_cast<size_t>(width) * height * 4u, 0x5DA7A0ull);
+            char           path[WXL_TEXTURE_PATH_MAX];
+            std::snprintf(path, sizeof path, "Interface\\WXL\\Data\\%s_%ux%u_%016llx.blp", stem ? stem : "data", width, height,
+                          static_cast<unsigned long long>(hash));
+            const std::string key = Lower(path);
+            auto blp = std::make_shared<const std::vector<uint8_t>>(img::EncodeBlpData(rgba, width, height));
+            std::lock_guard<std::mutex> lock(g_lock);
+            if (!EnsureProvider()) return {};
+            Entry& entry = g_entries[key];
+            if (!entry.blp)
+            {
+                entry.recipe.path   = path;
+                entry.recipe.width  = entry.recipe.textureWidth = width;
+                entry.recipe.height = entry.recipe.textureHeight = height;
+                entry.blp           = blp;
+                entry.pinned        = true;
+                g_bytes += blp->size();
+                ++g_made;
+            }
+            entry.used = ++g_tick;
+            return path;
+        }
+
+        void Unserve(const std::string& path)
+        {
+            std::lock_guard<std::mutex> lock(g_lock);
+            const auto it = g_entries.find(Lower(path));
+            if (it == g_entries.end() || !it->second.pinned) return;
+            if (it->second.blp) g_bytes -= it->second.blp->size();
+            g_entries.erase(it);
+        }
+    }
 
     namespace texture
     {

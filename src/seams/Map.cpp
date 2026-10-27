@@ -74,6 +74,11 @@ namespace wxl::seam::Map::CreateDoodadDefInMapObj
     }
 }
 
+namespace wxl::seam::Map::LoadWdt
+{
+    void WXL_CALL After() { wxl::core::services::terrain_layers::WdtLoaded(); }
+}
+
 namespace wxl::seam::Map::Unload
 {
     void WXL_CALL Before()
