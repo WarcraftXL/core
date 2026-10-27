@@ -67,6 +67,7 @@
 #include "wxl/engine/gx.hpp"
 #include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 #include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
 #include "wxl/core/storm.hpp"
@@ -2499,6 +2500,175 @@ namespace
     wxl_bool WXL_CALL FakeCursorVisible() { return WXL_TRUE; }
     wxl_bool WXL_CALL FakeOverWorld() { return WXL_TRUE; }
 
+    // --- A split tile and its monolithic twin, as the client reads them --------------------------
+    // The client's own reading (CMapArea::ProcessIffChunks, CMapChunk::ProcessIffChunks, Create's
+    // counts, CreateRefs) written out over fake structures, so the seams of a split tile can be held
+    // to what the client sets for the same tile in one file.
+
+    struct SplitFakeArea : FakeTile
+    {
+        uint8_t*                 header = nullptr;
+        uint8_t*                 chunkInfo = nullptr;
+        uint8_t*                 doodadDef = nullptr;
+        uint8_t*                 mapObjDef = nullptr;
+        int32_t                  doodadCount = 0, mapObjCount = 0;
+        char*                    m2Names = nullptr;
+        char*                    wmoNames = nullptr;
+        uint32_t*                modelOffsets = nullptr;
+        uint32_t*                wmoOffsets = nullptr;
+        int16_t*                 flying = nullptr;
+        int32_t*                 textureFlags = nullptr;
+        std::vector<std::string> textures;
+    };
+
+    struct SplitFakeChunk
+    {
+        SplitFakeArea*           area = nullptr;
+        int32_t                  ix = 0, iy = 0;
+        uint8_t*                 begin = nullptr;
+        uint8_t*                 header = nullptr;
+        float*                   height = nullptr;
+        uint8_t*                 normals = nullptr;
+        uint8_t*                 shadow = nullptr;
+        uint8_t*                 layers = nullptr;
+        uint8_t*                 alpha = nullptr;
+        uint8_t*                 mcrf = nullptr;
+        std::vector<std::string> placed; ///< "wmo:<name>:<id>", "m2:<name>:<id>" in the order made
+    };
+
+    uint32_t SplitU32(const uint8_t* at)
+    {
+        uint32_t v;
+        std::memcpy(&v, at, sizeof v);
+        return v;
+    }
+
+    /// CMapArea::LoadTextures: one texture a name.
+    void SplitLoadTextures(SplitFakeArea& a, const char* names, uint32_t size)
+    {
+        for (uint32_t at = 0; at < size;)
+        {
+            a.textures.emplace_back(names + at);
+            at += static_cast<uint32_t>(std::strlen(names + at)) + 1;
+        }
+    }
+
+    /// CMapArea::ProcessIffChunks, as the fork has it.
+    void SplitStockArea(SplitFakeArea& a)
+    {
+        uint8_t* buffer = reinterpret_cast<uint8_t*>(&a.bytes[0]);
+        uint8_t* header = buffer + SplitU32(buffer + 4) + 16;
+        auto     data   = [&](uint32_t slot) { return header + SplitU32(header + slot) + 8; };
+        auto     size   = [&](uint32_t slot) { return SplitU32(header + SplitU32(header + slot) + 4); };
+        a.header       = header;
+        a.chunkInfo    = data(0x04);
+        a.doodadDef    = data(0x1C);
+        a.mapObjDef    = data(0x20);
+        a.m2Names      = reinterpret_cast<char*>(data(0x0C));
+        a.wmoNames     = reinterpret_cast<char*>(data(0x14));
+        a.modelOffsets = reinterpret_cast<uint32_t*>(data(0x10));
+        a.wmoOffsets   = reinterpret_cast<uint32_t*>(data(0x18));
+        if (SplitU32(header) & 1) a.flying = reinterpret_cast<int16_t*>(data(0x24));
+        if (SplitU32(header + 0x2C)) a.textureFlags = reinterpret_cast<int32_t*>(data(0x2C));
+        SplitLoadTextures(a, reinterpret_cast<char*>(data(0x08)), size(0x08));
+        a.doodadCount = static_cast<int32_t>(size(0x1C) / 36);
+        a.mapObjCount = static_cast<int32_t>(size(0x20) / 64);
+    }
+
+    void SplitCreateRefs(SplitFakeChunk& c, SplitFakeArea& a, uint32_t* refs, uint32_t doodads, uint32_t mapObjs);
+
+    /// PrepareChunk -> CMapChunk::Create: its sub-chunks walked, then its counts and references.
+    void SplitStockChunk(SplitFakeArea& a, SplitFakeChunk& c, int32_t x, int32_t y, bool seams)
+    {
+        c.area  = &a;
+        c.ix    = x;
+        c.iy    = y;
+        c.begin = reinterpret_cast<uint8_t*>(&a.bytes[0]) + SplitU32(a.chunkInfo + 16 * (x + 16 * y));
+        c.header = c.begin + 8;
+        int32_t  remaining = static_cast<int32_t>(SplitU32(c.begin + 4)) - 128;
+        uint8_t* chunk     = c.header + 128;
+        while (remaining > 0)
+        {
+            uint8_t* d = chunk + 8;
+            remaining -= 8;
+            switch (SplitU32(chunk))
+            {
+            case 0x4D434E52: c.normals = d; break;
+            case 0x4D435348: c.shadow = d; break;
+            case 0x4D435654: c.height = reinterpret_cast<float*>(d); break;
+            case 0x4D435246: c.mcrf = d; break;
+            case 0x4D434C59: c.layers = d; break;
+            case 0x4D43414C: c.alpha = d; break;
+            default: break;
+            }
+            remaining -= static_cast<int32_t>(SplitU32(chunk + 4));
+            chunk = d + SplitU32(chunk + 4);
+        }
+        if (seams) wxl::seam::MapChunk::ProcessIffChunks::After(&c, true);
+        SplitCreateRefs(c, a, reinterpret_cast<uint32_t*>(c.mcrf), SplitU32(c.header + 0x10), SplitU32(c.header + 0x38));
+    }
+
+    /// CMapChunk::CreateRefs: map objects, then doodads, from one list; the fork's gate first.
+    void SplitCreateRefs(SplitFakeChunk& c, SplitFakeArea& a, uint32_t* refs, uint32_t doodads, uint32_t mapObjs)
+    {
+        void* self = &c;
+        void* area = &a;
+        if (wxl::seam::MapChunk::CreateRefs::Gate(&self, &area, &refs, &doodads, &mapObjs)) return;
+        for (uint32_t i = 0; i < mapObjs; ++i)
+        {
+            const uint8_t* def = a.mapObjDef + 64 * refs[doodads + i];
+            c.placed.push_back("wmo:" + std::string(a.wmoNames + a.wmoOffsets[SplitU32(def)]) + ":" + std::to_string(SplitU32(def + 4)));
+        }
+        for (uint32_t i = 0; i < doodads; ++i)
+        {
+            const uint8_t* def = a.doodadDef + 36 * refs[i];
+            c.placed.push_back("m2:" + std::string(a.m2Names + a.modelOffsets[SplitU32(def)]) + ":" + std::to_string(SplitU32(def + 4)));
+        }
+    }
+
+    wxl_bool WXL_CALL FakeAreaSplitSet(void* area, const wxl_core_area_split* s)
+    {
+        SplitFakeArea& a = *static_cast<SplitFakeArea*>(area);
+        a.chunkInfo    = static_cast<uint8_t*>(s->chunk_info);
+        a.doodadDef    = static_cast<uint8_t*>(s->doodad_defs);
+        a.mapObjDef    = static_cast<uint8_t*>(s->map_obj_defs);
+        a.doodadCount  = static_cast<int32_t>(s->doodad_count);
+        a.mapObjCount  = static_cast<int32_t>(s->map_obj_count);
+        a.m2Names      = s->model_names;
+        a.wmoNames     = s->map_obj_names;
+        a.modelOffsets = s->model_offsets;
+        a.wmoOffsets   = s->map_obj_offsets;
+        a.textureFlags = s->texture_flags;
+        if (s->texture_names && s->texture_names_size) SplitLoadTextures(a, s->texture_names, s->texture_names_size);
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeChunkParts(const void* chunk, wxl_core_map_chunk* out)
+    {
+        const SplitFakeChunk& c = *static_cast<const SplitFakeChunk*>(chunk);
+        out->begin   = c.begin;
+        out->header  = c.header;
+        out->index_x = c.ix;
+        out->index_y = c.iy;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeChunkSplitSet(void* chunk, const wxl_core_chunk_split* s)
+    {
+        SplitFakeChunk& c = *static_cast<SplitFakeChunk*>(chunk);
+        c.layers = static_cast<uint8_t*>(s->layers);
+        c.alpha  = static_cast<uint8_t*>(s->alpha);
+        c.shadow = static_cast<uint8_t*>(s->shadow);
+        c.mcrf   = static_cast<uint8_t*>(s->refs);
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeChunkCreateRefs(void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t mapObjs)
+    {
+        SplitCreateRefs(*static_cast<SplitFakeChunk*>(chunk), *static_cast<SplitFakeArea*>(area), const_cast<uint32_t*>(refs), doodads,
+                        mapObjs);
+    }
+
     wxl_core_init FakeInit()
     {
         wxl_core_init init{};
@@ -2756,6 +2926,10 @@ namespace
         init.gx_shader_record       = &FakeShaderRecord;
         init.gx_shader_code_set     = &FakeShaderCodeSet;
         init.map_area_chunk         = &FakeMapAreaChunk;
+        init.map_area_split_set     = &FakeAreaSplitSet;
+        init.map_chunk_parts        = &FakeChunkParts;
+        init.map_chunk_split_set    = &FakeChunkSplitSet;
+        init.map_chunk_create_refs  = &FakeChunkCreateRefs;
         init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
         init.terrain_forget_collision = &FakeForgetCollision;
         init.unit_fall_local        = &FakeFallLocal;
@@ -4507,6 +4681,382 @@ namespace
     }
 
     // A tile whose chunks name more layers than the client holds: cut to 4 before its chunks are walked.
+    // --- Tiles split by file name, loaded natively (abi 0.1.45) ----------------------------------
+
+    /// Bytes of an IFF file: chunks appended one after another.
+    struct SplitIff
+    {
+        std::string bytes;
+        void Raw(const void* p, size_t n) { bytes.append(static_cast<const char*>(p), n); }
+        void U32(uint32_t v) { Raw(&v, 4); }
+        /// A chunk: its id as the file stores it (reversed), its size, its bytes; answers its offset.
+        size_t Chunk(const char (&id)[5], const std::string& data)
+        {
+            const size_t at = bytes.size();
+            const char   rev[4] = {id[3], id[2], id[1], id[0]};
+            Raw(rev, 4);
+            U32(static_cast<uint32_t>(data.size()));
+            bytes += data;
+            return at;
+        }
+    };
+
+    std::string SplitWords(std::initializer_list<uint32_t> words)
+    {
+        std::string out;
+        for (uint32_t w : words) out.append(reinterpret_cast<const char*>(&w), 4);
+        return out;
+    }
+
+    /// The test tile: what one chunk holds, whichever way it is written.
+    struct SplitChunkData
+    {
+        std::string header; ///< 128 bytes, monolithic counts
+        std::string mcvt, mcnr, mcly, mcal, mcsh;
+        std::vector<uint32_t> doodads, mapObjs;
+        uint16_t holes = 0;
+    };
+
+    struct SplitTwin
+    {
+        SplitIff mono, root, tex0, obj0;
+    };
+
+    /// One tile, written once in one file (3.3.5a) and once split by name (retail).
+    SplitTwin MakeSplitTwin()
+    {
+        const std::string mtex("t\\a.blp\0t\\b.blp\0t\\c.blp\0t\\d.blp\0t\\e.blp\0", 40);
+        const std::string mtxf = SplitWords({0, 1, 0x10, 0, 0x20});
+        const std::string mmdx("m\\a.m2\0m\\bb.m2\0", 15), mmid = SplitWords({0, 7});
+        const std::string mwmo("w\\a.wmo\0", 8), mwid = SplitWords({0});
+        std::string mddf, modf;
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            std::string def(36, '\0');
+            const uint32_t name = i % 2, id = 100 + i;
+            std::memcpy(&def[0], &name, 4);
+            std::memcpy(&def[4], &id, 4);
+            def[8] = static_cast<char>(i);
+            mddf += def;
+        }
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            std::string def(64, '\0');
+            const uint32_t id = 200 + i;
+            std::memcpy(&def[4], &id, 4);
+            def[12] = static_cast<char>(i + 1);
+            modf += def;
+        }
+        const std::string mfbo(36, '\x05');
+
+        SplitChunkData chunks[256];
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            SplitChunkData& c = chunks[i];
+            const uint32_t  layers = i == 7 ? 6u : i % 5;
+            for (uint32_t k = 0; k < layers; ++k)
+            {
+                const uint32_t entry[4] = {(i + k) % 5, k ? 0x100u : 0u, k ? (k - 1) * 2048u : 0u, 0u};
+                c.mcly.append(reinterpret_cast<const char*>(entry), 16);
+            }
+            for (uint32_t k = 1; k < layers; ++k)
+                for (uint32_t t = 0; t < 2048; ++t) c.mcal.push_back(static_cast<char>(i * 7 + k * 31 + t));
+            if (i % 3 == 0)
+                for (uint32_t t = 0; t < 512; ++t) c.mcsh.push_back(static_cast<char>(i + t * 3));
+            for (uint32_t v = 0; v < 145; ++v)
+            {
+                const float h = static_cast<float>(i) + 0.5f * static_cast<float>(v);
+                c.mcvt.append(reinterpret_cast<const char*>(&h), 4);
+            }
+            for (uint32_t n = 0; n < 448; ++n) c.mcnr.push_back(static_cast<char>(i ^ n));
+            for (uint32_t d = 0; d < i % 4; ++d) c.doodads.push_back((i + d) % 3);
+            if (i % 2) c.mapObjs.push_back(i % 4 == 1 ? 0u : 1u);
+            c.holes = i % 5 == 0 ? static_cast<uint16_t>(i * 37u) : 0;
+            c.header.assign(128, '\0');
+            const uint32_t flags = (c.mcsh.empty() ? 0u : 1u), ix = i % 16, iy = i / 16, area = 1000 + i;
+            std::memcpy(&c.header[0x00], &flags, 4);
+            std::memcpy(&c.header[0x04], &ix, 4);
+            std::memcpy(&c.header[0x08], &iy, 4);
+            std::memcpy(&c.header[0x34], &area, 4);
+            const float z = 10.0f * static_cast<float>(i);
+            std::memcpy(&c.header[0x70], &z, 4);
+        }
+
+        SplitTwin twin;
+        // Monolithic: MVER, MHDR, MCIN, MTEX, MMDX, MMID, MWMO, MWID, MDDF, MODF, MFBO, MTXF, 256 MCNK.
+        SplitIff& m = twin.mono;
+        m.Chunk("MVER", SplitWords({18}));
+        const size_t mhdr = m.Chunk("MHDR", std::string(64, '\0'));
+        const size_t base = mhdr + 8;
+        const size_t mcin = m.Chunk("MCIN", std::string(4096, '\0'));
+        uint32_t     slots[12] = {1, static_cast<uint32_t>(mcin - base)};
+        slots[2]  = static_cast<uint32_t>(m.Chunk("MTEX", mtex) - base);
+        slots[3]  = static_cast<uint32_t>(m.Chunk("MMDX", mmdx) - base);
+        slots[4]  = static_cast<uint32_t>(m.Chunk("MMID", mmid) - base);
+        slots[5]  = static_cast<uint32_t>(m.Chunk("MWMO", mwmo) - base);
+        slots[6]  = static_cast<uint32_t>(m.Chunk("MWID", mwid) - base);
+        slots[7]  = static_cast<uint32_t>(m.Chunk("MDDF", mddf) - base);
+        slots[8]  = static_cast<uint32_t>(m.Chunk("MODF", modf) - base);
+        slots[9]  = static_cast<uint32_t>(m.Chunk("MFBO", mfbo) - base);
+        slots[11] = static_cast<uint32_t>(m.Chunk("MTXF", mtxf) - base);
+        std::memcpy(&m.bytes[base], slots, sizeof slots);
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            const SplitChunkData& c = chunks[i];
+            std::string header = c.header;
+            const uint32_t layers = static_cast<uint32_t>(std::min<size_t>(c.mcly.size() / 16, 4));
+            const uint32_t doodads = static_cast<uint32_t>(c.doodads.size()), mapObjs = static_cast<uint32_t>(c.mapObjs.size());
+            const uint32_t sizeAlpha = c.mcal.empty() ? 0u : static_cast<uint32_t>(c.mcal.size() + 8);
+            std::memcpy(&header[0x0C], &layers, 4);
+            std::memcpy(&header[0x10], &doodads, 4);
+            std::memcpy(&header[0x28], &sizeAlpha, 4);
+            std::memcpy(&header[0x38], &mapObjs, 4);
+            std::memcpy(&header[0x3C], &c.holes, 2);
+            SplitIff body;
+            body.bytes = header;
+            body.Chunk("MCVT", c.mcvt);
+            body.Chunk("MCNR", c.mcnr);
+            body.Chunk("MCLY", c.mcly);
+            std::string mcrf;
+            for (uint32_t d : c.doodads) mcrf += SplitWords({d});
+            for (uint32_t w : c.mapObjs) mcrf += SplitWords({w});
+            body.Chunk("MCRF", mcrf);
+            if (!c.mcsh.empty()) body.Chunk("MCSH", c.mcsh);
+            if (!c.mcal.empty()) body.Chunk("MCAL", c.mcal);
+            const size_t at = m.Chunk("MCNK", body.bytes);
+            const uint32_t info[2] = {static_cast<uint32_t>(at), static_cast<uint32_t>(body.bytes.size() + 8)};
+            std::memcpy(&m.bytes[mcin + 8 + 16 * i], info, 8);
+        }
+
+        // Split: the root keeps heights, normals and MFBO; the holes in 64 bits.
+        SplitIff& r = twin.root;
+        r.Chunk("MVER", SplitWords({18}));
+        const size_t rh = r.Chunk("MHDR", std::string(64, '\0'));
+        uint32_t     rslots[12] = {1};
+        rslots[9] = static_cast<uint32_t>(r.Chunk("MFBO", mfbo) - (rh + 8));
+        std::memcpy(&r.bytes[rh + 8], rslots, sizeof rslots);
+        SplitIff& t = twin.tex0;
+        t.Chunk("MVER", SplitWords({18}));
+        t.Chunk("MTEX", mtex);
+        t.Chunk("MTXF", mtxf);
+        SplitIff& o = twin.obj0;
+        o.Chunk("MVER", SplitWords({18}));
+        o.Chunk("MMDX", mmdx);
+        o.Chunk("MMID", mmid);
+        o.Chunk("MWMO", mwmo);
+        o.Chunk("MWID", mwid);
+        o.Chunk("MDDF", mddf);
+        o.Chunk("MODF", modf);
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            const SplitChunkData& c = chunks[i];
+            std::string header = c.header;
+            if (c.holes)
+            {
+                // Each of the 16 holes as the four of the 64 it covers.
+                uint8_t high[8] = {};
+                for (uint32_t row = 0; row < 4; ++row)
+                    for (uint32_t col = 0; col < 4; ++col)
+                        if (c.holes & (1u << (4 * row + col)))
+                        {
+                            high[2 * row] |= static_cast<uint8_t>(3u << (2 * col));
+                            high[2 * row + 1] |= static_cast<uint8_t>(3u << (2 * col));
+                        }
+                const uint32_t flags = SplitU32(reinterpret_cast<const uint8_t*>(header.data())) | 0x10000u;
+                std::memcpy(&header[0x00], &flags, 4);
+                std::memcpy(&header[0x14], high, 8);
+            }
+            SplitIff body;
+            body.bytes = header;
+            body.Chunk("MCVT", c.mcvt);
+            body.Chunk("MCNR", c.mcnr);
+            r.Chunk("MCNK", body.bytes);
+            SplitIff tb;
+            tb.Chunk("MCLY", c.mcly);
+            if (!c.mcsh.empty()) tb.Chunk("MCSH", c.mcsh);
+            if (!c.mcal.empty()) tb.Chunk("MCAL", c.mcal);
+            t.Chunk("MCNK", tb.bytes);
+            SplitIff ob;
+            std::string mcrd, mcrw;
+            for (uint32_t d : c.doodads) mcrd += SplitWords({d});
+            for (uint32_t w : c.mapObjs) mcrw += SplitWords({w});
+            if (!mcrd.empty()) ob.Chunk("MCRD", mcrd);
+            if (!mcrw.empty()) ob.Chunk("MCRW", mcrw);
+            o.Chunk("MCNK", ob.bytes);
+        }
+        return twin;
+    }
+
+    /// The split files the test's provider answers.
+    const SplitTwin* g_splitFiles = nullptr;
+    uint32_t         g_splitAsked = 0;
+    std::string      g_splitPath;
+
+    void WXL_CALL SplitProvide(void*, const wxl_terrain_tile* tile, wxl_terrain_tile_files* out)
+    {
+        ++g_splitAsked;
+        g_splitPath.assign(tile->path.data, tile->path.size);
+        if (!g_splitFiles) return;
+        out->data[WXL_TERRAIN_TILE_TEX0] = g_splitFiles->tex0.bytes.data();
+        out->size[WXL_TERRAIN_TILE_TEX0] = static_cast<uint32_t>(g_splitFiles->tex0.bytes.size());
+        out->data[WXL_TERRAIN_TILE_OBJ0] = g_splitFiles->obj0.bytes.data();
+        out->size[WXL_TERRAIN_TILE_OBJ0] = static_cast<uint32_t>(g_splitFiles->obj0.bytes.size());
+    }
+
+    /// The tile read as the client reads it, with the seams called where the fork calls them.
+    void SplitLoad(SplitFakeArea& a, std::vector<SplitFakeChunk>& chunks, bool seams)
+    {
+        if (seams) wxl::seam::MapArea::ProcessIffChunks::Before(&a);
+        SplitStockArea(a);
+        if (seams) wxl::seam::MapArea::ProcessIffChunks::After(&a);
+        chunks.assign(256, SplitFakeChunk{});
+        for (int32_t i = 0; i < 256; ++i) SplitStockChunk(a, chunks[static_cast<size_t>(i)], i % 16, i / 16, seams);
+    }
+
+    std::string SplitSpan(const void* p, size_t n) { return p ? std::string(static_cast<const char*>(p), n) : std::string(); }
+
+    void CheckSplitTiles()
+    {
+        namespace tiles = wxl::core::services::terrain_tiles;
+        const SplitTwin twin = MakeSplitTwin();
+
+        // The monolithic tile, with and without the seams: the seams leave it alone.
+        SplitFakeArea mono;
+        mono.x = 30, mono.y = 40;
+        mono.file  = "World\\Maps\\T\\T_30_40.adt";
+        mono.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> monoChunks;
+        SplitLoad(mono, monoChunks, false);
+        SplitFakeArea seen = mono;
+        seen.bytes         = twin.mono.bytes;
+        seen.textures.clear();
+        std::vector<SplitFakeChunk> seenChunks;
+        wxl_terrain_tile_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = &SplitProvide;
+        Check(tiles::SetProvider(0, &provider) == WXL_OK, "a tile provider is taken");
+        g_splitFiles = &twin;
+        g_splitAsked = 0;
+        SplitLoad(seen, seenChunks, true);
+        bool same = g_splitAsked == 0 && tiles::Held() == 0 && seen.textures == mono.textures && seen.doodadCount == mono.doodadCount;
+        for (size_t i = 0; i < 256; ++i)
+            same = same && seenChunks[i].placed == monoChunks[i].placed && SplitU32(seenChunks[i].header + 0x0C) == SplitU32(monoChunks[i].header + 0x0C);
+        Check(same, "a tile with MCIN: no provider asked, nothing held, read as the client reads it");
+
+        // The split tile.
+        SplitFakeArea split;
+        split.x = 30, split.y = 40;
+        split.file  = "World\\Maps\\T\\T_30_40.adt";
+        split.bytes = twin.root.bytes;
+        std::vector<SplitFakeChunk> splitChunks;
+        SplitLoad(split, splitChunks, true);
+        Check(g_splitAsked == 1 && g_splitPath == "World\\Maps\\T\\T_30_40.adt" && tiles::Held() == 1,
+              "a root without MCIN: the provider is asked once, by the tile's name, and the tile held");
+
+        Check(split.textures == mono.textures && split.textures.size() == 5, "its textures are _tex0's MTEX, loaded by LoadTextures in order");
+        bool flags = split.textureFlags && mono.textureFlags;
+        for (size_t k = 0; flags && k < 5; ++k) flags = split.textureFlags[k] == mono.textureFlags[k];
+        Check(flags, "its texture flags are _tex0's MTXF");
+        Check(split.doodadCount == mono.doodadCount && split.mapObjCount == mono.mapObjCount &&
+                  SplitSpan(split.doodadDef, 36 * 3) == SplitSpan(mono.doodadDef, 36 * 3) &&
+                  SplitSpan(split.mapObjDef, 64 * 2) == SplitSpan(mono.mapObjDef, 64 * 2),
+              "its placements are _obj0's MDDF and MODF, with their counts");
+        bool names = true;
+        for (int32_t d = 0; d < 3; ++d)
+        {
+            const uint32_t id = SplitU32(split.doodadDef + 36 * d);
+            names = names && std::string(split.m2Names + split.modelOffsets[id]) == std::string(mono.m2Names + mono.modelOffsets[id]);
+        }
+        names = names && std::string(split.wmoNames + split.wmoOffsets[0]) == std::string(mono.wmoNames + mono.wmoOffsets[0]);
+        Check(names, "each placement's model name through MMID and MWID, as in one file");
+        Check(split.flying && mono.flying && SplitSpan(split.flying, 36) == SplitSpan(mono.flying, 36), "MFBO the client's own, from the root");
+        Check(SplitU32(split.chunkInfo + 8) == 0, "the chunk index is the root's MCNKs, flags left to the client");
+
+        bool heights = true, layers = true, alpha = true, shadow = true, holes = true, placed = true, counts = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            const SplitFakeChunk& s = splitChunks[i];
+            const SplitFakeChunk& o = monoChunks[i];
+            heights = heights && SplitSpan(s.height, 145 * 4) == SplitSpan(o.height, 145 * 4) && SplitSpan(s.normals, 448) == SplitSpan(o.normals, 448) &&
+                      SplitU32(s.header + 0x34) == SplitU32(o.header + 0x34);
+            const uint32_t n = SplitU32(s.header + 0x0C);
+            layers = layers && n == SplitU32(o.header + 0x0C) && SplitSpan(s.layers, 16 * n) == SplitSpan(o.layers, 16 * n) && (n || !s.layers);
+            const uint32_t sizeAlpha = SplitU32(s.header + 0x28);
+            alpha = alpha && sizeAlpha == SplitU32(o.header + 0x28) && SplitSpan(s.alpha, sizeAlpha ? sizeAlpha - 8 : 0) == SplitSpan(o.alpha, sizeAlpha ? sizeAlpha - 8 : 0);
+            shadow = shadow && (SplitU32(s.header) & 1) == (SplitU32(o.header) & 1) && SplitSpan(s.shadow, s.shadow ? 512 : 0) == SplitSpan(o.shadow, o.shadow ? 512 : 0);
+            uint16_t hs, ho;
+            std::memcpy(&hs, s.header + 0x3C, 2);
+            std::memcpy(&ho, o.header + 0x3C, 2);
+            holes  = holes && hs == ho;
+            placed = placed && s.placed == o.placed;
+            counts = counts && SplitU32(s.header + 0x10) == SplitU32(o.header + 0x10) && SplitU32(s.header + 0x38) == SplitU32(o.header + 0x38);
+        }
+        Check(heights, "every chunk's heights, normals and header are the root's own");
+        Check(layers, "every chunk's layers are its _tex0 MCLY, its count the client's (at most 4: a chunk naming 6 keeps its first 4)");
+        Check(alpha, "its alpha maps are its _tex0 MCAL, sizeAlpha as one file says it");
+        Check(shadow, "its shadow its _tex0 MCSH, under the root's flag");
+        Check(holes && (SplitU32(splitChunks[5].header) & 0x10000) && splitChunks[5].header[0x3C], "64 holes folded into the client's 16 (the 2 x 2 under each)");
+        Check(placed, "map objects then doodads made in the order one file makes them, from MCRW and MCRD");
+        Check(counts, "the header's reference counts are MCRD's and MCRW's");
+
+        // References the client cannot follow are left out; holes are not lost.
+        SplitTwin odd = twin;
+        {
+            // Chunk 1's first doodad reference names a placement that does not exist; doodad 2 by FileDataID.
+            const uint32_t bad = 9;
+            size_t at = odd.obj0.bytes.find("DRCM");
+            std::memcpy(&odd.obj0.bytes[at + 8], &bad, 4);
+            at = odd.obj0.bytes.find("FDDM");
+            const uint16_t byId = 0x40;
+            std::memcpy(&odd.obj0.bytes[at + 8 + 36 * 2 + 34], &byId, 2);
+        }
+        g_splitFiles = &odd;
+        SplitFakeArea oddArea;
+        oddArea.x = 31, oddArea.y = 40;
+        oddArea.file  = "World\\Maps\\T\\T_31_40.adt";
+        oddArea.bytes = twin.root.bytes;
+        uint8_t partial[8] = {0, 0, 0, 0, 0, 0, 0, 0x80}; // one hole of 64, at the bottom right
+        const size_t mcnk0 = oddArea.bytes.find("KNCM");
+        std::memcpy(&oddArea.bytes[mcnk0 + 8 + 0x14], partial, 8);
+        const uint32_t hiFlag = 0x10000u;
+        std::memcpy(&oddArea.bytes[mcnk0 + 8], &hiFlag, 4);
+        const uint64_t leftBefore = tiles::Count().refsLeftOut;
+        std::vector<SplitFakeChunk> oddChunks;
+        SplitLoad(oddArea, oddChunks, true);
+        size_t made = 0, expected = 0;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            made += oddChunks[i].placed.size();
+            expected += monoChunks[i].placed.size();
+        }
+        uint16_t folded;
+        std::memcpy(&folded, oddChunks[0].header + 0x3C, 2);
+        Check(tiles::Count().refsLeftOut > leftBefore && made < expected && made > 0,
+              "a reference to no placement, or to one named by FileDataID, is left out and the rest made");
+        Check(folded == 0x8000, "a single hole of the 64 makes its quarter of the 16 a hole");
+
+        // No provider: the ground loads, untextured, without placements.
+        tiles::SetProvider(0, nullptr);
+        SplitFakeArea bare;
+        bare.x = 32, bare.y = 40;
+        bare.file  = "World\\Maps\\T\\T_32_40.adt";
+        bare.bytes = twin.root.bytes;
+        std::vector<SplitFakeChunk> bareChunks;
+        SplitLoad(bare, bareChunks, true);
+        bool empty = bare.textures.empty() && bare.doodadCount == 0 && bare.mapObjCount == 0;
+        for (size_t i = 0; i < 256; ++i)
+            empty = empty && SplitU32(bareChunks[i].header + 0x0C) == 0 && bareChunks[i].placed.empty() &&
+                    SplitSpan(bareChunks[i].height, 145 * 4) == SplitSpan(monoChunks[i].height, 145 * 4);
+        Check(empty, "without a provider a split tile loads its ground, no layers, no placements");
+
+        // The client frees the tiles: what was kept goes.
+        wxl::seam::Map::FreeArea::Before(&split);
+        wxl::seam::Map::FreeArea::Before(&oddArea);
+        wxl::seam::Map::FreeArea::Before(&bare);
+        Check(tiles::Held() == 0, "Map.FreeArea lets go of a split tile's files and index");
+        g_splitFiles = nullptr;
+    }
+
     void CheckTerrainLayerLimit()
     {
         namespace layers = wxl::core::services::terrain_layers;
@@ -15829,6 +16379,7 @@ int main(int argc, char** argv)
     CheckTerrainLayers();
     CheckTerrainLayerExtras();
     CheckTerrainLayerLimit();
+    CheckSplitTiles();
     CheckTerrainExtraLayers();
     CheckShaderCode();
     CheckDraw();

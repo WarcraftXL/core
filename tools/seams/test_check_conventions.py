@@ -746,6 +746,15 @@ GROUND_TRUTH = {
     # CMapChunk::Purge moves ECX to EDI (0x007C3377), reads no stack and ends in a bare `ret`
     # (0x007C35CE).
     "MapChunk.Purge":                  ("0x007C3370", "thiscall", ["ecx"], 0),
+    # Split tiles' seams. CMapArea::ProcessIffChunks moves ECX to EDI (0x007D6EF3), reads no stack
+    # and ends in a bare `ret` (0x007D7014); CMapChunk::ProcessIffChunks reads [ecx+0x10c]
+    # (0x007C3A13) and [ebp+8] (0x007C3A3B) and ends `ret 4` (0x007C3B39); CMapChunk::CreateRefs
+    # reads [ebp+8] to [ebp+0x14], moves ECX to EDI (0x007C6170) and ends `ret 0x10` (0x007C647A);
+    # CMap::FreeArea reads [ebp+8] (0x007C00A5) and ends in a bare `ret` (0x007C0103).
+    "MapArea.ProcessIffChunks":        ("0x007D6EF0", "thiscall", ["ecx"], 0),
+    "MapChunk.ProcessIffChunks":       ("0x007C3A10", "thiscall", ["ecx"], 1),
+    "MapChunk.CreateRefs":             ("0x007C6150", "thiscall", ["ecx"], 4),
+    "Map.FreeArea":                    ("0x007C00A0", "cdecl", [], 1),
     "FrameScript.Initialize":          ("0x00819BB0", "cdecl", [], 1),
     "FrameScript.Destroy":             ("0x0081A9A0", "cdecl", [], 0),
     "FrameScript.CreateEvents":        ("0x0081B5F0", "cdecl", [], 2),
@@ -1115,6 +1124,12 @@ GROUND_TRUTH = {
     "TerrainCall.AddBatch":            ("0x007B7AF0", "thiscall", ["ecx"], 4),
     "TerrainCall.FreeInst":            ("0x007B3960", "cdecl", [], 1),
     "TerrainCall.OnFallLocal":         ("0x006ECCF0", "thiscall", ["ecx"], 1),
+    # Split tiles' calls (calls_x86.def), read by hand: LoadTextures moves ECX to EDI (0x007D6D28),
+    # reads [ebp+0xc] (0x007D6D34) and [ebp+8] (0x007D6DB1) and ends `ret 8` (0x007D6E0B);
+    # CreateRefs reads [ebp+8] to [ebp+0x14], moves ECX to EDI (0x007C6170) and ends `ret 0x10`
+    # (0x007C647A).
+    "TerrainCall.LoadTextures":        ("0x007D6D20", "thiscall", ["ecx"], 2),
+    "TerrainCall.CreateRefs":          ("0x007C6150", "thiscall", ["ecx"], 4),
     # wxl.animation's calls (calls_x86.def), read by hand: PlayBaseAnimation moves ECX to EBX
     # (0x007385CA) and ends `ret 8` (0x0073880C); UpdateBaseAnimation moves ECX to ESI
     # (0x0073AC34) and ends `ret 8` (0x0073ACF9); GetCurrentTorsoAnimId moves ECX to ESI

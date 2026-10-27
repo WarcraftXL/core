@@ -5,6 +5,9 @@
 // <map>_<x>_<y>.adt with its _tex0, _tex1, _obj0, _obj1 and _lod), surveyed as wxl.modern-adt reads
 // them (adt::SurveyTile): per era, per file, the chunks it does not know, and what does not hold.
 // The corpus is the user's own (extracted from their archives); it never enters a repository.
+// Each tile whose root has no MCIN is also read as the mod's TileSet reads it and indexed as the
+// runtime indexes it to load it natively (services/SplitTile): the 256 chunks, the layers the
+// client can draw, the references it can follow; the maps split by name are listed, smallest first.
 //
 //   wxl-core-modern-adt-corpus <maps folder>
 //
@@ -12,6 +15,11 @@
 
 #include "adt/Reader.hpp"
 #include "adt/Survey.hpp"
+#include "services/SplitTile.hpp"
+#include "store/TileSet.hpp"
+
+#include <algorithm>
+#include <map>
 
 #include <cctype>
 #include <cstdio>
@@ -43,6 +51,11 @@ int main(int argc, char** argv)
     adt::SurveyStats stats;
     const std::regex root(R"((.+)_(\d+)_(\d+)\.adt)", std::regex::icase);
     uint32_t         maps = 0, mapsWithMaid = 0, mapsHeight = 0;
+    // The native load's own reading of each split set.
+    uint64_t nativeTiles = 0, nativeErrors = 0, nativeChunks = 0, layersKept = 0, layersCut = 0, refsKept = 0, refsLeftOut = 0, noMtex = 0;
+    std::vector<std::string>        nativeFirst;
+    std::map<std::string, uint32_t> byName; ///< maps split by name: tiles
+    namespace st = wxl::core::services::split_tile;
     for (const auto& dir : fs::directory_iterator(argv[1]))
     {
         if (!dir.is_directory()) continue;
@@ -66,7 +79,35 @@ int main(int argc, char** argv)
             files.obj0 = Read(stem + "_obj0.adt");
             files.obj1 = Read(stem + "_obj1.adt");
             files.lod  = Read(stem + "_lod.adt");
-            adt::SurveyTile(mapName + "/" + name, files, flags, stats);
+            const adt::Era era = adt::SurveyTile(mapName + "/" + name, files, flags, stats);
+            if (!TileSet::IsSplitRoot(files.root.data(), static_cast<uint32_t>(files.root.size()))) continue;
+            if (era == adt::Era::split) ++byName[mapName];
+            ++nativeTiles;
+            st::Tile    tile;
+            std::string why;
+            if (!st::Index(files.root.data(), static_cast<uint32_t>(files.root.size()), files.tex0.empty() ? nullptr : files.tex0.data(),
+                           static_cast<uint32_t>(files.tex0.size()), files.obj0.empty() ? nullptr : files.obj0.data(),
+                           static_cast<uint32_t>(files.obj0.size()), tile, why) ||
+                !why.empty())
+            {
+                ++nativeErrors;
+                if (nativeFirst.size() < 20) nativeFirst.push_back(mapName + "/" + name + ": " + why);
+                continue;
+            }
+            if (!tile.textures) ++noMtex;
+            for (uint32_t c = 0; c < 256; ++c)
+            {
+                ++nativeChunks;
+                const uint32_t kept = st::UsableLayers(tile, c), named = tile.parts[c].mcly.size / 16;
+                layersKept += kept;
+                layersCut += named - kept;
+                std::vector<uint32_t> d, w;
+                const uint32_t nd = tile.parts[c].mcrd.size / 4, nw = tile.parts[c].mcrw.size / 4;
+                const uint32_t kd = st::UsableDoodadRefs(tile, c, d) ? nd : static_cast<uint32_t>(d.size());
+                const uint32_t kw = st::UsableMapObjRefs(tile, c, w) ? nw : static_cast<uint32_t>(w.size());
+                refsKept += kd + kw;
+                refsLeftOut += (nd - kd) + (nw - kw);
+            }
         }
     }
     std::printf("%u maps (%u with MAID, %u flagged 0x80), %llu tiles: %llu monolithic, %llu split by name, %llu by FileDataID\n", maps,
@@ -87,5 +128,18 @@ int main(int argc, char** argv)
     for (const auto& u : stats.unknown) std::printf(" %s %llu", u.first.c_str(), static_cast<unsigned long long>(u.second));
     std::printf("\n%llu error(s)\n", static_cast<unsigned long long>(stats.errors));
     for (const std::string& e : stats.firstErrors) std::printf("  %s\n", e.c_str());
-    return stats.errors ? 1 : 0;
+    std::printf("native load: %llu root(s) without MCIN indexed, %llu error(s), %llu chunks; layers kept %llu, past 4 or not drawable %llu; "
+                "references kept %llu, left out %llu; %llu tile(s) without MTEX (textures by FileDataID)\n",
+                static_cast<unsigned long long>(nativeTiles), static_cast<unsigned long long>(nativeErrors),
+                static_cast<unsigned long long>(nativeChunks), static_cast<unsigned long long>(layersKept),
+                static_cast<unsigned long long>(layersCut), static_cast<unsigned long long>(refsKept),
+                static_cast<unsigned long long>(refsLeftOut), static_cast<unsigned long long>(noMtex));
+    for (const std::string& e : nativeFirst) std::printf("  %s\n", e.c_str());
+    std::vector<std::pair<uint32_t, std::string>> small;
+    for (const auto& m : byName) small.emplace_back(m.second, m.first);
+    std::sort(small.begin(), small.end());
+    std::printf("maps split by name (%zu), smallest first:", small.size());
+    for (size_t i = 0; i < small.size() && i < 25; ++i) std::printf(" %s %u", small[i].second.c_str(), small[i].first);
+    std::printf("\n");
+    return stats.errors || nativeErrors ? 1 : 0;
 }

@@ -6,16 +6,20 @@
 // to, as WorldGen and retail write them; a stock one (MTXF bit 0 only); a file cut short. The
 // height blend: its answers (a retail MTXP's numbers, from arakkoadungeon_26_30_tex0.adt), and the
 // rewritten pixel program run by a small ps_3_0 interpreter against the blend's formula worked out
-// apart: the Direct3D 9 path's CPU reference (the Vulkan renderer's is held on lavapipe).
+// apart: the Direct3D 9 path's CPU reference (the Vulkan renderer's is held on lavapipe). Tiles
+// split by file name: the files read beside a root without MCIN, handed to the tile provider, and
+// the textures a split tile's layers name, read from its _tex0.
 
 #include "Options.hpp"
 #include "adt/Reader.hpp"
 #include "adt/Survey.hpp"
 #include "features/ExtraLayers.hpp"
 #include "features/HeightBlend.hpp"
+#include "features/SplitTiles.hpp"
 #include "features/TextureScale.hpp"
 #include "shader/Ps3.hpp"
 #include "store/Store.hpp"
+#include "store/TileSet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1070,6 +1074,71 @@ namespace
               "a chunk referring to a placement past MDDF is an error, named");
     }
 
+    void TileSetCases()
+    {
+        // A split root (MHDR of zeros, MCNKs) and a monolithic one (MCIN).
+        Adt split;
+        split.Chunk(adt::kMVER, Words({18}));
+        split.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
+        split.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
+        Adt mono;
+        mono.Chunk(adt::kMVER, Words({18}));
+        std::vector<uint8_t> mhdr(64, 0);
+        mhdr[4] = 0x40;
+        mono.Chunk(adt::kMHDR, mhdr);
+        mono.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
+        Check(TileSet::IsSplitRoot(split.bytes.data(), static_cast<uint32_t>(split.bytes.size())) &&
+                  !TileSet::IsSplitRoot(mono.bytes.data(), static_cast<uint32_t>(mono.bytes.size())) && !TileSet::IsSplitRoot(nullptr, 0),
+              "a root without MCIN is split; one with MCIN, or nothing, is not");
+        Check(TileSet::SplitName("W\\M_1_2.ADT", "_obj0") == "W\\M_1_2_obj0.adt" && TileSet::SplitName("x.wdt", "_tex0").empty(),
+              "a tile's files are its name with their suffix");
+
+        // The tex0 of a split tile names its own textures.
+        Adt tex0;
+        tex0.Chunk(adt::kMVER, Words({18}));
+        const std::string names("t\\x.blp\0t\\y.blp\0", 16);
+        tex0.Chunk(adt::kMTEX, std::vector<uint8_t>(names.begin(), names.end()));
+        tex0.Chunk(adt::kMTXF, Words({0x20, 0}));
+        std::vector<std::string> read;
+        TileSet tiles([&](const std::string& name, std::vector<uint8_t>& bytes) {
+            read.push_back(name);
+            if (name == "W\\M_3_4_tex0.adt") bytes = tex0.bytes;
+            else if (name == "W\\M_3_4_obj0.adt") bytes = Words({1, 2});
+            else return false;
+            return true;
+        });
+        const TileSet::Files& files = tiles.Loaded("W\\M_3_4.adt", 3, 4, split.bytes.data(), static_cast<uint32_t>(split.bytes.size()));
+        Check(files.split && files.tex0 == tex0.bytes && files.obj0.size() == 8 && files.obj1.empty() && read.size() == 3,
+              "a split root's _tex0, _obj0 and _obj1 are read (the absent one left empty)");
+        tiles.Loaded("W\\M_5_4.adt", 5, 4, mono.bytes.data(), static_cast<uint32_t>(mono.bytes.size()));
+        Check(read.size() == 4 && !tiles.Of(5, 4)->split, "a root with MCIN has its _tex0 read only");
+
+        Store store(adt::Prefer::automatic, &tiles);
+        const Area& area = store.AreaOf(3, 4, split.bytes.data(), static_cast<uint32_t>(split.bytes.size()));
+        Check(area.names.size() == 2 && area.names[1] == "t\\y.blp" && area.textures.size() == 2 && area.textures[0].scale == 2,
+              "a split tile's textures and scales are its _tex0's");
+
+        SplitTiles provider(tiles);
+        wxl_terrain_tile tile{};
+        tile.struct_size = sizeof tile;
+        tile.tile_x = 3, tile.tile_y = 4;
+        tile.path      = wxl_str{"W\\M_3_4.adt", 11};
+        tile.file      = split.bytes.data();
+        tile.file_size = static_cast<uint32_t>(split.bytes.size());
+        wxl_terrain_tile_files out{};
+        out.struct_size = sizeof out;
+        provider.Answer(tile, out);
+        Check(read.size() == 4 && out.data[WXL_TERRAIN_TILE_TEX0] == files.tex0.data() && out.size[WXL_TERRAIN_TILE_OBJ0] == 8 &&
+                  !out.data[WXL_TERRAIN_TILE_OBJ1] && provider.Tiles() == 1,
+              "the provider answers the files read with the root, without reading them again");
+        tile.tile_x = 7;
+        tile.path   = wxl_str{"W\\M_7_4.adt", 11};
+        out         = wxl_terrain_tile_files{};
+        provider.Answer(tile, out);
+        Check(read.size() == 7 && !out.data[WXL_TERRAIN_TILE_TEX0] && provider.Missing() == 1,
+              "a tile asked before it was read has its files read then; none found, none answered");
+    }
+
     void OptionCases()
     {
         Options o = ParseOptions("; comment\n[texture_scale]\nenabled = 0\nsource = MTXF\n");
@@ -1079,6 +1148,8 @@ namespace
         Check(ParseOptions("").texture_scale && ParseOptions("").source == adt::Prefer::automatic, "no file: on, auto");
         o = ParseOptions("[height_blend]\nenabled = 0\n");
         Check(!o.height_blend && o.texture_scale && o.problems.empty() && ParseOptions("").height_blend, "[height_blend] enabled, on by default");
+        o = ParseOptions("[split_tiles]\nenabled = 0\n");
+        Check(!o.split_tiles && o.problems.empty() && ParseOptions("").split_tiles, "[split_tiles] enabled, on by default");
     }
 }
 
@@ -1096,6 +1167,7 @@ int main()
     BigAlphaCases();
     EightLayerCases();
     OptionCases();
+    TileSetCases();
     std::printf("%d check(s), %d failure(s)\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
