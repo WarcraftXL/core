@@ -537,6 +537,76 @@ namespace
                   Near(sh::LineCoverage(3.0f, 3.0f, 2.0f), 0.0f),
               "its edges fade over its softness");
         Check(sh::OffsetCode(40.0f) == 30 && sh::OffsetCode(-40.0f) == -30 && sh::SoftCode(99.0f) == 60, "offsets and softness are bounded");
+        // Since abi 0.1.39: volumes' faces, each in its own frame.
+        sh::Desc box;
+        box.kind   = sh::kBox;
+        box.center = sh::V3{10.0f, 20.0f, 30.0f};
+        box.size   = sh::V3{4.0f, 2.0f, 6.0f};
+        box.facing = 0.7f;
+        box.pitch  = 0.2f;
+        sh::Mesh boxMesh;
+        Check(sh::Build(box, sh::Parts{true, true}, nullptr, boxMesh) && boxMesh.faces.size() == 6 &&
+                  boxMesh.face_plane.size() == boxMesh.triangles.size(),
+              "a box's inside is six faces, every corner in its face's frame");
+        bool onFace = true, frames = true;
+        for (const sh::Mesh::Face& face : boxMesh.faces)
+        {
+            const float dot = face.up.x * face.left.x + face.up.y * face.left.y + face.up.z * face.left.z;
+            frames = frames && std::fabs(dot) < 1e-5f && face.count == 6;
+            for (uint32_t t = face.first; t < face.first + face.count; ++t)
+            {
+                const sh::V3 p = boxMesh.face_plane[t];
+                onFace = onFace && std::fabs(std::fabs(p.x) - face.plane.hx) < 1e-3f && std::fabs(std::fabs(p.y) - face.plane.hy) < 1e-3f;
+            }
+        }
+        Check(frames && onFace, "each face's corners at its half sides, its axes square");
+        const sh::Mesh::Face& side = boxMesh.faces[5]; // +x, the facing's side
+        Check(std::fabs(side.plane.hx - 3.0f) < 1e-5f && std::fabs(side.plane.hy - 1.0f) < 1e-5f, "a side face's picture stands up the box");
+        sh::SurfaceLook faceLook;
+        faceLook.textured = true;
+        sh::SurfaceConstants fk = sh::MakeFaceSurface(side, faceLook);
+        sh::Picture(fk, 3.0f, 1.0f, a);
+        Check(Near(a[0], 0.0f) && Near(a[1], 0.0f), "FIT on a face: its top left corner is the picture's");
+        // WORLD on two boxes side by side, turned alike: their facing sides join.
+        faceLook.uv     = sh::kUvWorld;
+        faceLook.size_x = faceLook.size_y = 1.5f;
+        sh::Desc other  = box;
+        const float cf  = std::cos(box.facing), sf = std::sin(box.facing);
+        other.pitch     = 0.0f;
+        box.pitch       = 0.0f;
+        other.center    = sh::V3{box.center.x + 2.0f * sf, box.center.y - 2.0f * cf, box.center.z}; // 2 yd to the box's right, where its face's left points
+        sh::Mesh m1b, m2b;
+        sh::Build(box, sh::Parts{false, true}, nullptr, m1b);
+        sh::Build(other, sh::Parts{false, true}, nullptr, m2b);
+        const sh::Mesh::Face& f1 = m1b.faces[5];
+        const sh::Mesh::Face& f2 = m2b.faces[5];
+        const sh::SurfaceConstants w1 = sh::MakeFaceSurface(f1, faceLook), w2 = sh::MakeFaceSurface(f2, faceLook);
+        // The world point on both faces' plane, 1 yd up, at the boxes' shared edge.
+        const sh::V3 edgeWorld{f1.origin.x + f1.left.x * 1.0f + f1.up.x, f1.origin.y + f1.left.y * 1.0f + f1.up.y, f1.origin.z + f1.up.z};
+        const auto in = [](const sh::Mesh::Face& f, sh::V3 w) {
+            const sh::V3 r{w.x - f.origin.x, w.y - f.origin.y, w.z - f.origin.z};
+            return sh::V3{r.x * f.up.x + r.y * f.up.y + r.z * f.up.z, r.x * f.left.x + r.y * f.left.y + r.z * f.left.z, 0.0f};
+        };
+        const sh::V3 e1 = in(f1, edgeWorld), e2 = in(f2, edgeWorld);
+        sh::Picture(w1, e1.x, e1.y, a);
+        sh::Picture(w2, e2.x, e2.y, b);
+        Check(Near(a[0], b[0], 1e-3f) && Near(a[1], b[1], 1e-3f) && std::fabs(e2.y + 1.0f) < 1e-3f, "WORLD on faces: two boxes side by side join");
+        // A cylinder: its side once around, the seam behind it; its ends discs.
+        sh::Desc can;
+        can.kind   = sh::kCylinder;
+        can.center = sh::V3{0, 0, 0};
+        can.radius = 2.0f;
+        can.size.z = 3.0f;
+        sh::Mesh canMesh;
+        sh::Build(can, sh::Parts{false, true}, nullptr, canMesh);
+        bool seamless = canMesh.faces.size() == 3 && canMesh.faces[0].plane.code == 1 && canMesh.faces[1].plane.code == 0;
+        const sh::Mesh::Face& wall = canMesh.faces[0];
+        for (uint32_t t = wall.first; seamless && t + 2 < wall.first + wall.count; t += 3)
+            for (int k = 0; k < 3; ++k)
+                seamless = seamless && std::fabs(canMesh.face_plane[t + k].y - canMesh.face_plane[t + (k + 1) % 3].y) < 2.0f * 3.1416f * 2.0f / 8.0f;
+        Check(seamless, "a cylinder's side: one picture around it, no triangle across the seam");
+        Check(kv[22] == 1.0f, "a run's opacity multiplier is 1 unless it says otherwise");
+
         // The plain vertices are what they were before shadows existed.
         v.clear();
         sh::PushSegment(v, sh::Mesh::Segment{{10, 20, 0.5f}, {50, 20, 0.5f}, 0, 0}, sh::V3{}, 0xFFFFFFFFu, sh::WidthCode(4.0f), false);
@@ -651,6 +721,46 @@ namespace
         grid.size    = sh::V3{32.0f, 32.0f, 0.0f};
         grid.spacing = 1.0f;
         surface("a 32 x 32 yd grid every yard with its shadow", grid, sh::Parts{true, false}, true);
+
+        // Since abi 0.1.39: a textured box's and cylinder's faces written each frame (their numbers
+        // made again: what a uv_offset scrolled each frame costs; nothing is built again).
+        auto faces = [&](const char* what, const sh::Desc& d) {
+            sh::Mesh    mesh;
+            const int   rounds = 200;
+            const auto  from   = std::chrono::steady_clock::now();
+            for (int i = 0; i < rounds; ++i) sh::Build(d, sh::Parts{true, true}, nullptr, mesh);
+            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - from).count() / rounds;
+            std::vector<sh::Vertex> stream;
+            sh::SurfaceLook         look;
+            look.textured = true;
+            look.uv       = sh::kUvTile;
+            const auto w0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < rounds; ++i)
+            {
+                stream.clear();
+                look.offset_x = 0.01f * static_cast<float>(i);
+                for (const sh::Mesh::Face& face : mesh.faces)
+                {
+                    const sh::SurfaceConstants k = sh::MakeFaceSurface(face, look);
+                    (void)k;
+                    for (uint32_t t = face.first; t + 2 < face.first + face.count; t += 3)
+                        sh::PushSurfaceTriangle(stream, &mesh.triangles[t], &mesh.face_plane[t], c, 0xFFFFFFFFu, false);
+                }
+                for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(stream, seg, c, 0xFFFFFFFFu, 16, false);
+            }
+            const double ws = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - w0).count() / rounds;
+            std::printf("  cost: %s: %zu vertices, %zu faces, built in %.1f us, written with its numbers in %.1f us\n", what, stream.size(),
+                        mesh.faces.size(), us, ws);
+        };
+        sh::Desc crate;
+        crate.kind   = sh::kBox;
+        crate.center = c;
+        crate.size   = sh::V3{4.0f, 4.0f, 6.0f};
+        faces("a textured box, outlined (every face written)", crate);
+        sh::Desc can = crate;
+        can.kind     = sh::kCylinder;
+        can.radius   = 3.0f;
+        faces("a textured cylinder, outlined (every face written)", can);
     }
 
     void ExpandCases()
@@ -1007,6 +1117,108 @@ namespace
         if (tex) s.live.renderer.DestroyTexture(tex);
     }
 
+    /// A box's face textured in its own frame and feathered at its edges, and a shape seen through a
+    /// wall (occluded_alpha): every pixel held to the CPU's copy.
+    void LiveVolumes(Setup& s)
+    {
+        const uint32_t W = 128, H = 96;
+        const sh::View view = PixelView(W, H);
+        float          k[24];
+        sh::Constants(view, k);
+        render::Shapes shapes;
+        shapes.Attach(s.render);
+        const int             TW = 8, TH = 8;
+        std::vector<uint32_t> texels(TW * TH);
+        for (int y = 0; y < TH; ++y)
+            for (int x = 0; x < TW; ++x)
+                texels[static_cast<size_t>(y) * TW + x] = Argb(static_cast<uint32_t>(x * 32 + 16), static_cast<uint32_t>(y * 32 + 16), 128u, 255u);
+        Check(s.Begin(), "a frame begins");
+        Check(s.Wall(0, 0, 64, 96, 0.2f), "a wall stands over the left half");
+        draw::TextureDesc desc;
+        desc.format         = draw::kTexArgb8888;
+        desc.width          = TW;
+        desc.height         = TH;
+        draw::Texture* tex  = s.live.renderer.CreateTexture(desc);
+        uint32_t       pitch = 0;
+        uint8_t*       to    = tex ? s.live.renderer.LockTexture(tex, 0, 0, 0, 0, TW, TH, pitch) : nullptr;
+        if (to)
+        {
+            for (int y = 0; y < TH; ++y) std::memcpy(to + static_cast<size_t>(y) * pitch, &texels[static_cast<size_t>(y) * TW], TW * 4u);
+            s.live.renderer.UnlockTexture(tex);
+        }
+        // The box's top face (+z), turned, its picture over it; behind the wall on the left (z 0.5
+        // and its top at 0.55, the wall at 0.2), drawn there at 0.3 of its opacity.
+        sh::Desc box;
+        box.kind   = sh::kBox;
+        box.center = sh::V3{64, 48, 0.5f};
+        box.size   = sh::V3{60, 40, 0.1f};
+        box.facing = 0.25f;
+        sh::Mesh mesh;
+        sh::Build(box, sh::Parts{false, true}, nullptr, mesh);
+        const sh::Mesh::Face& face = mesh.faces[1];
+        sh::SurfaceLook look;
+        look.textured = true;
+        look.feather  = 4.0f;
+        sh::Surface surface;
+        surface.constants = sh::MakeFaceSurface(face, look);
+        surface.texture   = tex;
+        std::vector<sh::Vertex> v;
+        const uint32_t          color = 0xFFFFFFFFu;
+        for (uint32_t t = face.first; t + 2 < face.first + face.count; t += 3)
+            sh::PushSurfaceTriangle(v, &mesh.triangles[t], &mesh.face_plane[t], sh::V3{}, color, false);
+        sh::Run seen;
+        seen.count   = static_cast<uint32_t>(v.size());
+        seen.program = sh::kSurface;
+        sh::Run hidden = seen;
+        hidden.behind  = true;
+        hidden.alpha   = 0.3f;
+        const sh::Run runs[2] = {hidden, seen};
+        std::string    why;
+        const uint32_t drawn = shapes.Draw(v.data(), runs, 2, &surface, k, view.viewport, &why);
+        if (!drawn) std::printf("  refused: %s\n", why.c_str());
+        Check(drawn == 2 * v.size(), "the face is drawn twice: behind the wall, then where it is seen");
+        const std::vector<uint32_t> px = s.live.End();
+        if (px.size() != W * H) return;
+        float worstSeen = 0.0f, worstHidden = 0.0f;
+        int   seenCount = 0, hiddenCount = 0;
+        const float wall[3] = {0.0f, 0.0f, 1.0f}, floor[3] = {0.0f, 0.0f, 0.0f};
+        for (int y = 0; y < static_cast<int>(H); ++y)
+            for (int x = 0; x < static_cast<int>(W); ++x)
+            {
+                const sh::V3 r{static_cast<float>(x) - face.origin.x, static_cast<float>(y) - face.origin.y, 0.0f};
+                const sh::V3 p{r.x * face.up.x + r.y * face.up.y, r.x * face.left.x + r.y * face.left.y, 0.0f};
+                if (std::fabs(p.x) > face.plane.hx - 1.0f || std::fabs(p.y) > face.plane.hy - 1.0f || std::abs(x - 64) < 2) continue;
+                float uv[2], texel[4], out[4];
+                sh::Picture(surface.constants, p.x, p.y, uv);
+                Bilinear(texels, TW, TH, uv[0], uv[1], false, texel);
+                const float c[4] = {1, 1, 1, 1};
+                sh::Shade(surface.constants, p, c, texel, out);
+                const bool  behind = x < 64;
+                const float a      = out[3] * (behind ? 0.3f : 1.0f);
+                const float* under = behind ? wall : floor;
+                const uint32_t got = px[static_cast<size_t>(y) * W + x];
+                const float have[3] = {R(got) / 255.0f, G(got) / 255.0f, B(got) / 255.0f};
+                float worst = 0.0f;
+                for (int ch = 0; ch < 3; ++ch) worst = std::max(worst, std::fabs(have[ch] - (out[ch] * a + under[ch] * (1.0f - a))));
+                if (behind)
+                {
+                    worstHidden = std::max(worstHidden, worst);
+                    ++hiddenCount;
+                }
+                else
+                {
+                    worstSeen = std::max(worstSeen, worst);
+                    ++seenCount;
+                }
+            }
+        if (worstSeen > 4.0f / 255.0f || worstHidden > 4.0f / 255.0f)
+            std::printf("  face: worst %.1f/255 seen (%d), %.1f/255 behind the wall (%d)\n", worstSeen * 255.0f, seenCount, worstHidden * 255.0f, hiddenCount);
+        Check(seenCount > 300 && worstSeen <= 4.0f / 255.0f, "a box's face textured in its own frame, feathered at its edges, matches the CPU's picture");
+        Check(hiddenCount > 300 && worstHidden <= 4.0f / 255.0f, "behind the wall it is drawn at its occluded opacity over the wall");
+        shapes.Detach();
+        if (tex) s.live.renderer.DestroyTexture(tex);
+    }
+
     void ProgramCases()
     {
 #if defined(WXL_VK_SPIRV_VAL)
@@ -1044,9 +1256,14 @@ namespace wxl::vk::test
             LiveDraw(s);
         }
         // One device at a time: the device's functions are loaded for one.
-        Setup big;
-        if (!big.Make(128, 96)) return false;
-        LiveSurfaces(big);
+        {
+            Setup big;
+            if (!big.Make(128, 96)) return false;
+            LiveSurfaces(big);
+        }
+        Setup volumes;
+        if (!volumes.Make(128, 96)) return false;
+        LiveVolumes(volumes);
         return true;
     }
 }

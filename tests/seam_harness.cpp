@@ -6753,6 +6753,8 @@ namespace
             args[31] = String("SPELLS\\CrackedGround.blp");
             args[40] = Number(2);
             args[41] = Number(0.5);
+            args.resize(44, Number(0));
+            args[43] = Number(0.35);
             drawn    = CallGlobal("__wxl_draw", args, &drawFound);
             Check(drawn.size() == 1 && drawn[0].type == WXL_VALUE_BOOL, "draw: WxlDraw's native half takes a texture, a blend, a feather and a shadow");
             args[40] = Number(9);
@@ -14267,6 +14269,8 @@ namespace
             const void* texture = nullptr;
             float       surface[6][4] = {};
             size_t      first = 0;
+            DWORD       zFunc = 0;
+            float       alpha = 1.0f; ///< c245.z: the run's opacity multiplier
         };
         std::vector<Run>             runs;
         const void*                  pixel = nullptr;
@@ -14348,6 +14352,8 @@ namespace
             Run run{primitives * 3, State(D3DRS_ZENABLE), State(D3DRS_COLORWRITEENABLE), State(D3DRS_ALPHABLENDENABLE),
                     State(D3DRS_SRCBLEND), State(D3DRS_DESTBLEND), pixel, texture0};
             std::memcpy(run.surface, pixelConstants[200], sizeof run.surface);
+            run.zFunc = State(D3DRS_ZFUNC);
+            run.alpha = constants[245][2];
             run.first = vertices.size();
             vertices.insert(vertices.end(), v, v + primitives * 3);
             runs.push_back(run);
@@ -14653,6 +14659,69 @@ namespace
         Check(stats.shadows == 1 && shadows == 12 && lines == 12, "its shadow is its segments once more, 1.5 pixels right and down, black");
         Check(faded == 3, "the line starts transparent at its first point");
         Check(!device.vertices.empty() && (device.vertices[0].color & 0xFFFFFFu) == 0, "the shadow is drawn before the line");
+
+        // abi 0.1.39: a textured box seen through the ground, its faces each a surface; the same
+        // immediate shape given again is not built again; abi 0.1.38's style still taken.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        wxl_draw_shape crate{};
+        crate.struct_size = sizeof crate;
+        crate.kind        = WXL_DRAW_BOX;
+        crate.center      = wxl_vec3{112.0f, 204.0f, 4.0f};
+        crate.size        = wxl_vec3{2.0f, 2.0f, 4.0f};
+        wxl_draw_style xray = stain;
+        xray.alpha          = 1.0f;
+        xray.blend          = WXL_DRAW_BLEND_ALPHA;
+        xray.uv             = WXL_DRAW_UV_TILE;
+        xray.uv_offset_x    = 0.25f;
+        xray.occluded_alpha = 0.35f;
+        Check(api.draw(&crate, &xray) == WXL_OK && api.draw(&crate, &xray) == WXL_OK, "a textured box seen through the ground, twice");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.occluded == 2 && stats.textured == 2, "both drawn where the scene hides them too, their faces as surfaces");
+        size_t faceRuns = 0, behindRuns = 0, behindFaces = 0;
+        bool   order = true;
+        for (size_t i = 0; i < device.runs.size(); ++i)
+        {
+            const auto& run = device.runs[i];
+            const bool  face = run.texture == g_fakeD3dTexture && (device.vertices[run.first].side & 3) == 1; // a surface: textured triangles
+            faceRuns += face && run.zFunc == D3DCMP_LESSEQUAL ? 1 : 0;
+            if (run.zFunc == D3DCMP_GREATER)
+            {
+                ++behindRuns;
+                behindFaces += face ? 1 : 0;
+                order = order && std::fabs(run.alpha - 0.35f) < 1e-6f;
+            }
+            else
+                order = order && run.alpha == 1.0f;
+        }
+        Check(faceRuns >= 2 && faceRuns <= 6 && behindFaces == faceRuns, "a box shows at most three faces each, every one drawn behind the scene too");
+        Check(behindRuns > 0 && order, "the hidden part at 0.35 of its opacity (GREATER), the seen part as usual");
+        Check(device.State(D3DRS_ZFUNC) == D3DCMP_LESSEQUAL, "the depth test is put back");
+        bool facePlane = false;
+        for (const auto& run : device.runs)
+            if (run.texture == g_fakeD3dTexture && run.vertices && (device.vertices[run.first].side & 3) == 1)
+            {
+                const auto& v = device.vertices[run.first];
+                facePlane = std::fabs(v.other[0]) <= 2.0f + 1e-3f && std::fabs(v.other[1]) <= 1.0f + 1e-3f && (v.side & 3) == 1 &&
+                            run.surface[0][2] != 0.0f && run.surface[3][0] == 1.0f;
+            }
+        Check(facePlane, "a face's corners carry its frame, its numbers its offset and its box");
+        // The same immediate shapes again: not built again; a moved one is.
+        Check(api.draw(&crate, &xray) == WXL_OK && api.draw(&circle, &xray) == WXL_OK, "the box again, and a circle where the other box was");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.reused == 1, "a shape given as the frame before is drawn without being built again");
+        wxl_draw_style older = xray;
+        older.struct_size    = WXL_DRAW_STYLE_SIZE_0138;
+        Check(api.draw(&crate, &older) == WXL_OK, "a style of abi 0.1.38 is taken, occluded_alpha not read");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.occluded == 0 && stats.textured == 1, "and draws only what is seen");
+        wxl_draw_style badXray = xray;
+        badXray.occluded_alpha = 1.5f;
+        Check(api.draw(&crate, &badXray) == WXL_E_INVALID, "an occluded opacity past 1 is refused");
 
         // A device without shader model 3 says so.
         device.caps.VertexShaderVersion = D3DVS_VERSION(2, 0);
