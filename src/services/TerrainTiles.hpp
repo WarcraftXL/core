@@ -54,6 +54,8 @@ namespace wxl::core::services::terrain_tiles
         uint64_t layersCut = 0;     ///< chunks whose layers stopped before MCLY's end (past 4, or not drawable)
         uint64_t refsLeftOut = 0;   ///< references left out (a placement that does not exist, a FileDataID)
         uint64_t unprovided = 0;    ///< split tiles no provider answered
+        uint64_t named = 0;         ///< FileDataIDs given a name (textures, placements)
+        uint64_t unnamed = 0;       ///< FileDataIDs no provider named
     };
     const Counters& Count();
     /// Areas held now.

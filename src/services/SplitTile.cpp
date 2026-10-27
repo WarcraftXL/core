@@ -62,6 +62,8 @@ namespace wxl::core::services::split_tile
                 else if (tex && id == Id("MTXF")) tile.mtxf = span;
                 else if (tex && id == Id("MTXP")) tile.mtxp = span;
                 else if (tex && id == Id("MAMP")) tile.mamp = span;
+                else if (tex && id == Id("MDID")) tile.mdid = span;
+                else if (tex && id == Id("MHID")) tile.mhid = span;
                 else if (!tex && id == Id("MMDX")) tile.mmdx = span;
                 else if (!tex && id == Id("MMID")) tile.mmid = span;
                 else if (!tex && id == Id("MWMO")) tile.mwmo = span;
@@ -177,6 +179,8 @@ namespace wxl::core::services::split_tile
                 out.mtxf = parts.mtxf;
                 out.mtxp = parts.mtxp;
                 out.mamp = parts.mamp;
+                out.mdid = parts.mdid;
+                out.mhid = parts.mhid;
                 out.textures = CountNames(out.mtex);
                 for (uint32_t i = 0; i < 256; ++i)
                 {
@@ -230,7 +234,7 @@ namespace wxl::core::services::split_tile
         for (; k < count && k < 4; ++k)
         {
             const uint8_t* layer = p.mcly.data + 16 * k;
-            if (U32(layer) >= tile.textures) break;
+            if (U32(layer) >= tile.textures || (U32(layer) < tile.missing.size() && tile.missing[U32(layer)])) break;
             // An alpha map (0x100) must start inside MCAL; how much it reads the client decides by its
             // own flags, as for any file.
             if ((U32(layer + 4) & 0x100) && U32(layer + 8) >= p.mcal.size) break;
@@ -248,6 +252,17 @@ namespace wxl::core::services::split_tile
     {
         if (chunk >= 256) return true;
         return UsableRefs(tile.parts[chunk].mcrw, tile.modf, kMapObjDefSize, 56, kMapObjByFileId, tile.mwid, tile.mwmo, kept);
+    }
+
+    void NameByIndex(Span defs, uint32_t defSize, uint32_t index, uint32_t nameId)
+    {
+        if (static_cast<uint64_t>(index + 1) * defSize > defs.size) return;
+        uint8_t* def = defs.data + static_cast<size_t>(index) * defSize;
+        std::memcpy(def, &nameId, 4);
+        const uint32_t flagsAt = defSize == kDoodadDefSize ? 34 : 56;
+        const uint16_t byId    = defSize == kDoodadDefSize ? kDoodadByFileId : kMapObjByFileId;
+        const uint16_t flags   = static_cast<uint16_t>(U16(def + flagsAt) & ~byId);
+        std::memcpy(def + flagsAt, &flags, 2);
     }
 
     std::vector<int32_t> FlagsFromMtxp(const Tile& tile)

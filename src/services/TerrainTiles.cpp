@@ -33,6 +33,7 @@ namespace wxl::core::services::terrain_tiles
             uint32_t            mod = 0;
             wxl_terrain_tile_fn fn = nullptr;
             void*               user = nullptr;
+            wxl_terrain_name_fn name_fn = nullptr; ///< abi 0.1.46
         };
 
         /// A chunk's references the client can follow, when some of the file's could not be.
@@ -52,6 +53,9 @@ namespace wxl::core::services::terrain_tiles
             split_tile::Tile          tile;
             std::vector<uint8_t>      chunkInfo;      ///< 256 SMChunkInfo: offset, size, flags, padding
             std::vector<int32_t>      textureFlags;   ///< MTXF as the client reads it, when MTXF is absent or short
+            // Names given to FileDataIDs (8.1 and later), laid out as MTEX, MMDX/MMID, MWMO/MWID.
+            std::vector<char>         textureNames, modelNames, mapObjNames;
+            std::vector<uint32_t>     modelOffsets, mapObjOffsets;
             std::array<ChunkRefs, 256> refs;
         };
 
@@ -96,22 +100,140 @@ namespace wxl::core::services::terrain_tiles
         }
     }
 
+    namespace
+    {
+        bool g_toldUnnamed = false;
+
+        /// The name the providers give a FileDataID; false when none does.
+        bool NameOf(uint32_t id, std::string& out)
+        {
+            if (!id) return false;
+            for (const Provider& p : std::vector<Provider>(g_providers))
+            {
+                if (!p.name_fn) continue;
+                char     name[260] = {};
+                wxl_bool named     = WXL_FALSE;
+                CallMod(p.mod, kTag, "a tile provider's name function", [&] { named = p.name_fn(p.user, id, name, sizeof name); });
+                name[sizeof name - 1] = 0;
+                if (named == WXL_TRUE && name[0])
+                {
+                    out = name;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// Placements by FileDataID of one table (MDDF or MODF): each named one given its name in a
+        /// table laid out as MMDX/MMID (the file's own names first), the rest left flagged.
+        uint32_t NamePlacements(split_tile::Span defs, uint32_t defSize, uint16_t byId, uint32_t flagsAt, split_tile::Span& names,
+                                split_tile::Span& offsets, std::vector<char>& nameTable, std::vector<uint32_t>& offsetTable,
+                                uint32_t& unnamed)
+        {
+            std::vector<uint32_t> flagged;
+            for (uint32_t i = 0; i < defs.size / defSize; ++i)
+            {
+                uint16_t flags;
+                std::memcpy(&flags, defs.data + static_cast<size_t>(i) * defSize + flagsAt, 2);
+                if (flags & byId) flagged.push_back(i);
+            }
+            if (flagged.empty()) return 0;
+            nameTable.assign(names.data, names.data + names.size);
+            offsetTable.assign(offsets.size / 4, 0);
+            if (offsets.size) std::memcpy(offsetTable.data(), offsets.data, offsetTable.size() * 4);
+            std::vector<std::pair<uint32_t, uint32_t>> known; // FileDataID -> its nameId
+            std::vector<std::pair<uint32_t, uint32_t>> rename; // entry -> nameId
+            uint32_t                                   named = 0;
+            for (uint32_t i : flagged)
+            {
+                const uint32_t id = Get32(defs.data + static_cast<size_t>(i) * defSize);
+                uint32_t       nameId = UINT32_MAX;
+                for (const auto& k : known)
+                    if (k.first == id) nameId = k.second;
+                std::string name;
+                if (nameId == UINT32_MAX && NameOf(id, name))
+                {
+                    nameId = static_cast<uint32_t>(offsetTable.size());
+                    offsetTable.push_back(static_cast<uint32_t>(nameTable.size()));
+                    nameTable.insert(nameTable.end(), name.begin(), name.end());
+                    nameTable.push_back(0);
+                    known.emplace_back(id, nameId);
+                }
+                if (nameId == UINT32_MAX)
+                {
+                    ++unnamed;
+                    continue;
+                }
+                rename.emplace_back(i, nameId);
+                ++named;
+            }
+            for (const auto& r : rename) split_tile::NameByIndex(defs, defSize, r.first, r.second);
+            names   = split_tile::Span{reinterpret_cast<uint8_t*>(nameTable.data()), static_cast<uint32_t>(nameTable.size())};
+            offsets = split_tile::Span{reinterpret_cast<uint8_t*>(offsetTable.data()), static_cast<uint32_t>(offsetTable.size() * 4)};
+            return named;
+        }
+    }
+
+    static void NameFileIds(SplitArea& split, const char* path)
+    {
+        split_tile::Tile& t       = split.tile;
+        uint32_t          unnamed = 0, named = 0;
+        // Textures by FileDataID (MDID, no MTEX): their names in MDID's order, a placeholder for
+        // one no one names, whose layers are then left out.
+        if (!t.textures && t.mdid.size >= 4)
+        {
+            const uint32_t count = t.mdid.size / 4;
+            t.missing.assign(count, 0);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t id = Get32(t.mdid.data + 4 * i);
+                std::string    name;
+                if (NameOf(id, name)) ++named;
+                else
+                {
+                    name         = "FileDataID_" + std::to_string(id) + ".blp";
+                    t.missing[i] = 1;
+                    ++unnamed;
+                }
+                split.textureNames.insert(split.textureNames.end(), name.begin(), name.end());
+                split.textureNames.push_back(0);
+            }
+            t.mtex     = split_tile::Span{reinterpret_cast<uint8_t*>(split.textureNames.data()), static_cast<uint32_t>(split.textureNames.size())};
+            t.textures = count;
+        }
+        named += NamePlacements(t.mddf, split_tile::kDoodadDefSize, split_tile::kDoodadByFileId, 34, t.mmdx, t.mmid, split.modelNames,
+                                split.modelOffsets, unnamed);
+        named += NamePlacements(t.modf, split_tile::kMapObjDefSize, split_tile::kMapObjByFileId, 56, t.mwmo, t.mwid, split.mapObjNames,
+                                split.mapObjOffsets, unnamed);
+        g_counters.named += named;
+        g_counters.unnamed += unnamed;
+        if (unnamed && !g_toldUnnamed)
+            WLOG_WARN(kTag, "%s names %u file(s) by FileDataID that no tile provider named (a listfile for wxl.modern-adt): their layers "
+                            "and placements are left out",
+                      path, unnamed);
+        if (unnamed) g_toldUnnamed = true;
+    }
+
     wxl_result SetProvider(uint32_t mod, const wxl_terrain_tile_provider* provider)
     {
-        if (provider && (provider->struct_size < sizeof(wxl_terrain_tile_provider) || !provider->fn)) return WXL_E_INVALID;
+        // A provider of abi 0.1.45 ends before name_fn.
+        if (provider && (provider->struct_size < offsetof(wxl_terrain_tile_provider, name_fn) || !provider->fn)) return WXL_E_INVALID;
+        const wxl_terrain_name_fn nameFn =
+            provider && provider->struct_size >= sizeof(wxl_terrain_tile_provider) ? provider->name_fn : nullptr;
         for (Provider& p : g_providers)
             if (p.mod == mod)
             {
                 if (provider)
                 {
-                    p.fn   = provider->fn;
-                    p.user = provider->user;
+                    p.fn      = provider->fn;
+                    p.user    = provider->user;
+                    p.name_fn = nameFn;
                 }
                 else
                     ForgetMod(mod);
                 return WXL_OK;
             }
-        if (provider) g_providers.push_back(Provider{mod, provider->fn, provider->user});
+        if (provider) g_providers.push_back(Provider{mod, provider->fn, provider->user, nameFn});
         return WXL_OK;
     }
 
@@ -187,6 +309,7 @@ namespace wxl::core::services::terrain_tiles
             return;
         }
         if (!why.empty()) WLOG_WARN(kTag, "%s: %sthat file is not used", path, why.c_str());
+        NameFileIds(*split, path);
         g_areas.push_back(std::move(split));
     }
 
@@ -390,6 +513,7 @@ namespace wxl::core::services::terrain_tiles
         g_areas.clear();
         g_inRefs         = false;
         g_toldUnprovided = false;
+        g_toldUnnamed    = false;
     }
 
     const Counters& Count() { return g_counters; }

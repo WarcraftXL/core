@@ -65,9 +65,11 @@ namespace wxl::core::services::split_tile
         uint32_t   chunkOffset[256] = {}; ///< of each root MCNK's header (its 'MCNK'), from the root's start
         uint32_t   chunkSize[256] = {};   ///< 8 + its size, as MCIN counts it
         Span       mtex, mtxf, mtxp, mamp;
+        Span       mdid, mhid;            ///< 8.1 and later: textures (and their heights) by FileDataID, in place of MTEX
         Span       mmdx, mmid, mwmo, mwid, mddf, modf;
-        uint32_t   textures = 0;          ///< MTEX's names
+        uint32_t   textures = 0;          ///< MTEX's names (or, set by the caller, the names it gave MDID's ids)
         ChunkParts parts[256];
+        std::vector<uint8_t> missing;     ///< by texture: 1 for one the tile names by an id no one named (set by the caller)
     };
 
     /// Whether @p root is a root ADT without MCIN: MVER, then MHDR whose MCIN slot is 0, and MCNKs.
@@ -89,6 +91,10 @@ namespace wxl::core::services::split_tile
     /// reference is (then @p kept is left empty and the file's own list is used as it is).
     bool UsableDoodadRefs(const Tile& tile, uint32_t chunk, std::vector<uint32_t>& kept);
     bool UsableMapObjRefs(const Tile& tile, uint32_t chunk, std::vector<uint32_t>& kept);
+
+    /// A placement's model named by FileDataID (MDDF flag 0x40, MODF flag 0x8), given the name it
+    /// has: @p defs's entry @p index gets nameId @p nameId and loses the flag, as a placement by name.
+    void NameByIndex(Span defs, uint32_t defSize, uint32_t index, uint32_t nameId);
 
     /// MTXP's flags, one int32 a texture as MTXF lays them out (the client reads MTXF only).
     std::vector<int32_t> FlagsFromMtxp(const Tile& tile);
