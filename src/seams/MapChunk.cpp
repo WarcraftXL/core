@@ -32,8 +32,8 @@ namespace wxl::seam::MapChunk::ProcessIffChunks
 
 namespace wxl::seam::MapChunk::CreateRefs
 {
-    bool WXL_CALL Gate(void** self, void** area, uint32_t**, uint32_t*, uint32_t*)
+    bool WXL_CALL Gate(void** self, void** area, uint32_t** mcrf_ptr, uint32_t* doodad_refs, uint32_t* map_obj_refs)
     {
-        return wxl::core::services::terrain_tiles::CreateRefs(*self, *area);
+        return wxl::core::services::terrain_tiles::CreateRefs(*self, *area, *mcrf_ptr, *doodad_refs, *map_obj_refs);
     }
 }

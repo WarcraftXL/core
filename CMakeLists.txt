@@ -285,6 +285,7 @@ add_library(wxl-core SHARED
     src/services/TerrainLayers.cpp
     src/services/TerrainTiles.cpp
     src/services/SplitTile.cpp
+    src/services/ModelGate.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -352,6 +353,7 @@ add_executable(wxl-core-seam-harness
     src/services/TerrainLayers.cpp
     src/services/TerrainTiles.cpp
     src/services/SplitTile.cpp
+    src/services/ModelGate.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp

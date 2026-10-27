@@ -1260,6 +1260,21 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    wxl_bool map_area_placements(const void* area, wxl_core_area_split* out)
+    {
+        if (!IsClient() || !area || !out) return WXL_FALSE;
+        *out                 = wxl_core_area_split{};
+        out->doodad_defs     = Read<void*>(area, WXL_FIELD("CMapArea", "m_doodadDef"));
+        out->map_obj_defs    = Read<void*>(area, WXL_FIELD("CMapArea", "m_mapObjDef"));
+        out->doodad_count    = static_cast<uint32_t>(Read<int32_t>(area, WXL_FIELD("CMapArea", "m_doodadDefCount")));
+        out->map_obj_count   = static_cast<uint32_t>(Read<int32_t>(area, WXL_FIELD("CMapArea", "m_mapObjDefCount")));
+        out->model_names     = Read<char*>(area, WXL_FIELD("CMapArea", "m_m2FileNames"));
+        out->map_obj_names   = Read<char*>(area, WXL_FIELD("CMapArea", "m_wmoFileNames"));
+        out->model_offsets   = Read<uint32_t*>(area, WXL_FIELD("CMapArea", "m_modelFilenamesOffsets"));
+        out->map_obj_offsets = Read<uint32_t*>(area, WXL_FIELD("CMapArea", "m_wmoFilenamesOffsets"));
+        return WXL_TRUE;
+    }
+
     wxl_bool map_chunk_parts(const void* chunk, wxl_core_map_chunk* out)
     {
         if (!IsClient() || !chunk || !out) return WXL_FALSE;

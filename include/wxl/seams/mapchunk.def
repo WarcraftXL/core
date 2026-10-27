@@ -35,7 +35,10 @@ WXL_SEAM_AFTER(MapChunk, ProcessIffChunks, "CMapChunk::ProcessIffChunks", void, 
 // CMapChunk::Create (0x007C657B), with m_mcrfPtr and the header's counts. __thiscall, four
 // dwords, `ret 0x10` (0x007C647A). Gate: for a chunk of a split tile it takes the call and makes
 // the client's own two calls, map objects from _obj0's MCRW then doodads from its MCRD, in the
-// order the client places them from one list; references it cannot follow are left out.
+// order the client places them from one list; references it cannot follow are left out. For
+// any tile, placements of a model the client cannot load (an M2 of magic MD21 or a version past
+// 264, a WMO root past 17) are left out the same way, each such file logged once; a chunk whose
+// models all load is not taken.
 WXL_SEAM_GATE(MapChunk, CreateRefs, "CMapChunk::CreateRefs", void, thiscall, (void* self, void* area, uint32_t* mcrf_ptr, uint32_t doodad_refs, uint32_t map_obj_refs))
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one

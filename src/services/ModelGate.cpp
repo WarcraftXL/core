@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// Placements of models the client cannot load (see ModelGate.hpp).
+
+#include "services/ModelGate.hpp"
+
+#include "binding/Binding.hpp"
+#include "common/Log.hpp"
+
+#include <cctype>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+
+namespace wxl::core::services::model_gate
+{
+    namespace
+    {
+        constexpr const char* kTag = "terrain";
+        /// The newest M2 (MD20) and WMO root versions this client reads.
+        constexpr uint32_t kM2Version = 264, kWmoVersion = 17;
+
+        std::unordered_map<std::string, Verdict> g_seen;
+        uint64_t                                 g_leftOut = 0;
+
+        uint32_t U32(const uint8_t* at)
+        {
+            uint32_t v;
+            std::memcpy(&v, at, sizeof v);
+            return v;
+        }
+
+        /// The name the client opens: lower case, '\\', ".mdx"/".mdl" as ".m2".
+        std::string Normal(const char* name, bool mapObject)
+        {
+            std::string out(name);
+            for (char& c : out) c = c == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const size_t dot = out.rfind('.');
+            if (!mapObject && dot != std::string::npos && (out.compare(dot, 4, ".mdx") == 0 || out.compare(dot, 4, ".mdl") == 0) &&
+                dot + 4 == out.size())
+                out.replace(dot, 4, ".m2");
+            return out;
+        }
+    }
+
+    Verdict Judge(const uint8_t* head, size_t size, bool mapObject)
+    {
+        if (!head) return Verdict::loadable;
+        if (mapObject)
+        {
+            // MVER (as the file stores it, "REVM"), its size, the version.
+            if (size >= 12 && std::memcmp(head, "REVM", 4) == 0 && U32(head + 8) > kWmoVersion) return Verdict::newer;
+            return Verdict::loadable;
+        }
+        if (size >= 4 && std::memcmp(head, "MD21", 4) == 0) return Verdict::chunked;
+        if (size >= 8 && std::memcmp(head, "MD20", 4) == 0 && U32(head + 4) > kM2Version) return Verdict::newer;
+        return Verdict::loadable;
+    }
+
+    bool Loadable(const char* name, bool mapObject)
+    {
+        if (!name || !*name) return true;
+        const std::string path = Normal(name, mapObject);
+        const auto        seen = g_seen.find(path);
+        if (seen != g_seen.end()) return seen->second == Verdict::loadable;
+        uint8_t head[12] = {};
+        size_t  got      = 0;
+        if (void* file = wxl::core::binding::file_open(path.c_str()))
+        {
+            got = wxl::core::binding::file_read(file, head, sizeof head);
+            wxl::core::binding::file_close(file);
+        }
+        const Verdict verdict = got ? Judge(head, got, mapObject) : Verdict::loadable;
+        g_seen.emplace(path, verdict);
+        if (verdict == Verdict::chunked)
+            WLOG_WARN(kTag, "%s is an M2 in Legion's chunked form (MD21), which this client cannot read: its placements are left out", path.c_str());
+        else if (verdict == Verdict::newer && mapObject)
+            WLOG_WARN(kTag, "%s is a map object of version %u, past this client's %u: its placements are left out", path.c_str(), U32(head + 8),
+                      kWmoVersion);
+        else if (verdict == Verdict::newer)
+            WLOG_WARN(kTag, "%s is an M2 of version %u, past this client's %u: its placements are left out", path.c_str(), U32(head + 4),
+                      kM2Version);
+        return verdict == Verdict::loadable;
+    }
+
+    uint64_t LeftOut() { return g_leftOut; }
+    void     CountLeftOut(uint32_t count) { g_leftOut += count; }
+
+    void Clear()
+    {
+        g_seen.clear();
+        g_leftOut = 0;
+    }
+}

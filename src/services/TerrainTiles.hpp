@@ -17,7 +17,9 @@
 //                 alpha size and reference counts, its 64 holes folded into 16
 //   CreateRefs    CMapChunk::CreateRefs (seam MapChunk.CreateRefs Gate): for such a chunk, the
 //                 client's own call is made twice, map objects (_obj0's MCRW) then doodads (MCRD),
-//                 the order it places them from one list
+//                 the order it places them from one list; for any tile, placements of models the
+//                 client cannot load (model_gate: M2 MD21 or past 264, WMO past 17) are left out
+//                 the same way, a tile whose models all load left to the client's own call
 //   AreaFreeing   CMap::FreeArea (seam Map.FreeArea Before): the files and the index go
 //
 // Main thread only, as the client reads its tiles.
@@ -37,8 +39,8 @@ namespace wxl::core::services::terrain_tiles
     void AreaReading(void* area);
     void AreaRead(void* area);
     void ChunkRead(void* chunk);
-    /// Whether the call was taken (a chunk of a split tile).
-    bool CreateRefs(void* chunk, void* area);
+    /// Whether the call was taken (a chunk of a split tile, or one placing a model the client cannot load).
+    bool CreateRefs(void* chunk, void* area, const uint32_t* refs, uint32_t doodadRefs, uint32_t mapObjRefs);
     void AreaFreeing(void* area);
 
     /// The client shuts down.

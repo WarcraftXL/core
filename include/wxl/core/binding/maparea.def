@@ -23,6 +23,11 @@ WXL_BINDING(map_area_chunk, void*, (const void* area, int32_t chunk_x, int32_t c
 // CMapArea::LoadTextures with the names. False for a null area. Main thread only.
 WXL_BINDING(map_area_split_set, wxl_bool, (void* area, const wxl_core_area_split* split), (area, split), WXL_FALSE)
 
+// A tile's placements as the client holds them: m_doodadDef, m_mapObjDef and their counts, the
+// names and their offsets (the members of wxl_core_area_split up to map_obj_offsets; the rest left
+// zero). False for a null area.
+WXL_BINDING(map_area_placements, wxl_bool, (const void* area, wxl_core_area_split* out), (area, out), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive
