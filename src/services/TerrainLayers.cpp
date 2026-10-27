@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -183,14 +184,6 @@ namespace
         return out.count > 0;
     }
 
-    bool SameLayers(const wxl_terrain_extra_layers& a, const wxl_terrain_extra_layers& b)
-    {
-        if (a.count != b.count) return false;
-        for (uint32_t k = 0; k < a.count; ++k)
-            if (std::strcmp(a.layer[k].texture, b.layer[k].texture) != 0) return false;
-        return true;
-    }
-
     /// The layers past a render chunk's four, from its one or two map chunks; null for none.
     std::shared_ptr<Extras> AskExtras(const void* area, const wxl_core_render_chunk& rc)
     {
@@ -201,28 +194,79 @@ namespace
         wxl_core_area_file file{};
         binding::terrain_area_file(area, &file);
         static wxl_terrain_extra_layers first, second; // 16 KiB each: kept off the stack
-        if (!AskChunk(rc.map_chunk, file, rc, first)) return nullptr;
-        // Drawn with its neighbour: both answer the same layers, their alpha maps side by side.
-        const bool pair = rc.map_chunk2 && rc.pair;
-        if (pair && (!AskChunk(rc.map_chunk2, file, rc, second) || !SameLayers(first, second)))
+        const bool pair      = rc.map_chunk2 && rc.pair;
+        // A provider's names are its own until its next answer: kept here at once.
+        std::string kept[2][WXL_TERRAIN_EXTRA_LAYERS][2];
+        const auto keep = [&kept](wxl_terrain_extra_layers& from, uint32_t half) {
+            for (uint32_t k = 0; k < from.count; ++k)
+            {
+                kept[half][k][0]           = from.layer[k].texture ? from.layer[k].texture : "";
+                kept[half][k][1]           = from.layer[k].extra_texture ? from.layer[k].extra_texture : "";
+                from.layer[k].texture       = kept[half][k][0].c_str();
+                from.layer[k].extra_texture = kept[half][k][1].empty() ? nullptr : kept[half][k][1].c_str();
+            }
+            return true;
+        };
+        const bool firstHas  = AskChunk(rc.map_chunk, file, rc, first) && keep(first, 0);
+        const bool secondHas = pair && AskChunk(rc.map_chunk2, file, rc, second) && keep(second, 1);
+        if (!firstHas && !secondHas) return nullptr;
+        // The layers to draw, each with its alpha map over the chunk, or over both halves of a
+        // chunk drawn with its neighbour: there the halves' layers are put together by texture
+        // (maps with big alpha, the only ones the client pairs, add their alphas: a texture both
+        // halves carry, or one carries twice, is one layer), a half lacking a layer has 0 for it,
+        // and past 4 the ones covering the least go.
+        constexpr uint32_t n = WXL_TERRAIN_ALPHA_SIZE, texels = n * n;
+        struct Slot
         {
-            ++g_counters.chunks_unpaired;
-            return nullptr;
+            const wxl_terrain_extra_layer* layer;
+            std::vector<uint8_t>           alpha[2];
+            uint64_t                       mass = 0;
+        };
+        std::vector<Slot> slots;
+        const auto take = [&](const wxl_terrain_extra_layers& from, uint32_t half) {
+            for (uint32_t k = 0; k < from.count; ++k)
+            {
+                Slot* slot = nullptr;
+                if (pair)
+                    for (Slot& s : slots)
+                        if (std::strcmp(s.layer->texture, from.layer[k].texture) == 0) slot = &s;
+                if (!slot)
+                {
+                    slots.push_back(Slot{&from.layer[k], {std::vector<uint8_t>(texels, 0), std::vector<uint8_t>(texels, 0)}, 0});
+                    slot = &slots.back();
+                }
+                for (uint32_t t = 0; t < texels; ++t)
+                {
+                    const uint32_t a = slot->alpha[half][t] + from.alpha[t * 4 + k];
+                    slot->alpha[half][t] = static_cast<uint8_t>(std::min(a, 255u));
+                    slot->mass += from.alpha[t * 4 + k];
+                }
+            }
+        };
+        if (firstHas) take(first, 0);
+        if (secondHas) take(second, 1);
+        if (slots.size() > WXL_TERRAIN_EXTRA_LAYERS)
+        {
+            std::stable_sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.mass > b.mass; });
+            slots.resize(WXL_TERRAIN_EXTRA_LAYERS);
+            ++g_counters.chunks_trimmed;
         }
-        constexpr uint32_t n = WXL_TERRAIN_ALPHA_SIZE;
+        if (pair && firstHas != secondHas) ++g_counters.chunks_half;
         const uint32_t     w = pair && rc.pair == 2 ? 2 * n : n, h = pair && rc.pair == 1 ? 2 * n : n;
         std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4u, 0);
-        for (uint32_t y = 0; y < n; ++y)
-        {
-            std::memcpy(&rgba[static_cast<size_t>(y) * w * 4u], &first.alpha[static_cast<size_t>(y) * n * 4u], n * 4u);
-            if (pair && rc.pair == 2) std::memcpy(&rgba[(static_cast<size_t>(y) * w + n) * 4u], &second.alpha[static_cast<size_t>(y) * n * 4u], n * 4u);
-            if (pair && rc.pair == 1) std::memcpy(&rgba[static_cast<size_t>(y + n) * w * 4u], &second.alpha[static_cast<size_t>(y) * n * 4u], n * 4u);
-        }
+        for (uint32_t k = 0; k < slots.size(); ++k)
+            for (uint32_t y = 0; y < n; ++y)
+                for (uint32_t x = 0; x < n; ++x)
+                {
+                    rgba[(static_cast<size_t>(y) * w + x) * 4u + k] = slots[k].alpha[0][y * n + x];
+                    if (pair && rc.pair == 2) rgba[(static_cast<size_t>(y) * w + n + x) * 4u + k] = slots[k].alpha[1][y * n + x];
+                    if (pair && rc.pair == 1) rgba[(static_cast<size_t>(y + n) * w + x) * 4u + k] = slots[k].alpha[1][y * n + x];
+                }
         auto extras   = std::make_shared<Extras>();
-        extras->count = first.count;
-        for (uint32_t k = 0; k < first.count; ++k)
+        extras->count = static_cast<uint32_t>(slots.size());
+        for (uint32_t k = 0; k < extras->count; ++k)
         {
-            const wxl_terrain_extra_layer& l = first.layer[k];
+            const wxl_terrain_extra_layer& l = *slots[k].layer;
             extras->texture[k] = OpenExtra(l.texture);
             if (k < 2) extras->height[k] = OpenExtra(l.extra_texture);
             const float scale  = l.texture_scale;

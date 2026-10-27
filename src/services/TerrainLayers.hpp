@@ -83,7 +83,8 @@ namespace wxl::core::services::terrain_layers
         uint32_t chunks_kept = 0;   ///< render chunks holding a scaled layer now
         uint64_t chunks_cut = 0;    ///< MCNKs that named more than 4 layers, cut to 4
         uint64_t chunks_extra = 0;  ///< render chunks answered layers past their four
-        uint64_t chunks_unpaired = 0; ///< of chunks drawn with a neighbour, the two answering other layers: drawn with their four
+        uint64_t chunks_half = 0;   ///< chunks drawn with a neighbour where only one half has layers past four
+        uint64_t chunks_trimmed = 0; ///< chunks drawn with a neighbour whose halves carry more than 4 extra layers together: the 4 covering most drawn
         uint64_t second_draws = 0;  ///< second draws of a chunk's layers past its four
         uint64_t maps_widened = 0;  ///< maps flagged 0x80 without 0x4, given 0x4
     };
