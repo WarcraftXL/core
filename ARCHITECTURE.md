@@ -514,6 +514,23 @@ the reads; the x86 binding calls `CreateBounds`, `AddBatch`, `FreeInst` and `OnF
 (`calls_x86.def`), writes `s_queryBox` at its address and the active mover's height in its
 movement.
 
+A texture layer's scale (`set_layer_provider`, `src/services/TerrainLayers.cpp`): when
+`CMapRenderChunk::CreateLayer` has appended a layer (`MapRenderChunk.CreateLayer` After), each
+provider is shown the layer (tile, chunk, index, texture, MCLY flags, and the tile's ADT bytes from
+`CMapArea::m_fileBuffer`, binding `terrain_area_file`) and answers a scale; only render chunks with a
+layer other than 1 are kept, and `Map.Unload` forgets them. The client sets a layer's texture
+coordinates inside the loops that draw it, so the scale is applied at the device's draw: the eight
+functions that draw a chunk's layers (`MapRenderChunk.Render*` before and after) say which chunk and
+which path, and at a draw of that chunk's batch (`Gx.D3dDraw`, `Gx.D3d9ExDraw`, the Vulkan backend's
+`draw_begin`) the vertex program's rows c18 + k (scale) and c13 + k (animation offset), or the
+texture stages' matrices (`gx_xform_get`, `GxXformSet`), have their u and v divided by the scale
+(`GxShaderConstantsSet`, `terrain_vertex_constants` the client's own rows), and are given back at
+`draw_end` or after the draw. In the multi-pass paths the draw's index is the layer's; the pass
+past the layers (the shadow) and a specular chunk's layer 0 stage are left. Dividing the offset or
+the translation too keeps an animated layer's speed in yards. A chunk answered 1 everywhere is
+never entered: the client draws it byte for byte as it does. The ADT reading itself is a mod's
+(`mods/wxl.modern-adt`).
+
 ### Shapes in the world
 
 `wxl.draw` (`src/services/DrawService.cpp`) keeps the shapes mods draw, by mod: immediate ones (built
