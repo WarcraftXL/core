@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace wxl::core::services::model_gate
 {
@@ -50,7 +51,18 @@ namespace wxl::core::services::model_gate
         if (mapObject)
         {
             // MVER (as the file stores it, "REVM"), its size, the version.
-            if (size >= 12 && std::memcmp(head, "REVM", 4) == 0 && U32(head + 8) > kWmoVersion) return Verdict::newer;
+            if (size < 12 || std::memcmp(head, "REVM", 4) != 0) return Verdict::loadable;
+            if (U32(head + 8) > kWmoVersion) return Verdict::newer;
+            // The chunks of 3.3.5a's roots (CMapObj reads them in this order, by position).
+            static const char* const kKnown[] = {"REVM", "DHOM", "XTOM", "TMOM", "NGOM", "IGOM", "BSOM", "VPOM", "TPOM", "RPOM",
+                                                 "VVOM", "BVOM", "TLOM", "SDOM", "NDOM", "DDOM", "GOFM", "PVCM"};
+            for (size_t at = 0; at + 8 <= size;)
+            {
+                bool known = false;
+                for (const char* k : kKnown) known = known || std::memcmp(head + at, k, 4) == 0;
+                if (!known) return Verdict::later;
+                at += 8 + static_cast<size_t>(U32(head + at + 4));
+            }
             return Verdict::loadable;
         }
         if (size >= 4 && std::memcmp(head, "MD21", 4) == 0) return Verdict::chunked;
@@ -64,20 +76,27 @@ namespace wxl::core::services::model_gate
         const std::string path = Normal(name, mapObject);
         const auto        seen = g_seen.find(path);
         if (seen != g_seen.end()) return seen->second == Verdict::loadable;
-        uint8_t head[12] = {};
-        size_t  got      = 0;
-        bool    opened   = false;
+        // An M2's first 12 bytes; a WMO root whole (they are small: its groups are other files).
+        std::vector<uint8_t> bytes(12, 0);
+        size_t               got    = 0;
+        bool                 opened = false;
         if (void* file = wxl::core::binding::file_open(path.c_str()))
         {
             opened = true;
-            got    = wxl::core::binding::file_read(file, head, sizeof head);
+            const uint64_t size = mapObject ? wxl::core::binding::file_size(file) : 12;
+            if (mapObject && size > 12 && size < (32u << 20)) bytes.resize(static_cast<size_t>(size));
+            got = wxl::core::binding::file_read(file, bytes.data(), static_cast<uint32_t>(bytes.size()));
             wxl::core::binding::file_close(file);
         }
+        const uint8_t* head = bytes.data();
         // A map object root the client cannot open ends it (CMap::SafeOpen); an M2 it cannot open
         // it leaves undrawn.
         const Verdict verdict = !opened && mapObject ? Verdict::missing : got ? Judge(head, got, mapObject) : Verdict::loadable;
         g_seen.emplace(path, verdict);
-        if (verdict == Verdict::missing)
+        if (verdict == Verdict::later)
+            WLOG_WARN(kTag, "%s is a map object of a later client (chunks this client's reader does not expect): its placements are left out",
+                      path.c_str());
+        else if (verdict == Verdict::missing)
             WLOG_WARN(kTag, "%s is a map object the client's files do not have (it would end the client): its placements are left out",
                       path.c_str());
         else if (verdict == Verdict::chunked)

@@ -25,9 +25,12 @@ namespace wxl::core::services::model_gate
         chunked,  ///< an M2 of magic MD21
         newer,    ///< an M2 of a version past 264, or a WMO root past 17
         missing,  ///< a WMO root the client's files do not have
+        later,    ///< a WMO root of version 17 holding chunks of later clients (GFID, MOUV, MODI, ...)
     };
 
-    /// What a file's first bytes say. @p mapObject: a WMO root (MVER first), else an M2.
+    /// What a file's bytes say (an M2's first 8; a WMO root whole: its chunks are walked, and one
+    /// 3.3.5a's root does not have, which its reader does not expect, makes it `later`).
+    /// @p mapObject: a WMO root (MVER first), else an M2.
     Verdict Judge(const uint8_t* head, size_t size, bool mapObject);
 
     /// Whether the client can load the model @p name names, as a placement names it (".mdx" and
