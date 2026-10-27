@@ -8,6 +8,7 @@
 // on the next device.
 
 #include "gx/vk/render/Render.hpp"
+#include "gx/vk/resources/Ring.hpp"
 #include "gx/vk/shaders/Translate.hpp"
 
 #include "Asm.hpp"
@@ -525,6 +526,36 @@ namespace
     }
 }
 
+namespace
+{
+    /// V8: a ring's chunks past a slot's first that stay unused are given back (address space on
+    /// the 32-bit client), the first never; VMA's blocks are smaller in a 32-bit process.
+    void RingTrimCases(Bench& b)
+    {
+        namespace res = wxl::vk::resources;
+        res::Ring ring;
+        Check(ring.Create(b.live.allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 1u << 16, 2), "a ring of 64 KiB chunks over two slots");
+        res::Ring::Span span;
+        ring.Begin(0);
+        bool grew = true;
+        for (int i = 0; i < 3; ++i) grew = grew && ring.Allocate(1u << 16, 16, span);
+        Check(grew && ring.Counters().chunks == 3 && ring.Counters().mapped == 3u << 16, "a busy frame grows its slot to three mapped chunks");
+        for (uint32_t frame = 1; frame <= res::Ring::kIdleFrames; ++frame)
+        {
+            ring.Begin(0);
+            ring.Allocate(256, 16, span);
+        }
+        Check(ring.Counters().chunks == 3 && !ring.Counters().trimmed, "chunks unused for fewer frames than the limit stay");
+        ring.Begin(0);
+        Check(ring.Counters().chunks == 1 && ring.Counters().trimmed == 2 && ring.Counters().mapped == 1u << 16,
+              "past the limit the slot keeps its first chunk only, the others given back");
+        Check(ring.Allocate(1u << 16, 16, span) && span.data, "and grows again when a frame needs it");
+        ring.Destroy();
+        Check(res::kBlockSize == (sizeof(void*) == 4 ? (VkDeviceSize{32} << 20) : (VkDeviceSize{256} << 20)),
+              "VMA's blocks are 32 MiB in a 32-bit process, 256 MiB otherwise");
+    }
+}
+
 namespace wxl::vk::test
 {
     bool V7LiveCases()
@@ -536,6 +567,7 @@ namespace wxl::vk::test
         Index32Cases(b);
         TextureCases(b);
         ComputeCases(b);
+        RingTrimCases(b);
         return true;
     }
 }

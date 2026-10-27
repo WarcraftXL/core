@@ -10,6 +10,7 @@
 #include "services/EngineService.hpp"
 #if defined(_M_IX86)
 #include "deinlined/Deinlined.hpp"
+#include "gx/x86/Adapter.hpp"
 #endif
 #include "runtime/Attachment.hpp"
 #include "runtime/Code.hpp"
@@ -5217,18 +5218,15 @@ namespace
               "without [gx] api the client's request stands");
         Check(!GetModuleHandleW(L"vulkan-1.dll"), "and choosing loads no Vulkan loader either");
 
-        // [gx] api = vulkan on a client with no adapter (the stock one): the device is made beside
-        // the client's, logged and released, or refused with a reason; the loader goes with it.
+        // [gx] api = vulkan with a device made without the renderer's adapter (here, as for an
+        // OpenGL request): said once, with what the client made, and no loader is loaded for it.
         wxl::core::settings::Settings vulkan;
         vulkan.gx_api = wxl::core::settings::GxApi::vulkan;
         char why[512] = {};
         const wxl::core::gx::Outcome outcome = wxl::core::gx::DeviceReady(vulkan, why, sizeof why);
-        std::printf("     [gx] api = vulkan here: %s%s\n",
-                    outcome == wxl::core::gx::Outcome::released ? "a device was made and released" : "no device: ", why);
-        Check(outcome == wxl::core::gx::Outcome::released || (outcome == wxl::core::gx::Outcome::failed && why[0]),
-              "[gx] api = vulkan makes a device and releases it, or says why there is none");
-        Check(!GetModuleHandleW(L"vulkan-1.dll"), "the Vulkan loader is unloaded after it, the client being on D3D9");
-        Check(wxl::core::gx::DeviceReady(vulkan) == wxl::core::gx::Outcome::not_asked, "and it is asked once per launch");
+        Check(outcome == wxl::core::gx::Outcome::missed && std::strstr(why, "without the renderer"),
+              "[gx] api = vulkan with a device made without the adapter says so");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"), "and loads no Vulkan loader for it");
         wxl::core::stages::Reach(WXL_STAGE_SCRIPT);
         Check(wxl::core::stages::Reached() == WXL_STAGE_SCRIPT, "and script still follows it");
     }
@@ -10020,6 +10018,336 @@ namespace
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::assets::ForgetInstall();
     }
+
+    // --- The Vulkan renderer behind the stock client's device (gx/x86/Adapter.cpp) ---------------
+
+    namespace gx86 = wxl::core::gx::x86;
+
+    uint32_t g_stockCalls = 0; ///< calls into the stand-ins of Wow.exe's functions
+
+    /// A stand-in for one function of calls_x86.def, in the row's convention: it answers zero.
+    template <auto Member, class Fn>
+    struct StockStandIn;
+
+    template <auto Member, class R, class Self, class... A>
+    struct StockStandIn<Member, R(__fastcall*)(Self, void*, A...)>
+    {
+        static R __fastcall Call(Self, void*, A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    template <auto Member, class R, class... A>
+    struct StockStandIn<Member, R(__stdcall*)(A...)>
+    {
+        static R __stdcall Call(A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    template <auto Member, class R, class... A>
+    struct StockStandIn<Member, R(__cdecl*)(A...)>
+    {
+        static R __cdecl Call(A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    /// Blocks a slot's pointer parameters point at: every dword of one points at a zeroed block, so
+    /// a reference to a pointer (CGxShader*&, CGxQuery*&) and an object's pointer members (a
+    /// buffer's pool) read a zeroed object.
+    struct alignas(16) ScratchBlock
+    {
+        uint8_t bytes[0x4000];
+    };
+    std::vector<std::unique_ptr<ScratchBlock>> g_scratch;
+
+    void* Scratch()
+    {
+        g_scratch.push_back(std::make_unique<ScratchBlock>());
+        std::memset(g_scratch.back()->bytes, 0, sizeof(ScratchBlock));
+        void* inner = nullptr;
+        g_scratch.push_back(std::make_unique<ScratchBlock>());
+        std::memset(g_scratch.back()->bytes, 0, sizeof(ScratchBlock));
+        inner = g_scratch.back()->bytes;
+        void* outer = g_scratch[g_scratch.size() - 2]->bytes;
+        for (size_t at = 0; at < sizeof(ScratchBlock); at += sizeof inner) std::memcpy(static_cast<uint8_t*>(outer) + at, &inner, sizeof inner);
+        return outer;
+    }
+
+    template <class T>
+    uint32_t SlotArg()
+    {
+        if constexpr (std::is_pointer_v<T>) return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(Scratch()));
+        else return 0;
+    }
+
+    template <class Sig>
+    struct SlotArgs;
+
+    template <class R, class Self, class... A>
+    struct SlotArgs<R(Self, A...)>
+    {
+        static std::vector<uint32_t> Make() { return {SlotArg<A>()...}; }
+        static constexpr bool kFloat = std::is_floating_point_v<R>;
+    };
+
+    uint32_t g_slotEspBefore = 0, g_slotEspAfter = 0;
+
+    /// Calls a slot as the engine calls a vtable entry: the arguments pushed right to left, `this`
+    /// in ECX, the callee popping them; ESP is read on both sides. A float answer is left on the
+    /// x87 stack by the callee and taken off here.
+    __declspec(noinline) void CallSlot(void* fn, void* self, const uint32_t* args, uint32_t count, int32_t floating)
+    {
+        __asm {
+            mov  dword ptr [g_slotEspBefore], esp
+            mov  ecx, count
+            mov  edx, args
+        push_next:
+            test ecx, ecx
+            jz   pushed
+            mov  eax, dword ptr [edx + ecx * 4 - 4]
+            push eax
+            dec  ecx
+            jmp  push_next
+        pushed:
+            mov  ecx, self
+            xor  edx, edx
+            call fn
+            mov  dword ptr [g_slotEspAfter], esp
+            cmp  floating, 0
+            je   done
+            fstp st(0)
+        done:
+        }
+    }
+
+    // The stock vtable stand-in: its D3D9 DeviceCreate and deleting destructor record their calls.
+    uint32_t g_d3d9Created = 0, g_d3d9Destroyed = 0;
+    int32_t __fastcall StandInD3d9Create(void*, void*, void*, const void*)
+    {
+        ++g_d3d9Created;
+        return 1;
+    }
+    void* __fastcall StandInD3d9Destructor(void* self, void*, uint32_t)
+    {
+        ++g_d3d9Destroyed;
+        return self;
+    }
+    void __fastcall StandInKept(void*, void*) {}
+    /// The client's window where there is no display: a handle no window has, which the system's
+    /// calls on it refuse.
+    void* __stdcall StandInCreateWindow(uint32_t, const char*, const char*, uint32_t, int32_t, int32_t, int32_t, int32_t, void*, void*,
+                                        void*, void*)
+    {
+        return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00F00F00));
+    }
+    intptr_t __cdecl StandInWindowProc(void* window, uint32_t message, uintptr_t wparam, intptr_t lparam)
+    {
+        return DefWindowProcA(static_cast<HWND>(window), message, wparam, lparam);
+    }
+
+    // CGxDevice::DeviceCreate as Wow.exe's: the window procedure kept, then DeviceSetFormat through the vtable.
+    int32_t __fastcall StandInBaseDeviceCreate(void* self, void*, void* proc, const void* format)
+    {
+        static_cast<wxl::engine::CGxDevice*>(self)->m_windowProc = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(proc));
+        using Fn = int32_t(__fastcall*)(void*, void*, const void*);
+        return Opaque(reinterpret_cast<Fn>((*static_cast<void* const* const*>(self))[13]))(self, nullptr, format);
+    }
+    int32_t __fastcall StandInBaseSetFormat(void* self, void*, const void* format)
+    {
+        std::memcpy(&static_cast<wxl::engine::CGxDevice*>(self)->m_format, format, sizeof(wxl::engine::CGxFormat));
+        return 1;
+    }
+
+    // The backend table's stand-in: what the adapter asks of the renderer.
+    struct BackendCalls
+    {
+        wxl_result create = WXL_E_FAILED;
+        uint32_t   created = 0, destroyed = 0, scenes = 0, presents = 0, draws = 0, caps = 0;
+    } g_backendCalls;
+
+    wxl_gx_vk_backend MakeBackendStandIn()
+    {
+        wxl_gx_vk_backend b{};
+        b.struct_size        = sizeof b;
+        b.device_layout_hash = wxl::engine::CGxDevice::kLayoutHash;
+        b.select_api         = [](int32_t api) -> int32_t { return api; };
+        b.device_create      = [](void*, void*, char* why, uint32_t size) -> wxl_result {
+            ++g_backendCalls.created;
+            if (g_backendCalls.create != WXL_OK) std::snprintf(why, size, "no Vulkan loader (vulkan-1.dll is not installed: the graphics driver brings it)");
+            return g_backendCalls.create;
+        };
+        b.device_destroy     = [](void*) { ++g_backendCalls.destroyed; };
+        b.device_set_window  = [](void*, void*, char*, uint32_t) -> wxl_result { return WXL_OK; };
+        b.device_caps        = [](void*) { ++g_backendCalls.caps; };
+        b.window_size        = [](void*, uint32_t, uint32_t, int32_t) {};
+        b.scene_begin        = [](void*) -> int32_t { return ++g_backendCalls.scenes, WXL_GX_VK_FRAME_OK; };
+        b.scene_clear        = [](void*, uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t) {};
+        b.draw               = [](void*, const wxl_gx_batch*, int32_t) { ++g_backendCalls.draws; };
+        b.scene_present      = [](void*) -> int32_t { return ++g_backendCalls.presents, WXL_GX_VK_FRAME_OK; };
+        b.device_restore     = [](void*, char*, uint32_t) -> wxl_result { return WXL_OK; };
+        b.gamma_changed      = [](void*) {};
+        b.cursor_changed     = [](void*) {};
+        b.cursor_set         = [](void*) {};
+        b.pool_memory        = [](void*, void*) -> char* { return nullptr; };
+        b.pool_resize        = [](void*, void*) {};
+        b.pool_destroy       = [](void*, void*) {};
+        b.tex_create         = [](void*, void*, uint32_t, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.tex_destroy        = [](void*, void*) {};
+        b.simulate_loss      = [](void*) {};
+        b.describe           = [](void*, char* out, uint32_t size) { std::snprintf(out, size, "stand-in"); };
+        b.shader_constants   = [](void*, int32_t, uint32_t, uint32_t, const float*) {};
+        b.shader_create      = [](void*, void*, int32_t, const char*, const void*, uint32_t) -> int32_t { return 1; };
+        b.shader_destroy     = [](void*, void*) {};
+        b.tex_lock           = [](void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t*) -> char* { return nullptr; };
+        b.tex_unlock         = [](void*, void*) {};
+        b.pool_discard       = [](void*, void*) {};
+        b.pool_written       = [](void*, void*, uint32_t, uint32_t) {};
+        b.shader_prewarm     = [](void*, const void* const*, const uint32_t*, uint32_t) {};
+        b.target_set         = [](void*) {};
+        b.tex_copy           = [](void*, void*, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.tex_stretch        = [](void*, void*, const int32_t*, const int32_t*, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.query_create       = [](void*) -> uint32_t { return 0; };
+        b.query_destroy      = [](void*, uint32_t) {};
+        b.query_begin        = [](void*, uint32_t) -> int32_t { return 0; };
+        b.query_end          = [](void*, uint32_t) -> int32_t { return 0; };
+        b.query_result       = [](void*, uint32_t, uint32_t*) -> int32_t { return 1; };
+        b.read_pixels        = [](void*, int32_t, int32_t, uint32_t, uint32_t, void*) -> int32_t { return 0; };
+        b.sample_counts      = [](void*) -> uint32_t { return 1; };
+        b.bone_palette       = [](void*, const float*, uint32_t) {};
+        return b;
+    }
+
+    /// The x86 adapter's vtable copy and its thunks, over stand-ins of Wow.exe's functions and of
+    /// the renderer's table: every slot slots.def gives the front pops what the row says, the
+    /// kept ones stay the device's own, a device whose Vulkan cannot start gets its vtable back and
+    /// makes itself as the D3D9 device, and one whose Vulkan starts draws through the table.
+    void CheckGxAdapterX86()
+    {
+        static void* fakeVtable[84];
+        static void* fakeVtableEx[84];
+        for (int i = 0; i < 84; ++i) fakeVtable[i] = fakeVtableEx[i] = reinterpret_cast<void*>(&StandInKept);
+        fakeVtable[8] = fakeVtableEx[8] = reinterpret_cast<void*>(&StandInD3d9Destructor);
+        fakeVtable[10] = fakeVtableEx[10] = reinterpret_cast<void*>(&StandInD3d9Create);
+
+        static gx86::Stock stock;
+#define WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params) \
+    stock.domain##_##name = &StockStandIn<&gx86::Stock::domain##_##name, decltype(stock.domain##_##name)>::Call;
+#include "wxl/core/binding/calls_x86.def"
+        stock.GxCall_DeviceCreate    = &StandInBaseDeviceCreate;
+        stock.GxCall_DeviceSetFormat = &StandInBaseSetFormat;
+        static void*    devicePtr = nullptr;
+        static uint8_t  shadow[2 * 0x1008] = {};
+        static void*    uiVertex[2] = {};
+        static void*    uiPixel     = nullptr;
+        static int32_t  adjust[2]   = {};
+        static float    aspect      = 0.0f;
+        static int32_t  minSize[2]  = {320, 240};
+        static uint32_t perBlock[13] = {}, bits[13] = {};
+        stock.device_ptr        = &devicePtr;
+        stock.shadow_constants  = shadow;
+        stock.ui_vertex_shaders = uiVertex;
+        stock.ui_pixel_shader   = &uiPixel;
+        stock.client_adjust     = adjust;
+        stock.win_aspect        = &aspect;
+        stock.win_min_size      = minSize;
+        stock.bytes_per_block   = perBlock;
+        stock.bit_depth         = bits;
+        stock.vtables[0]        = fakeVtable;
+        stock.vtables[1]        = fakeVtableEx;
+        stock.create_window     = &StandInCreateWindow;
+        static const wxl_gx_vk_backend backend = MakeBackendStandIn();
+        gx86::UseForTests(&stock, &backend);
+
+        // The device: a D3D9 device's bytes, its own vtable, render states to read.
+        auto  deviceBlock = std::make_unique<ScratchBlock>();
+        std::memset(deviceBlock->bytes, 0, sizeof(ScratchBlock));
+        void* device = deviceBlock->bytes;
+        auto* engine = static_cast<wxl::engine::CGxDevice*>(device);
+        *static_cast<void***>(device) = fakeVtable;
+        engine->m_appRenderStates.m_data = Scratch();
+        devicePtr = device;
+
+        Check(!gx86::Adopt(Scratch()), "a device whose vtable is neither D3D9's nor D3D9Ex's is not adopted");
+        Check(gx86::Adopt(device) && gx86::Adopted(device) && gx86::VtableOf(device) != fakeVtable,
+              "a D3D9 device is given the adapter's copy of its vtable");
+        void* const* table = gx86::VtableOf(device);
+        uint32_t     kept = 0, front = 0, balanced = 0, unbalanced = 0;
+        std::string  wrong;
+#define WXL_GX_SLOT(index, name, ret, params, pops, kind, d3d9, d3d9_at, d3d9ex, d3d9ex_at) \
+        WXL_GX_SLOT_HARNESS_##kind(index, name, ret, params, pops)
+#define WXL_GX_SLOT_HARNESS_keep(index, name, ret, params, pops) \
+        if (table[index] == fakeVtable[index]) ++kept; else wrong += " kept:" #name;
+#define WXL_GX_SLOT_HARNESS_front(index, name, ret, params, pops)                                                       \
+        if (table[index] != reinterpret_cast<void*>(&gx86::slots::name)) wrong += " front:" #name;                      \
+        else ++front;                                                                                                    \
+        if (index != 8 && index != 10)                                                                                   \
+        {                                                                                                                \
+            const std::vector<uint32_t> args = SlotArgs<ret params>::Make();                                            \
+            if (std::getenv("WXL_VK_TRACE")) std::printf("     slot %s\n", #name);                                     \
+            CallSlot(table[index], device, args.data(), static_cast<uint32_t>(args.size()), SlotArgs<ret params>::kFloat); \
+            if (g_slotEspBefore == g_slotEspAfter && args.size() * 4 == pops) ++balanced;                                \
+            else ++unbalanced, wrong += " esp:" #name;                                                                   \
+        }
+#include "wxl/gx/slots.def"
+#undef WXL_GX_SLOT_HARNESS_keep
+#undef WXL_GX_SLOT_HARNESS_front
+        std::printf("     x86 adapter: %u slot(s) kept, %u taken by the front, %u called and balanced%s\n", kept, front, balanced,
+                    wrong.c_str());
+        Check(kept == 27 && front == 57 && wrong.empty(), "the copy holds the device's own entries where slots.def keeps them, the "
+                                                          "adapter's where the front takes them");
+        Check(balanced == 55 && unbalanced == 0, "each slot taken, called as a vtable entry, pops what its row says and leaves ESP as found");
+
+        // Vulkan cannot start: the device is the D3D9 device it was made as again.
+        g_backendCalls = BackendCalls{};
+        g_d3d9Created  = 0;
+        auto* format   = static_cast<wxl::engine::CGxFormat*>(Scratch());
+        std::memset(format, 0, sizeof *format);
+        format->m_window = 1;
+        format->m_size   = {640, 480};
+        uint32_t args[2] = {static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&StandInWindowProc)), static_cast<uint32_t>(reinterpret_cast<uintptr_t>(format))};
+        CallSlot(table[10], device, args, 2, 0);
+        Check(g_slotEspBefore == g_slotEspAfter && gx86::VtableOf(device) == fakeVtable && !gx86::AdoptedDevice() && g_d3d9Created == 1,
+              "Vulkan that cannot start gives the device its own vtable back and its D3D9 DeviceCreate makes it, with the same format");
+        Check(g_backendCalls.created == 1, "after the renderer was asked for the device once, on the client's window");
+
+        // Vulkan starts: the device draws through the table, and goes with it.
+        Check(gx86::Adopt(device), "the device is adopted again");
+        g_backendCalls        = BackendCalls{};
+        g_backendCalls.create = WXL_OK;
+        CallSlot(table[10], device, args, 2, 0);
+        if (g_backendCalls.created && gx86::AdoptedDevice() == device)
+        {
+            Check(g_slotEspBefore == g_slotEspAfter && g_backendCalls.caps >= 1 && g_backendCalls.scenes == 1 && engine->m_context == 1,
+                  "a device whose Vulkan starts opens its first frame through the table");
+            wxl_gx_batch batch{};
+            uint32_t     drawArgs[2] = {static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&batch)), 3};
+            CallSlot(table[42], device, drawArgs, 2, 0);
+            CallSlot(table[38], device, nullptr, 0, 0);
+            Check(g_backendCalls.draws == 1 && g_backendCalls.presents == 1 && g_backendCalls.scenes == 2,
+                  "its draws and presents reach the table, and the next frame opens");
+            uint32_t flags = 0;
+            g_d3d9Destroyed = 0;
+            CallSlot(table[8], device, &flags, 1, 0);
+            Check(g_slotEspBefore == g_slotEspAfter && g_backendCalls.destroyed == 1 && g_d3d9Destroyed == 1 &&
+                      gx86::VtableOf(device) == fakeVtable && !gx86::AdoptedDevice(),
+                  "deleting it releases the Vulkan device, gives back its vtable and runs its own destructor");
+        }
+        else
+        {
+            std::printf("     (no window could be made here: the Vulkan path past DeviceSetFormat is the owner's to see)\n");
+            Check(gx86::VtableOf(device) == fakeVtable, "and without a window the device falls back as above");
+        }
+        gx86::UseForTests(nullptr, nullptr);
+        g_scratch.clear();
+    }
 #endif
 }
 
@@ -13157,6 +13485,7 @@ int main(int argc, char** argv)
     CheckX64Only();
 #if defined(_M_IX86)
     CheckThiscallShim();
+    CheckGxAdapterX86();
     CheckCallX86();
     CheckModelCallsX86();
     CheckModelDrawX86();

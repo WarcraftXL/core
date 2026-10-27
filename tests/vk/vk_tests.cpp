@@ -31,6 +31,46 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(_WIN32)
+#include <windows.h>
+#undef near
+#undef far
+
+namespace
+{
+    /// The process's used address space and its largest free block, in MiB: what a 32-bit client
+    /// has left once the Vulkan driver and the renderer are in.
+    void AddressSpace(const char* when)
+    {
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        uintptr_t       at   = reinterpret_cast<uintptr_t>(info.lpMinimumApplicationAddress);
+        const uintptr_t end  = reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
+        uint64_t        used = 0, largest = 0, mapped = 0;
+        while (at < end)
+        {
+            MEMORY_BASIC_INFORMATION region{};
+            if (!VirtualQuery(reinterpret_cast<const void*>(at), &region, sizeof region)) break;
+            if (region.State == MEM_FREE) largest = region.RegionSize > largest ? region.RegionSize : largest;
+            else
+            {
+                used += region.RegionSize;
+                if (region.Type == MEM_MAPPED) mapped += region.RegionSize;
+            }
+            at = reinterpret_cast<uintptr_t>(region.BaseAddress) + region.RegionSize;
+        }
+        std::printf("  address space %s: %llu MiB used (mapped views %llu), largest free block %llu MiB\n", when,
+                    static_cast<unsigned long long>(used >> 20), static_cast<unsigned long long>(mapped >> 20),
+                    static_cast<unsigned long long>(largest >> 20));
+    }
+}
+#else
+namespace
+{
+    void AddressSpace(const char*) {}
+}
+#endif
+
 namespace
 {
     namespace vk = wxl::vk;
@@ -300,6 +340,7 @@ namespace
 
         vk::resources::Allocator allocator;
         Check(allocator.Create(context, why, sizeof why), "VMA starts on the device");
+        AddressSpace("with the driver loaded, a device and VMA made");
         vk::frame::Timeline timeline;
         Check(timeline.Create(context, why, sizeof why), "a timeline semaphore");
         vk::frame::Submitter submitter;
@@ -373,6 +414,7 @@ namespace wxl::vk::test
     }
 }
 
+
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -385,6 +427,7 @@ int main()
     wxl::vk::test::TranslatePureCases();
     wxl::vk::test::ParityPureCases();
     if (!wxl::vk::test::SpirvValidation()) std::printf("(spirv-val is not in this build: the native tree of tests/vk/ runs it)\n");
+    AddressSpace("before any Vulkan device");
     bool live = Live();
     if (live) live = wxl::vk::test::PresentLiveCases();
     if (live) wxl::vk::test::DrawLiveCases();
@@ -393,6 +436,7 @@ int main()
     if (live) wxl::vk::test::TranslateLiveCases();
     if (live) wxl::vk::test::RenderLiveCases();
     if (live) wxl::vk::test::V7LiveCases();
+    if (live) AddressSpace("after every live case (their devices released)");
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
     if (g_failures) return 1;
