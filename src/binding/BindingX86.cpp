@@ -2571,9 +2571,44 @@ namespace wxl::core::binding
         return Read<void*>(area, slot);
     }
 
+    void* map_area_chunk(const void* area, int32_t chunk_x, int32_t chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || !area || chunk_x < 0 || chunk_y < 0 || chunk_x > 15 || chunk_y > 15)
+            return nullptr;
+        return Read<void*>(area, WXL_FIELD("CMapArea", "m_mapChunks") +
+                                     sizeof(void*) * static_cast<std::size_t>(16 * chunk_y + chunk_x));
+    }
+
+    /// Whether `chunk` is committed, readable memory of a chunk's size: a value left in a
+    /// register, or a freed chunk's page, is not.
+    bool ChunkMemory(const void* chunk)
+    {
+        const std::uintptr_t at = reinterpret_cast<std::uintptr_t>(chunk);
+        if (at < 0x10000 || (at & 3)) return false;
+        MEMORY_BASIC_INFORMATION info{};
+        const std::size_t        size     = WXL_FIELD("CMapChunk", "m_soundEmitters") + sizeof(void*);
+        const DWORD              readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return VirtualQuery(chunk, &info, sizeof info) && info.State == MEM_COMMIT &&
+               !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (info.Protect & readable) &&
+               at + size <= reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    }
+
+    wxl_bool terrain_chunk_place(const void* chunk, int32_t* chunk_x, int32_t* chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk_x || !chunk_y || !ChunkMemory(chunk)) return WXL_FALSE;
+        *chunk_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        *chunk_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        return *chunk_x >= 0 && *chunk_x < 1024 && *chunk_y >= 0 && *chunk_y < 1024 ? WXL_TRUE : WXL_FALSE;
+    }
+
     wxl_bool terrain_chunk_view(void* chunk, wxl_core_terrain_chunk* out)
     {
-        if (!IsClient() || !OnMainThread() || !chunk || !out) return WXL_FALSE;
+        if (!IsClient() || !OnMainThread() || !chunk || !out || !ChunkMemory(chunk)) return WXL_FALSE;
+        // Only a live chunk: its own place on the map leads back to it through the tile's slot.
+        const int32_t cx = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        const int32_t cy = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        if (terrain_chunk(cx, cy) != chunk) return WXL_FALSE;
         const void* header = Read<const void*>(chunk, WXL_FIELD("CMapChunk", "m_header"));
         out->chunk_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
         out->chunk_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));

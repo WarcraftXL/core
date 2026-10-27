@@ -356,7 +356,7 @@ source. Everything else observes.
 | `Unit.OnAuraAdded`, `Unit.OnAuraRemoved` | `CGUnit_C::OnAuraAdded/OnAuraRemoved(uint32_t index, uint8_t a3, void* aura, int32_t spell_id)` | `UnitAuraChanged` after |
 | `Player.UpdateInventoryComponent` | `CGPlayer_C::UpdateInventoryComponent(int32_t slot, const void* old_item)` | `EquipmentChanged` after, when the item id moved |
 | `GameUI.SendTarget`, `GameUI.ClearTarget` | `CGGameUI::SendTarget(uint64_t guid)`, `CGGameUI::ClearTarget(uint64_t guid, int32_t a2)` | `TargetChanged` after, once per change of `m_lockedTarget` |
-| `MapArea.PrepareChunk` | `CMapArea::PrepareChunk(int32_t chunk_x, int32_t chunk_y)` | `TerrainChunkBuild` before; after, `wxl.terrain` writes a chunk's edits back into it and `TerrainChunkLoaded` is raised |
+| `MapArea.PrepareChunk` | `CMapArea::PrepareChunk(int32_t chunk_x, int32_t chunk_y)`, which answers nothing on the stock client | `TerrainChunkBuild` before; after, the chunk read from the tile's slot, `wxl.terrain` writes its edits back into it and `TerrainChunkLoaded` is raised |
 | `MapChunk.Purge` | `CMapChunk::Purge()`, a chunk freed | `TerrainChunkUnloaded` before, while a mod listens |
 | `FrameScript.Initialize` | `FrameScript_Initialize(int32_t profile)` | nothing: after, notes the new context and which one CGGameUI's state implies |
 | `FrameScript.Destroy` | `FrameScript_Destroy()` | `ScriptVmClosing` before, naming the context `CreateEvents` announced; nothing for a context never announced |

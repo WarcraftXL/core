@@ -15,9 +15,10 @@ namespace wxl::seam::MapChunk::Purge
 {
     void WXL_CALL Before(void* self)
     {
-        wxl::host::ModHost* host = wxl::core::Host();
-        if (!host || !host->Listening(WXL_EV_TerrainChunkUnloaded)) return;
+        // The ground changes whether or not someone listens (wxl.draw's drapes follow it).
         wxl_terrain_chunk_state_args args{};
-        if (wxl::core::services::terrain::ChunkUnloading(self, args)) host->Raise(WXL_EV_TerrainChunkUnloaded, &args);
+        if (!wxl::core::services::terrain::ChunkUnloading(self, args)) return;
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (host && host->Listening(WXL_EV_TerrainChunkUnloaded)) host->Raise(WXL_EV_TerrainChunkUnloaded, &args);
     }
 }

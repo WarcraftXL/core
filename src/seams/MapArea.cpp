@@ -34,12 +34,14 @@ namespace wxl::seam::MapArea::PrepareChunk
         host->Raise(WXL_EV_TerrainChunkBuild, &args);
     }
 
-    void WXL_CALL After(void* result, void*, int32_t, int32_t)
+    void WXL_CALL After(void* self, int32_t chunk_x, int32_t chunk_y)
     {
-        // The chunk is built and not drawn yet: the edits it carries go back into it, whether or
-        // not someone listens.
+        // The chunk is built and not drawn yet, in the tile's slot (the function answers nothing
+        // on the stock client): the edits it carries go back into it, whether or not someone
+        // listens.
+        void* chunk = self ? wxl::core::binding::map_area_chunk(self, chunk_x, chunk_y) : nullptr;
         wxl_terrain_chunk_state_args args{};
-        if (!wxl::core::services::terrain::ChunkLoaded(result, args)) return;
+        if (!chunk || !wxl::core::services::terrain::ChunkLoaded(chunk, args)) return;
         wxl::host::ModHost* host = wxl::core::Host();
         if (host && host->Listening(WXL_EV_TerrainChunkLoaded)) host->Raise(WXL_EV_TerrainChunkLoaded, &args);
     }

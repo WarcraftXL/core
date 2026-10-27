@@ -11,12 +11,16 @@
 #endif
 
 // Builds one chunk of a tile: allocates the CMapChunk, links it to the tile, sets its indices
-// and creates it from the tile's file buffer, then returns it. The one caller is CMapArea::Update,
-// for each chunk of the rectangle coming into view. Before raises TerrainChunkBuild with the
-// map, the tile's index (CMapArea::m_index) and the chunk's indices, before the chunk's data is
-// read. After takes the chunk the function returns, built and not drawn yet: wxl.terrain writes
-// the edits mods made to it back into its heights and normals, then raises TerrainChunkLoaded.
-WXL_SEAM(MapArea, PrepareChunk, "CMapArea::PrepareChunk", void*, thiscall, (void* self, int32_t chunk_x, int32_t chunk_y))
+// and creates it from the tile's file buffer. The one caller is CMapArea::Update, for each chunk
+// of the rectangle coming into view, which reads the chunk back from the tile's slot. On the stock
+// client it answers nothing: it ends on the call to CMapChunk::Create, so EAX holds what Create
+// left there (`ret 8` at 0x007D6BE9), and the row is void on both clients. CMapChunk::Create
+// stores the chunk in the tile's m_mapChunks[16 * y + x] (0x007C6589) before it returns. Before
+// raises TerrainChunkBuild with the map, the tile's index (CMapArea::m_index) and the chunk's
+// indices, before the chunk's data is read. After reads the chunk from the tile's slot
+// (binding map_area_chunk): wxl.terrain writes the edits mods made to it back into its heights
+// and normals, then TerrainChunkLoaded is raised.
+WXL_SEAM(MapArea, PrepareChunk, "CMapArea::PrepareChunk", void, thiscall, (void* self, int32_t chunk_x, int32_t chunk_y))
 WXL_SEAM_RAISES(MapArea, PrepareChunk, TerrainChunkBuild)
 WXL_SEAM_RAISES(MapArea, PrepareChunk, TerrainChunkLoaded)
 

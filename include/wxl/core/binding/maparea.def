@@ -13,6 +13,10 @@
 WXL_BINDING_FIELD(map_area_tile_x, int32_t, CMapArea, m_index.x, -1)
 WXL_BINDING_FIELD(map_area_tile_y, int32_t, CMapArea, m_index.y, -1)
 
+// The chunk a tile holds at its chunk column and row (0-15): CMapArea::m_mapChunks[16 * y + x],
+// which CMapChunk::Create fills; null for an empty slot or indices out of range.
+WXL_BINDING(map_area_chunk, void*, (const void* area, int32_t chunk_x, int32_t chunk_y), (area, chunk_x, chunk_y), 0)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

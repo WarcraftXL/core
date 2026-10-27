@@ -163,6 +163,15 @@ FLOAT_SLOT = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr 
 PUSHED_ECX = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"), (1, "push ecx"),
                   (3, "add esp, 4"), (1, "pop ebp"), (1, "ret"))
 
+# A function that answers nothing: its one caller writes EAX before reading it. Another whose
+# caller tests what it answers.
+NO_ANSWER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402100"), (1, "pop ebp"), (1, "ret"))
+NO_ANSWER_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402380"), (3, "mov esi, dword ptr [ebp + 8]"),
+                        (2, "je 0x40240d"), (5, "mov eax, 1"), (1, "pop ebp"), (1, "ret"))
+ANSWERS = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "mov eax, 7"), (1, "pop ebp"), (1, "ret"))
+ANSWER_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402440"), (2, "test eax, eax"),
+                     (1, "pop ebp"), (1, "ret"))
+
 PROGRAM = {
     0x00401000: CDECL_TWO,
     0x00401100: STDCALL_TWO,
@@ -189,6 +198,10 @@ PROGRAM = {
     0x00402200: TAIL_CALLER,
     0x00402300: FLOAT_SLOT,
     0x00402340: PUSHED_ECX,
+    0x00402380: NO_ANSWER,
+    0x00402400: NO_ANSWER_CALLER,
+    0x00402440: ANSWERS,
+    0x00402480: ANSWER_CALLER,
 }
 
 # (name, address, extent)
@@ -204,7 +217,9 @@ SYMBOLS = [("Thing::Plain", 0x00401000, 0x20), ("Thing::Owned", 0x00401100, 0x20
            ("Thing::Helper", 0x00401E00, 0x10), ("Thing::Dispatcher", 0x00401F00, 0x20),
            ("Thing::Tail", 0x00402000, 0x10), ("Thing::One", 0x00402100, 0x10),
            ("Thing::TailCaller", 0x00402200, 0x20), ("Thing::FloatSlot", 0x00402300, 0x20),
-           ("Thing::PushedEcx", 0x00402340, 0x20)]
+           ("Thing::PushedEcx", 0x00402340, 0x20), ("Thing::NoAnswer", 0x00402380, 0x20),
+           ("Thing::NoAnswerCaller", 0x00402400, 0x20), ("Thing::Answers", 0x00402440, 0x20),
+           ("Thing::AnswerCaller", 0x00402480, 0x20)]
 
 
 def flatten():
@@ -445,6 +460,20 @@ CASES = [
     ("a `push ecx` whose slot nothing fills reads ecx",
      DEMO_DEF + 'WXL_SEAM(Demo, PushedEcx, "Thing::PushedEcx", void, cdecl, (int32_t a))\n',
      THUNKS, 1, "declared cdecl, but 0x00402340 is thiscall (ECX)", ()),
+    # An answer the After is handed: the function must give one. CMapArea::PrepareChunk answers
+    # nothing on the stock client, and an After reading EAX as the chunk read garbage.
+    ("a row answering a pointer for a function no caller reads an answer of",
+     DEMO_DEF + 'WXL_SEAM(Demo, NoAnswer, "Thing::NoAnswer", void*, cdecl, ())\n',
+     THUNKS, 1, "no caller of 0x00402380 reads EAX after it (0x00402403): the function answers nothing", ()),
+    ("the same function declared void",
+     DEMO_DEF + 'WXL_SEAM(Demo, NoAnswer, "Thing::NoAnswer", void, cdecl, ())\n',
+     THUNKS, 0, None, ()),
+    ("a function whose caller tests its answer",
+     DEMO_DEF + 'WXL_SEAM(Demo, Answers, "Thing::Answers", int32_t, cdecl, ())\n',
+     THUNKS, 0, None, ()),
+    ("a Before alone is handed no answer",
+     DEMO_DEF + 'WXL_SEAM_BEFORE(Demo, NoAnswer, "Thing::NoAnswer", void*, cdecl, ())\n',
+     THUNKS, 0, None, ()),
     # A witness: a call site the row declares, read like a found one.
     ("a handler reached only through a pointer, without a witness",
      DEMO_DEF + DISPATCHED, THUNKS, 1,

@@ -50,8 +50,9 @@ WITNESS_ROW = re.compile(r"\bWXL_SEAM_WITNESS\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*([^
 class Row:
     """One WXL_SEAM row, as the ABI sees it."""
 
-    def __init__(self, domain, name, spec, returns, convention, params, origin, gated):
+    def __init__(self, domain, name, spec, returns, convention, params, origin, gated, shape=""):
         self.domain = domain
+        self.shape = shape            # "", "_BEFORE", "_AFTER" or "_GATE": the sides the body has
         self.name = name
         self.spec = spec              # the symbol column, "name" or "name@0x<address>"
         self.returns = returns
@@ -127,7 +128,7 @@ def read_rows(seams_dir, problems):
             inner = params.strip()[1:-1].strip()
             decls = [] if not inner else table.split_top_level(inner)
             rows.append(Row(domain, name, spec.strip().strip('"'), returns, convention,
-                            decls, origin, gated))
+                            decls, origin, gated, match.group(1) or ""))
         for match in WITNESS_ROW.finditer(text):
             origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
             witnesses.append(("%s.%s" % (match.group(1), match.group(2)), match.group(3), origin))
@@ -1684,6 +1685,126 @@ def check_row(binary, functions, row, max_callers):
     return finding
 
 
+# --- Whether a function answers anything --------------------------------------------------------
+
+EAX_PARTS = ("eax", "ax", "al", "ah")
+EAX_WORD = re.compile(r"\b(eax|ax|al|ah)\b")
+# Instructions whose first operand, a register, is only written.
+PURE_WRITES = ("mov", "lea", "movzx", "movsx", "pop") + tuple("set" + c for c in (
+    "a", "ae", "b", "be", "c", "e", "g", "ge", "l", "le", "na", "nae", "nb", "nbe", "nc", "ne", "ng",
+    "nge", "nl", "nle", "no", "np", "ns", "nz", "o", "p", "pe", "po", "s", "z"))
+
+
+def eax_after(insn):
+    """What one instruction does with EAX: "reads", "writes" (without reading it first) or None."""
+    ops = insn.operands
+    if insn.mn == "call":
+        return "reads" if any(EAX_WORD.search(op) for op in ops) else "writes"
+    if insn.mn in ("cdq", "cwde", "cbw", "stosd", "stosb", "stosw"):
+        return "reads"
+    if insn.mn in PURE_WRITES and ops and ops[0] in EAX_PARTS:
+        # `mov eax, [eax + 4]` reads before it writes; a partial register keeps the rest.
+        if any(EAX_WORD.search(op) for op in ops[1:]) or ops[0] != "eax":
+            return "reads"
+        return "writes"
+    if insn.mn in ("xor", "sub", "sbb") and len(ops) == 2 and ops[0] == ops[1] == "eax":
+        return "writes"
+    if any(EAX_WORD.search(op) for op in ops):
+        return "reads"
+    return None
+
+
+def site_uses_eax(binary, functions, call_addr, budget=300):
+    """Whether the code after a call reads EAX before writing it, on any path within the caller:
+    "reads", "dead" (every path writes it first, or calls again), or "unknown" (a path leaves the
+    caller, jumps through a register, or the walk runs out)."""
+    extent = functions.containing(call_addr)
+    if extent is None:
+        return "unknown"
+    start, size = extent
+    insns = trim_tables(disassemble(binary, start, start + size), start, start + size)
+    at = {insn.addr: i for i, insn in enumerate(insns)}
+    if call_addr not in at:
+        return "unknown"
+    pending, seen, steps = [at[call_addr] + 1], set(), 0
+    verdict = "dead"
+    while pending:
+        i = pending.pop()
+        while True:
+            if i >= len(insns) or i in seen:
+                break
+            seen.add(i)
+            steps += 1
+            if steps > budget:
+                return "unknown"
+            insn = insns[i]
+            effect = eax_after(insn)
+            if effect == "reads":
+                return "reads"
+            if effect == "writes":
+                break
+            if insn.mn in ("ret", "retn"):
+                verdict = "unknown"
+                break
+            if insn.mn.startswith("j"):
+                target = branch_target(insn)
+                if target is None or target not in at:
+                    verdict = "unknown"
+                    break
+                if insn.mn == "jmp":
+                    i = at[target]
+                    continue
+                pending.append(at[target])
+            i += 1
+    return verdict
+
+
+def after_reads_result(bodies_dir, row):
+    """Whether the seam's After body uses its first parameter, the function's answer: False for an
+    unnamed one or one only cast to void; True when the body cannot be found (assume it does)."""
+    path = bodies_dir / ("%s.cpp" % row.domain)
+    if not path.is_file():
+        return True
+    text = path.read_text(encoding="utf-8", errors="replace")
+    block = re.search(r"namespace\s+wxl::seam::%s::%s\s*\{" % (row.domain, row.name), text)
+    if not block:
+        return True
+    after = re.compile(r"\bAfter\s*\(([^)]*)\)\s*\{").search(text, block.end())
+    if not after:
+        return True
+    first = after.group(1).split(",")[0].strip()
+    name = re.search(r"(\w+)\s*$", first)
+    if not name or name.group(1) in ("void", "int32_t", "uint32_t") or first.endswith("*"):
+        return False
+    close = table.balanced(text, after.end() - 1)
+    body = text[after.end():close if close > 0 else len(text)]
+    uses = [m for m in re.finditer(r"\b%s\b" % re.escape(name.group(1)), body)
+            if not re.match(r"\s*\)\s*;", body[m.end():]) or not body[:m.start()].rstrip().endswith("(void)")]
+    return bool(uses)
+
+
+def check_result(binary, functions, row, finding, bodies_dir=None):
+    """A seam row whose After is handed the function's answer: the function must give one. A
+    function of the stock client that answers nothing leaves in EAX whatever its last call did,
+    and an After reading that as a pointer reads garbage. The callers say which: a function no
+    caller reads EAX after (every path after every call writes it first) answers nothing."""
+    if row.shape not in ("", "_AFTER") or finding.address is None or row.point.startswith("Point."):
+        return
+    if row.origin.startswith("calls_x86") or (bodies_dir is not None and not after_reads_result(bodies_dir, row)):
+        return
+    returns = row.returns.strip()
+    if returns == "void" or any(word in returns for word in ("float", "double")):
+        return
+    sites = callers_of(binary, finding.address)
+    uses = [site_uses_eax(binary, functions, site) for site in sites]
+    if uses and all(use == "dead" for use in uses):
+        finding.problems.append(
+            "%s (%s): the row answers %s, which its After is handed, but no caller of 0x%08X reads "
+            "EAX after it (%s): the function answers nothing. Declare it void and find what the "
+            "After needs another way" % (row.point, row.origin, returns, finding.address,
+                                        ", ".join("0x%08X" % site for site in sites)))
+
+
 def evidence(callee, sites):
     """The addresses a verdict was read from, so the claim can be checked rather than believed."""
     parts = []
@@ -1863,7 +1984,9 @@ def main(argv=None):
     try:
         binary = open_binary(args)
         for row in rows:
-            findings.append(check_row(binary, functions, row, args.max_callers))
+            finding = check_row(binary, functions, row, args.max_callers)
+            check_result(binary, functions, row, finding, args.thunks.parent)
+            findings.append(finding)
         if bodies and not args.point:
             check_bodies(binary, functions, bodies, problems)
         if slots:

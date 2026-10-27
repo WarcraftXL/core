@@ -740,13 +740,13 @@ namespace wxl::core::services
 
         bool ChunkUnloading(void* chunk, wxl_terrain_chunk_state_args& args)
         {
-            wxl_core_terrain_chunk view{};
-            if (!chunk || binding::terrain_chunk_view(chunk, &view) != WXL_TRUE) return false;
-            const Chunk* state = Find(Key(view.chunk_x, view.chunk_y));
+            int32_t cx = 0, cy = 0;
+            if (!chunk || binding::terrain_chunk_place(chunk, &cx, &cy) != WXL_TRUE) return false;
+            const Chunk* state = Find(Key(cx, cy));
             ++g_generation;
             args.map_id  = static_cast<uint32_t>(binding::map_id());
-            args.chunk_x = view.chunk_x;
-            args.chunk_y = view.chunk_y;
+            args.chunk_x = cx;
+            args.chunk_y = cy;
             args.edited  = state && state->edited ? WXL_TRUE : WXL_FALSE;
             return true;
         }

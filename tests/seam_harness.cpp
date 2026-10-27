@@ -101,6 +101,7 @@
 #include <set>
 #include <deque>
 #include <string>
+#include <type_traits>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -210,10 +211,34 @@ namespace
 
     wxl_bool WXL_CALL FakeTerrainPresent(void) { return g_groundPresent ? WXL_TRUE : WXL_FALSE; }
     void* WXL_CALL FakeTerrainChunk(int32_t cx, int32_t cy) { return GroundChunk(cx, cy); }
+    /// A tile holding the block's chunks at local columns and rows 0-2.
+    int g_groundArea = 0;
+
+    void* WXL_CALL FakeMapAreaChunk(const void* area, int32_t x, int32_t y)
+    {
+        return area == &g_groundArea ? GroundChunk(500 + x, 600 + y) : nullptr;
+    }
+
+    /// Whether a pointer is one of the fake chunks: the real rows refuse anything else.
+    bool IsGroundChunk(const void* chunk)
+    {
+        for (const FakeChunk& c : g_ground)
+            if (&c == chunk) return true;
+        return false;
+    }
+
+    wxl_bool WXL_CALL FakeTerrainPlace(const void* chunk, int32_t* x, int32_t* y)
+    {
+        if (!IsGroundChunk(chunk) || !x || !y) return WXL_FALSE;
+        *x = static_cast<const FakeChunk*>(chunk)->cx;
+        *y = static_cast<const FakeChunk*>(chunk)->cy;
+        return WXL_TRUE;
+    }
+
     wxl_bool WXL_CALL FakeTerrainView(void* chunk, wxl_core_terrain_chunk* out)
     {
         FakeChunk* c = static_cast<FakeChunk*>(chunk);
-        if (!c || !out) return WXL_FALSE;
+        if (!IsGroundChunk(chunk) || !out || GroundChunk(c->cx, c->cy) != c) return WXL_FALSE;
         out->chunk_x = c->cx;
         out->chunk_y = c->cy;
         out->heights = c->heights;
@@ -2340,6 +2365,8 @@ namespace
         init.terrain_present        = &FakeTerrainPresent;
         init.terrain_chunk          = &FakeTerrainChunk;
         init.terrain_chunk_view     = &FakeTerrainView;
+        init.terrain_chunk_place    = &FakeTerrainPlace;
+        init.map_area_chunk         = &FakeMapAreaChunk;
         init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
         init.terrain_forget_collision = &FakeForgetCollision;
         init.unit_fall_local        = &FakeFallLocal;
@@ -3818,13 +3845,42 @@ namespace
         stats.struct_size = sizeof stats;
         api.stats(&stats);
         const uint64_t reapplied = stats.reapplied;
-        wxl::seam::MapArea::PrepareChunk::After(GroundChunk(502, 602), nullptr, 2, 2);
+        wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 2, 2);
         const Received* back = Only(WXL_EV_TerrainChunkLoaded);
         api.stats(&stats);
         Check(rel(502, 602, 71) == 2.0f && !up(502, 602, 70) && back && back->As<wxl_terrain_chunk_state_args>().edited == WXL_TRUE &&
                   stats.reapplied == reapplied + 1,
               "terrain: MapArea.PrepareChunk After puts the edits back before TerrainChunkLoaded");
         Check(near(heightAt(at(502, 602, 71), true), 100.0), "terrain: and the originals are what the disk had");
+
+        // PrepareChunk answers nothing on the stock client: EAX holds what CMapChunk::Create left
+        // (5 in the crash of 2026-10-27). The After takes no answer and reads the tile's slot; a
+        // stray value reaching the service is refused, and an empty slot raises nothing.
+        static_assert(std::is_same_v<decltype(&wxl::seam::MapArea::PrepareChunk::After), void(WXL_CALL*)(void*, int32_t, int32_t)>,
+                      "MapArea.PrepareChunk's After is handed no answer");
+        g_received.clear();
+        wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 9, 9);
+        wxl::seam::MapArea::PrepareChunk::After(nullptr, 2, 2);
+        wxl_terrain_chunk_state_args stray{};
+        Check(g_received.empty() && !wxl::core::services::terrain::ChunkLoaded(reinterpret_cast<void*>(5), stray) &&
+                  !wxl::core::services::terrain::ChunkUnloading(reinterpret_cast<void*>(5), stray),
+              "terrain: an empty slot raises nothing, and a value left in EAX (5) is refused as a chunk, never read");
+        {
+            namespace ground = wxl::core::services::terrain;
+            const uint64_t before = ground::Generation();
+            Mute(WXL_EV_TerrainChunkUnloaded);
+            Mute(WXL_EV_TerrainChunkLoaded);
+            wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 1, 1);
+            const uint64_t loaded = ground::Generation();
+            wxl::seam::MapChunk::Purge::Before(GroundChunk(501, 601));
+            Unmute(WXL_EV_TerrainChunkUnloaded);
+            Unmute(WXL_EV_TerrainChunkLoaded);
+            Check(loaded > before && ground::Generation() > loaded,
+                  "terrain: a chunk read from its tile's slot and one freed move the ground's generation, nobody listening");
+        }
+        GroundChunk(502, 602)->loaded = false;
+        Check(!wxl::core::services::terrain::ChunkLoaded(&g_ground[8], stray), "terrain: a chunk its tile no longer holds is refused");
+        g_ground[8].loaded = true;
 
         // A player standing still on the ground falls when it goes down; moving, or above it, not.
         FakeObject me;

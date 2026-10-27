@@ -19,8 +19,15 @@ WXL_BINDING(terrain_present, wxl_bool, (void), (), WXL_FALSE)
 // still being read (m_asyncObject) or the chunk not built.
 WXL_BINDING(terrain_chunk, void*, (int32_t chunk_x, int32_t chunk_y), (chunk_x, chunk_y), 0)
 
-// A chunk's place, heights, normals, base and holes (wxl_core_terrain_chunk).
+// A live chunk's place, heights, normals, base and holes (wxl_core_terrain_chunk). Refuses
+// anything that is not one: memory not readable for a chunk, or a chunk whose place on the map
+// does not lead back to it through its tile's slot (one already taken out of it, a stray value).
 WXL_BINDING(terrain_chunk_view, wxl_bool, (void* chunk, wxl_core_terrain_chunk* out), (chunk, out), WXL_FALSE)
+
+// A chunk's place on the map (m_cOffset), for one being freed: its tile has already cleared its
+// slot (CMapArea::Purge, PurgeChunks and Update clear it before CMapChunk::Purge), so only the
+// memory is checked. Nothing else of it is read.
+WXL_BINDING(terrain_chunk_place, wxl_bool, (const void* chunk, int32_t* chunk_x, int32_t* chunk_y), (chunk, chunk_x, chunk_y), WXL_FALSE)
 
 // What depends on a chunk's heights, made again with the client's own functions:
 // CMapChunk::CreateBounds (m_bbox, m_sphere, m_bbox2: culling); its render chunk's bounds by
