@@ -556,6 +556,29 @@ pass]`) and checks nothing: an MCNK naming more is written past the array. As a 
 (`MapArea.AsyncCallback` Before) every MCNK naming more than 4 is set to its first 4
 (`terrain_layers::TileLoading`); the other layers stay in the file for a mod.
 
+Layers past the four (abi 0.1.44): when a render chunk's fourth layer is made, providers with a
+`chunk_fn` are asked for its map chunk (and its neighbour's, for a chunk drawn with it: both must
+answer the same layers) and answer up to four more layers with their 64 x 64 alpha maps. The maps
+become one texture through the texture service (`texture::ServeData`: a BLP2 of four independent
+channels under `Interface\WXL\Data\`, pinned until the map goes; 128 x 64 or 64 x 128 for a pair,
+as the client lays its own alpha maps out). On the vertex-program single pass, the first draw gets,
+besides the 0.1.43 extras, layer k's numbers in c32 + k up to 7, the pass row c40 (0, 1), every
+layer's coordinates as a function of the alpha maps' in c41 + k (from the client's c13 + k / c18 + k
+rows over our scales), the maps on stage 9 and layers 4 and 5's extra textures on 10 and 11. At
+that draw's end (`Gx.D3dDraw` After, the backend's `draw_end`) a second draw of the same batch
+(binding `gx_draw`, the device's slot 42; its own draw seams leave it) binds layers 4 to 7 on
+stages 0 to 3, sets c18 to c21 at their scales and c13 to c16 to zero (drawn still), c40 (1, 1),
+`GxBlend_Alpha` and no depth writes, then gives everything back. The pixel program (the mod's
+rewrite) weighs all eight layers in both draws, writes the first four's mix in the first and the
+last four's with their share of the pixel as alpha in the second; lighting and fog are affine in
+the mix, so the blend is the eight-layer mix exactly. Direct3D 9 and Vulkan run the same program and
+the same two draws. The fixed-function single pass and the multi-pass paths draw the four.
+
+The map's WDT (`Map.LoadWdt` After): read whole for the providers (`map_file` in a layer's and a
+chunk's info) until the next map; MPHD 0x80 (height texturing) without 0x4 is given 0x4 and
+`CMap::ValidateShaders` runs again, since this client reads 4096-byte alpha maps under 0x4 only,
+where retail reads them under either.
+
 ### Messages of a mod's own
 
 `wxl.net` (`src/services/NetService.cpp`) lets a mod claim opcode numbers and speak them with a

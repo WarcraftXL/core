@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.43-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.44-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -472,6 +472,7 @@ source. Everything else observes.
 | `Gx.IShaderLoad` | `CGxDevice::IShaderLoad(shaders, target, path, name, permutations)`, a shader program loaded by name | `ShaderLoad` before, with the stage, the folder, the name and the permutations |
 | `Sound.CreateWaveData` | `SE2::CreateWaveData(...)`, the sound data a sound plays from, made from a file | `SoundFileLoad` before, with the file, whether it streams and the channel's priority; never while the game's sound is off (`Sound_EnableAllSound` 0), when the client loads no sound |
 | `Map.AllocDoodadDef` | `CMap::AllocDoodadDef()` | nothing itself: after, notes the def it handed out, which tells a placement from a def found in the map's hash |
+| `Map.LoadWdt` | `CMap::LoadWdt()`, the map's WDT header read as the map loads | after: `wxl.terrain` reads the WDT for layer providers, and gives a map flagged 0x80 without 0x4 the 0x4 that has the client read its alpha maps as retail does |
 | `Map.Unload` | `CMap::Unload()`, the map and its ground unloaded | before: `wxl.terrain` drops every edit and the layers' texture scales, `TerrainEditsCleared` |
 | `MapRenderChunk.CreateLayer` | `CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate)`, a texture layer appended to a render chunk | nothing itself: after, `wxl.terrain` asks the layer providers for the layer's texture scale and keeps it |
 | `MapRenderChunk.RenderSinglePassVertexPixelShader`, `RenderMultiPassVertexPixelShader`, `RenderMultiPassVertexPixelShaderBigAlpha`, `RenderSinglePassPixelShader`, `RenderMultiPassPixelShader`, `RenderMultiPassPixelShaderBigAlpha`, `RenderMultiPassAdditive`, `RenderMultiPassAlpha` | the eight functions that draw a chunk's layers, by vertex program or texture-stage matrix, in one draw or a layer a draw | nothing itself: before and after, which chunk is drawn on which path, for `Gx.D3dDraw` |
@@ -526,7 +527,7 @@ what newer ADT files carry.
 |---|---|---|
 | `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
 | `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
-| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), and retail's height blend from `MTXP`'s heights and each texture's `_h.blp`, in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan (`[height_blend]`), both in `modern-adt.ini`; requires `wxl.terrain` |
+| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), retail's height blend from `MTXP`'s heights and each texture's `_h.blp` on maps whose WDT flags it (`[height_blend]`), and up to 8 layers a chunk from each tile's `_tex0.adt` (`[extra_layers]`), in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan, all in `modern-adt.ini`; requires `wxl.terrain` |
 
 `wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
 logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it
