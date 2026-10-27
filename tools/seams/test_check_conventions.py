@@ -947,6 +947,12 @@ GROUND_TRUTH = {
     # The devices' Draw (vtable slot 42): ecx, batch and count, `ret 0x8`.
     "Gx.D3dDraw":                      ("0x006A3620", "thiscall", ["ecx"], 2),
     "Gx.D3d9ExDraw":                   ("0x006A77C0", "thiscall", ["ecx"], 2),
+    # IShaderCreatePixel/Vertex, shared by the D3D9 and 9Ex devices: ecx and the record, `ret 4`.
+    "Gx.D3dIShaderCreatePixel":        ("0x006AA070", "thiscall", ["ecx"], 1),
+    "Gx.D3dIShaderCreateVertex":       ("0x006AA0D0", "thiscall", ["ecx"], 1),
+    # The 9Ex names resolve to the same bodies on the stock client (x64-only rows there).
+    "Gx.D3d9ExIShaderCreatePixel":     ("0x006AA070", "thiscall", ["ecx"], 1),
+    "Gx.D3d9ExIShaderCreateVertex":    ("0x006AA0D0", "thiscall", ["ecx"], 1),
     # SE2::CreateWaveData reads [ebp+8] (0x0087EE83) to the floats at [ebp+0x38], bare `ret`
     # (0x0087F195, 0x0087F376); Sound_LoadScriptSoundFile pushes sixteen, `add esp, 0x40` at
     # 0x0087F808.
@@ -1201,6 +1207,8 @@ GROUND_TRUTH = {
     "GxCall.ShaderConstantsClear":           ("0x006833A0", "cdecl", [], 0),
     "GxCall.ShaderConstantsSet":             ("0x00408210", "cdecl", [], 4),
     "GxCall.XformSet":                       ("0x0057C450", "cdecl", [], 2),
+    "GxCall.RsSetPointer":                   ("0x00408240", "cdecl", [], 2),
+    "GxCall.TexSetWrap":                     ("0x00681450", "cdecl", [], 3),
     "GxCall.IRsSync":                        ("0x00685B50", "thiscall", ["ecx"], 1),
     "GxCall.ITexMarkAsUpdated":              ("0x00684900", "stdcall", [], 1),
     "GxCall.ITexWHDStartEnd":                ("0x006A5EF0", "thiscall", ["ecx"], 5),

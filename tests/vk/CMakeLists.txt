@@ -44,6 +44,9 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-tools" spirv-tool
 add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp translate_tests.cpp
     v4_tests.cpp parity_tests.cpp render_tests.cpp v7_tests.cpp shapes_tests.cpp v5_tests.cpp)
 target_link_libraries(wxl-vk-tests PRIVATE wxl-vk SPIRV-Tools-static)
+# wxl.modern-adt's height blend, its rewritten terrain programs drawn on the driver.
+target_sources(wxl-vk-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../mods/wxl.modern-adt/src/shader/Ps3.cpp")
+target_include_directories(wxl-vk-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../mods/wxl.modern-adt/src")
 include("${CMAKE_CURRENT_SOURCE_DIR}/programs.cmake")
 wxl_vk_add_test_programs(wxl-vk-tests)
 target_compile_definitions(wxl-vk-tests PRIVATE WXL_VK_SPIRV_VAL)

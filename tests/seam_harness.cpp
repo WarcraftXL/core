@@ -63,6 +63,7 @@
 #include "wxl/core/points.h"
 #include "wxl/core/gx_vk.h"
 #include "wxl/engine/gx.hpp"
+#include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
 #include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
@@ -299,6 +300,41 @@ namespace
         if (xform > 10 || !m) return WXL_FALSE;
         std::memcpy(m, g_stage[xform], sizeof g_stage[xform]);
         return WXL_TRUE;
+    }
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_pixelRowsSent;
+    void* g_stageTexture[16] = {};
+    int   g_texturesWrapped  = 0;
+    void WXL_CALL FakePixelConstantsSet(uint32_t first, const float* rows, uint32_t count)
+    {
+        g_pixelRowsSent.push_back({first, std::vector<float>(rows, rows + 4 * count)});
+    }
+    void* WXL_CALL FakeTextureStage(uint32_t stage) { return stage < 16 ? g_stageTexture[stage] : nullptr; }
+    void WXL_CALL FakeTextureStageSet(uint32_t stage, void* texture)
+    {
+        if (stage < 16) g_stageTexture[stage] = texture;
+    }
+    void WXL_CALL FakeTextureWrap(void*) { ++g_texturesWrapped; }
+
+    // A program's record (CGxShader), as the D3D9 device makes it.
+    struct FakeShader
+    {
+        const char* name;
+        int32_t     target;
+        const void* code;
+        uint32_t    size;
+    };
+    wxl_bool WXL_CALL FakeShaderRecord(const void* shader, wxl_core_shader_record* out)
+    {
+        if (!shader || !out) return WXL_FALSE;
+        const auto* f = static_cast<const FakeShader*>(shader);
+        *out = wxl_core_shader_record{f->name, f->target, f->code, f->size};
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeShaderCodeSet(void* shader, const void* code, uint32_t size)
+    {
+        auto* f = static_cast<FakeShader*>(shader);
+        f->code = code;
+        f->size = size;
     }
     void WXL_CALL FakeXformSet(uint32_t xform, const float* m)
     {
@@ -2649,6 +2685,12 @@ namespace
         init.gx_vertex_constants_set = &FakeVertexConstantsSet;
         init.gx_xform_get           = &FakeXformGet;
         init.gx_xform_set           = &FakeXformSet;
+        init.gx_pixel_constants_set = &FakePixelConstantsSet;
+        init.gx_texture_stage       = &FakeTextureStage;
+        init.gx_texture_stage_set   = &FakeTextureStageSet;
+        init.gx_texture_wrap        = &FakeTextureWrap;
+        init.gx_shader_record       = &FakeShaderRecord;
+        init.gx_shader_code_set     = &FakeShaderCodeSet;
         init.map_area_chunk         = &FakeMapAreaChunk;
         init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
         init.terrain_forget_collision = &FakeForgetCollision;
@@ -4145,6 +4187,159 @@ namespace
         wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[1], 0);
         Check(told.size() == asked, "terrain layers: a mod's provider goes with it");
         wxl::core::services::terrain_layers::Clear();
+    }
+
+    // abi 0.1.43: a layer's extra texture and numbers on the single-pass paths.
+    void CheckTerrainLayerExtras()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.flags       = WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW;
+        provider.fn          = [](void*, const wxl_terrain_layer* layer, wxl_terrain_layer_look* look) {
+            if (look->struct_size < sizeof *look) return;
+            if (layer->texture == 7) look->extra_texture = "Tileset\\Rock_h.blp";
+            if (layer->texture == 5) look->extra_texture = "Tileset\\Loading_h.blp";
+            if (layer->texture == 7 || layer->texture == 5)
+            {
+                look->params[0] = 6.0f;
+                look->params[1] = 1.0f;
+                look->params[2] = 1.0f;
+            }
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "terrain extras: a provider with its flags is set");
+        const int closedBefore = g_texturesClosed;
+        FakeRenderChunk chunk;
+        char            area = 0;
+        const uint32_t  mcly[3][4] = {{3, 0, 0, 0}, {7, 0, 0, 0}, {5, 0, 0, 0}};
+        for (int i = 0; i < 3; ++i)
+        {
+            chunk.layers      = static_cast<uint32_t>(i + 1);
+            chunk.textures[i] = mcly[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[i], 0);
+        }
+        Check(layers::Count().chunks_kept == 1 && layers::Count().layers_extra == 2, "terrain extras: the chunk with extra textures is kept");
+
+        static char before = 0;
+        g_stageTexture[13] = &before;
+        g_pixelRowsSent.clear();
+        g_texturesWrapped = 0;
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const bool bound = g_stageTexture[13] == &g_fakeGxTex && !g_stageTexture[14] && g_texturesWrapped == 1;
+        const bool rows  = g_pixelRowsSent.size() == 1 && g_pixelRowsSent[0].first == WXL_TERRAIN_LAYER_PARAM_ROW &&
+                          g_pixelRowsSent[0].second.size() == 16 && g_pixelRowsSent[0].second[4] == 6.0f && g_pixelRowsSent[0].second[6] == 1.0f &&
+                          g_pixelRowsSent[0].second[0] == 0.0f && g_pixelRowsSent[0].second[8] == 0.0f && g_pixelRowsSent[0].second[10] == 0.0f;
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(bound, "terrain extras: layer 1's texture on sampler 13, wrapped; layer 2's still loading, not bound");
+        Check(rows, "terrain extras: the numbers in c32 + k, layer 1's (6, 1, 1), zeros for layer 2 whose texture is not loaded yet");
+        bool zeros = g_pixelRowsSent.size() == 2;
+        for (float f : g_pixelRowsSent.back().second) zeros = zeros && f == 0.0f;
+        Check(g_stageTexture[13] == &before && zeros, "terrain extras: after the draw, the sampler's texture back and the numbers zero");
+
+        // The Vulkan device: the same, through draw_begin and draw_end.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        const bool vk = g_stageTexture[13] == &g_fakeGxTex && g_pixelRowsSent.size() == 1;
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+        Check(vk && g_stageTexture[13] == &before, "terrain extras: the Vulkan device's draw_begin binds, draw_end gives back");
+
+        // A chunk of the client's own looks: its numbers written as zeros on the single-pass paths only.
+        FakeRenderChunk plain;
+        const uint32_t  stock[2][4] = {{3, 0, 0, 0}, {4, 0, 0, 0}};
+        for (int i = 0; i < 2; ++i)
+        {
+            plain.layers      = static_cast<uint32_t>(i + 1);
+            plain.textures[i] = stock[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&plain, &area, stock[i], 0);
+        }
+        g_pixelRowsSent.clear();
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&plain);
+        bool plainZeros = g_pixelRowsSent.size() == 2;
+        for (const auto& r : g_pixelRowsSent)
+            for (float f : r.second) plainZeros = plainZeros && f == 0.0f;
+        Check(plainZeros && g_rowsSent.empty() && g_stageTexture[12] == nullptr,
+              "terrain extras: a stock chunk gets zeros (WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW), nothing else");
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::After(&plain);
+        Check(g_pixelRowsSent.empty(), "terrain extras: a layer-a-pass path is left as the client draws it");
+
+        // Without the flag (a provider of abi 0.1.42's size), a stock chunk is not touched at all.
+        wxl_terrain_layer_provider older{};
+        older.struct_size = offsetof(wxl_terrain_layer_provider, flags);
+        older.fn          = provider.fn;
+        Check(api.set_layer_provider(&older) == WXL_OK, "terrain extras: a provider of abi 0.1.42 is still taken");
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&plain);
+        Check(g_pixelRowsSent.empty(), "terrain extras: and without the flag a stock chunk is drawn as the client draws it");
+
+        layers::MapUnloading();
+        Check(g_texturesClosed - closedBefore == 2 && layers::Count().chunks_kept == 0, "terrain extras: the map goes, its extra textures closed");
+        g_stageTexture[13] = nullptr;
+        layers::Clear();
+    }
+
+    // abi 0.1.43: a program made from a shader provider's answer, on Direct3D 9 and Vulkan.
+    void CheckShaderCode()
+    {
+        namespace code = wxl::core::services::shader_code;
+        const wxl_gx_api& gx = wxl::core::services::GxApi();
+        static const uint32_t answer[3] = {0xFFFF0300u, 0x0000FFFFu, 0x0000FFFFu};
+        static int            asked     = 0;
+        wxl_gx_shader_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = [](void*, const wxl_gx_shader_code* in, wxl_gx_shader_answer* out) -> wxl_bool {
+            ++asked;
+            if (in->stage != 1 || std::strcmp(in->name, "Terrain1:6") != 0) return WXL_FALSE;
+            out->code = answer;
+            out->size = std::strcmp(in->name, "Terrain1:6") == 0 ? sizeof answer : 7;
+            return WXL_TRUE;
+        };
+        Check(gx.struct_size >= offsetof(wxl_gx_api, set_shader_provider) + sizeof(void*) && gx.set_shader_provider(&provider) == WXL_OK,
+              "shader code: a mod sets its shader provider");
+        wxl_gx_shader_provider none{};
+        none.struct_size = sizeof none;
+        Check(gx.set_shader_provider(&none) == WXL_E_INVALID, "shader code: a provider without its function is refused");
+
+        static const uint32_t own[2] = {0xFFFF0300u, 0x0000FFFFu};
+        FakeShader terrain{"Terrain1:6", 4, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreatePixel::Before(nullptr, &terrain);
+        const bool swapped = terrain.size == sizeof answer && std::memcmp(terrain.code, answer, sizeof answer) == 0 && terrain.code != answer;
+        wxl::seam::Gx::D3dIShaderCreatePixel::After(nullptr, &terrain);
+        Check(swapped && terrain.code == own && terrain.size == sizeof own,
+              "shader code: Direct3D 9 makes the program from the answer (a copy), and the record gets its own code back");
+        FakeShader ui{"UI:0", 4, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreatePixel::Before(nullptr, &ui);
+        const bool left = ui.code == own;
+        wxl::seam::Gx::D3dIShaderCreatePixel::After(nullptr, &ui);
+        FakeShader vertex{"Terrain1:6", 0, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreateVertex::Before(nullptr, &vertex);
+        const bool vleft = vertex.code == own;
+        wxl::seam::Gx::D3dIShaderCreateVertex::After(nullptr, &vertex);
+        Check(left && vleft && ui.code == own, "shader code: a program the provider does not answer is made from its own code");
+        std::vector<uint8_t> out;
+        Check(code::Answer("Terrain1:6", 1, own, sizeof own, out) && out.size() == sizeof answer && !code::Answer("Terrain1:6", 0, own, sizeof own, out),
+              "shader code: the Vulkan renderer's translation is handed the same answer");
+        const int before = asked;
+        code::ForgetMod(0);
+        Check(!code::Answer("Terrain1:6", 1, own, sizeof own, out) && asked == before && code::Count().answered >= 2,
+              "shader code: a mod's provider goes with it");
+        code::Clear();
     }
 
     void CheckTerrainService()
@@ -15194,6 +15389,8 @@ int main(int argc, char** argv)
     CheckCVarService();
     CheckTerrainService();
     CheckTerrainLayers();
+    CheckTerrainLayerExtras();
+    CheckShaderCode();
     CheckDraw();
     CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();

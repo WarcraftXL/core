@@ -21,6 +21,7 @@
 #include "gx/vk/shaders/Translate.hpp"
 
 #include "Asm.hpp"
+#include "shader/Ps3.hpp"
 #include "Check.hpp"
 
 #include <algorithm>
@@ -443,6 +444,8 @@ namespace wxl::vk::test
             /// The 2x2 texture (stage 0, 2D) and the 1x1 cube (stage 1): their texels, as the reference reads them.
             V4 texels[4];
             V4 faces[6];
+            /// Stage 1 the cube (as the cases below expect), or the 2D texture like every other stage.
+            bool cube1 = true;
 
             /// Draws with @p vs and @p ps; false when a program does not translate or the pipeline is
             /// not made. @p out is the pixel, (-7, -7, -7, -7) when nothing was drawn.
@@ -551,7 +554,8 @@ namespace wxl::vk::test
                 resources::SamplerKey nearest;
                 nearest.filter = 0;
                 pc.stages[0]   = StageWord(slot2d_, bindless_.Sampler(nearest));
-                pc.stages[1]   = StageWord(slot_cube_, bindless_.Sampler(nearest));
+                pc.stages[1]   = StageWord(cube1 ? slot_cube_ : slot2d_, bindless_.Sampler(nearest));
+                for (uint32_t k = 2; k < kStages; ++k) pc.stages[k] = StageWord(slot2d_, bindless_.Sampler(nearest));
 
                 const VkCommandBuffer cmd = submitter_.Begin();
                 Barrier(cmd, target_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -747,7 +751,7 @@ namespace wxl::vk::test
             auto sample = [&lab](uint32_t stage, V4 coord, int mode) {
                 if (mode == 1)
                     for (int i = 0; i < 3; ++i) coord.v[i] /= coord.v[3];
-                if (stage == 1)
+                if (stage == 1 && lab.cube1)
                 {
                     // The cube's face: the major axis of the direction.
                     const float ax = std::fabs(coord.v[0]), ay = std::fabs(coord.v[1]), az = std::fabs(coord.v[2]);
@@ -996,6 +1000,119 @@ namespace wxl::vk::test
             Check(cache.Counters().translated == 1 && cache.Counters().from_disk == 0, "a damaged pack is started again");
         }
         std::filesystem::remove(pack, ignored);
+    }
+
+    /// wxl.modern-adt's height blend (shader::BlendByHeight) on the Vulkan renderer: the client's
+    /// terrain program reduced to its blend, rewritten, translated and drawn on the driver, against
+    /// D3D9's semantics (the interpreter above) and against retail's formula worked out apart; a
+    /// chunk without heights drawn bit for bit as the program before the rewrite.
+    void TerrainHeightBlendCases(Lab& lab)
+    {
+        namespace O = dx9;
+        using wxl::modern_adt::shader::BlendByHeight;
+        lab.cube1 = false;
+        // Texel centres of the 2x2 texture: layer k's coordinate picks its texel; its height is that texel's alpha.
+        const float centre[4][2] = {{0.25f, 0.25f}, {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}};
+        uint32_t    drawn = 0;
+        for (uint32_t layers = 2; layers <= 4; ++layers)
+        {
+            // The vertex program: texture coordinate k from c(10 + k).
+            Asm v(false, 3, 0);
+            v.Dcl(0, 0, Dst(Reg::Input, 0));
+            v.Dcl(0, 0, Dst(Reg::Output, 0));
+            for (uint32_t k = 0; k <= layers; ++k) v.Dcl(5, k, Dst(Reg::Output, 1 + k));
+            v.Op(O::kMov, {Dst(Reg::Output, 0), Src(Reg::Input, 0)});
+            for (uint32_t k = 0; k <= layers; ++k) v.Op(O::kMov, {Dst(Reg::Output, 1 + k), Src(Reg::Const, 10 + k)});
+            // The pixel program: Terrain1's blend, layer k on sampler k at v(k), the alphas on sampler L.
+            Asm p(true, 3, 0);
+            for (uint32_t k = 0; k <= layers; ++k) p.Dcl(5, k, Dst(Reg::Input, k));
+            for (uint32_t k = 0; k <= layers; ++k) p.DclSampler(2, k);
+            for (uint32_t k = 0; k <= layers; ++k) p.Op(O::kTex, {Dst(Reg::Temp, k), Src(Reg::Input, k), Src(Reg::Sampler, k)});
+            uint32_t acc = 0;
+            for (uint32_t k = 1; k < layers; ++k)
+            {
+                p.Op(O::kLrp, {Dst(Reg::Temp, 10 + k), Src(Reg::Temp, layers, (k - 1) * 0x55u), Src(Reg::Temp, k), Src(Reg::Temp, acc)});
+                acc = 10 + k;
+            }
+            p.Op(O::kMov, {Dst(Reg::ColorOut, 0), Src(Reg::Temp, acc)});
+            const std::vector<uint8_t> stock = p.Bytes();
+            std::vector<uint32_t>      words;
+            wxl::modern_adt::shader::Found found;
+            std::string                    why;
+            if (!BlendByHeight(stock.data(), stock.size(), words, found, why))
+            {
+                Check(false, ("the height blend rewrites a terrain program: " + why).c_str());
+                continue;
+            }
+            std::vector<uint8_t> blended(words.size() * 4);
+            std::memcpy(blended.data(), words.data(), blended.size());
+            for (uint32_t pick = 0; pick < 8; ++pick)
+            {
+                // Which texel each layer and the alphas read, and which layers carry a height.
+                uint32_t texel[5];
+                for (uint32_t k = 0; k <= layers; ++k) texel[k] = (pick + k * 3) % 4;
+                std::memset(lab.vregs, 0, sizeof lab.vregs);
+                std::memset(lab.pregs, 0, sizeof lab.pregs);
+                for (uint32_t k = 0; k <= layers; ++k)
+                {
+                    lab.vregs[(10 + k) * 4 + 0] = centre[texel[k]][0];
+                    lab.vregs[(10 + k) * 4 + 1] = centre[texel[k]][1];
+                    lab.vregs[(10 + k) * 4 + 3] = 1.0f;
+                }
+                float params[4][4] = {};
+                const bool heights = pick % 4 != 0;
+                for (uint32_t k = 0; k < layers; ++k)
+                    if (heights && (pick + k) % 3 != 0)
+                    {
+                        params[k][0] = 2.0f + static_cast<float>(pick + k);
+                        params[k][1] = pick % 2 ? 1.0f : 0.5f;
+                        params[k][2] = 1.0f;
+                    }
+                std::memcpy(&lab.pregs[32 * 4], params, sizeof params);
+                Case k;
+                k.name = "the height blend of " + std::to_string(layers) + " layers, pick " + std::to_string(pick);
+                k.vs   = v.Bytes();
+                k.ps   = blended;
+                k.tolerance = 2e-5f;
+                RunCase(lab, k);
+                ++drawn;
+                // Retail's formula, worked out apart from the texels.
+                float gpu[4], before[4];
+                std::string w;
+                const bool ran = lab.Run(k.vs, blended, gpu, w) && lab.Run(k.vs, stock, before, w);
+                const V4& alphas = lab.texels[texel[layers]];
+                float wgt[4] = {}, rem = 1.0f, pct[4] = {}, top = 0.0f, sum = 0.0f, want[4] = {};
+                for (int j = static_cast<int>(layers) - 1; j >= 1; --j)
+                {
+                    wgt[j] = alphas.v[j - 1] * rem;
+                    rem *= 1.0f - alphas.v[j - 1];
+                }
+                wgt[0] = rem;
+                for (uint32_t j = 0; j < layers; ++j)
+                {
+                    const float h = lab.texels[texel[j]].v[3];
+                    pct[j] = wgt[j] * (params[j][2] != 0.0f ? h * params[j][0] + params[j][1] : 1.0f);
+                    top    = std::max(top, pct[j]);
+                }
+                for (uint32_t j = 0; j < layers; ++j)
+                {
+                    if (heights) pct[j] *= 1.0f - std::clamp(top - pct[j], 0.0f, 1.0f);
+                    sum += pct[j];
+                }
+                for (uint32_t j = 0; j < layers; ++j)
+                    for (int c = 0; c < 4; ++c) want[c] += (heights ? pct[j] / std::max(sum, 1e-6f) : wgt[j]) * lab.texels[texel[j]].v[c];
+                float worst = 0.0f;
+                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(gpu[c] - want[c]));
+                Check(ran && worst < 2e-5f, ("the Vulkan renderer draws retail's height blend: " + k.name).c_str());
+                if (!heights)
+                    Check(ran && std::memcmp(gpu, before, sizeof gpu) == 0,
+                          ("a chunk without heights draws bit for bit as the client's program: " + k.name).c_str());
+            }
+        }
+        std::memset(lab.vregs, 0, sizeof lab.vregs);
+        std::memset(lab.pregs, 0, sizeof lab.pregs);
+        lab.cube1 = true;
+        std::printf("  height blend: %u terrain draws on the driver\n", drawn);
     }
 
     bool TranslateLiveCases()
@@ -1278,6 +1395,7 @@ namespace wxl::vk::test
             lab.push.flags = 0;
             std::memset(lab.push.clip_plane, 0, sizeof lab.push.clip_plane);
         }
+        TerrainHeightBlendCases(lab);
         std::printf("  translator: %zu programs against D3D9's formulas\n", cases.size() + 6);
         return true;
     }
