@@ -78,7 +78,7 @@ namespace wxl::modern_adt::shader
     {
         /// The four-layer programs: the chunk's layers past its four as well (see Ps3.hpp).
         bool EightLayers(const std::vector<uint32_t>& w, const std::vector<Ins>& ins, size_t alphaAt, uint32_t A, uint32_t ac,
-                         const uint32_t* coord, const bool* height, uint32_t base, std::vector<uint32_t>& out, Found& found)
+                         const uint32_t* coord, const bool* height, uint32_t base, bool sums, std::vector<uint32_t>& out, Found& found)
         {
             constexpr uint32_t K = kParamRow - 1, Pass = kPassRow, Coord = kCoordRow;
             const uint32_t W = base, W2 = base + 1, H = base + 2, H2 = base + 3, F = base + 4, F2 = base + 5, P = base + 6,
@@ -100,21 +100,34 @@ namespace wxl::modern_adt::shader
                 if (height[k]) head(kDcl, {0x80000000u | (kTex2d << 27), Dst(kSampler, kHeightSampler + k)});
 
             Emit e;
-            // Weights of the eight layers, each over the ones below (the client's lerps, carried on).
+            // Weights of the eight layers, as the program mixes its own: summed (layer 0 what the
+            // seven leave), or each over the ones below (the client's lerps, carried on).
             e(kTexld, {Dst(kTemp, B), ac, Src(kSampler, kExtraAlphaSampler)});
             e(kMul, {Dst(kTemp, B), Src(kTemp, B), c(Pass, 1)});
-            e(kMov, {Dst(kTemp, X, m(0)), c(K, 1)});
-            for (uint32_t k = 4; k-- > 0;)
+            if (sums)
             {
-                e(kMul, {Dst(kTemp, W2, m(k)), t(B, k), t(X, 0)});
-                e(kMad, {Dst(kTemp, X, m(0)), t(B, k, true), t(X, 0), t(X, 0)});
+                e(kMov, {Dst(kTemp, W2), Src(kTemp, B)});
+                e(kMov, {Dst(kTemp, W, 0xE), Src(kTemp, A, 0x90 /* xxyz: w.yzw = a.xyz */)});
+                e(kDp3, {Dst(kTemp, X, m(0)), Src(kTemp, A), c(K, 1)});
+                e(kDp4, {Dst(kTemp, X, m(1)), Src(kTemp, B), c(K, 1)});
+                e(kAdd, {Dst(kTemp, X, m(0), true), t(X, 0), t(X, 1)});
+                e(kAdd, {Dst(kTemp, W, m(0)), c(K, 1), t(X, 0, true)});
             }
-            for (uint32_t k = 3; k >= 1; --k)
+            else
             {
-                e(kMul, {Dst(kTemp, W, m(k)), t(A, k - 1), t(X, 0)});
-                e(kMad, {Dst(kTemp, X, m(0)), t(A, k - 1, true), t(X, 0), t(X, 0)});
+                e(kMov, {Dst(kTemp, X, m(0)), c(K, 1)});
+                for (uint32_t k = 4; k-- > 0;)
+                {
+                    e(kMul, {Dst(kTemp, W2, m(k)), t(B, k), t(X, 0)});
+                    e(kMad, {Dst(kTemp, X, m(0)), t(B, k, true), t(X, 0), t(X, 0)});
+                }
+                for (uint32_t k = 3; k >= 1; --k)
+                {
+                    e(kMul, {Dst(kTemp, W, m(k)), t(A, k - 1), t(X, 0)});
+                    e(kMad, {Dst(kTemp, X, m(0)), t(A, k - 1, true), t(X, 0), t(X, 0)});
+                }
+                e(kMov, {Dst(kTemp, W, m(0)), t(X, 0)});
             }
-            e(kMov, {Dst(kTemp, W, m(0)), t(X, 0)});
             // Heights: each layer read at its own coordinates in its own draw, at the alpha maps'
             // carried to it (c41 + k) in the other.
             e(kMov, {Dst(kTemp, H), c(K, 0)});
@@ -180,14 +193,20 @@ namespace wxl::modern_adt::shader
             e(kMax, {Dst(kTemp, D, m(1)), t(D, 1), c(K, 2)});
             e(kRcp, {Dst(kTemp, D, m(1)), t(D, 1)});
             e(kMul, {Dst(kTemp, G), Src(kTemp, G), t(D, 1)});
-            // Back into the program's alphas: each layer over what is left under the ones above.
-            e(kMov, {Dst(kTemp, D, m(2)), c(K, 1)});
-            for (uint32_t k = 3; k >= 1; --k)
+            // Back into the program's alphas: summed, each layer's share (the program gives the
+            // first the rest); otherwise each layer over what is left under the ones above.
+            if (sums)
+                e(kMov, {Dst(kTemp, X, 0x7), Src(kTemp, G, 0xF9 /* yzww */)});
+            else
             {
-                e(kMax, {Dst(kTemp, D, m(3)), t(D, 2), c(K, 2)});
-                e(kRcp, {Dst(kTemp, D, m(3)), t(D, 3)});
-                e(kMul, {Dst(kTemp, X, m(k - 1), true), t(G, k), t(D, 3)});
-                e(kAdd, {Dst(kTemp, D, m(2)), t(D, 2), t(G, k, true)});
+                e(kMov, {Dst(kTemp, D, m(2)), c(K, 1)});
+                for (uint32_t k = 3; k >= 1; --k)
+                {
+                    e(kMax, {Dst(kTemp, D, m(3)), t(D, 2), c(K, 2)});
+                    e(kRcp, {Dst(kTemp, D, m(3)), t(D, 3)});
+                    e(kMul, {Dst(kTemp, X, m(k - 1), true), t(G, k), t(D, 3)});
+                    e(kAdd, {Dst(kTemp, D, m(2)), t(D, 2), t(G, k, true)});
+                }
             }
             // A chunk with no height and no layer past its four: the client's own alphas.
             e(kMax, {Dst(kTemp, M, m(3)), t(M, 3), c(Pass, 1)});
@@ -372,7 +391,7 @@ namespace wxl::modern_adt::shader
         if (layers == 4 && TypeOf(alphaCoord) == kInput)
         {
             found.extras = true;
-            return EightLayers(w, ins, alphaAt, A, alphaCoord, coord, height, base, out, found);
+            return EightLayers(w, ins, alphaAt, A, alphaCoord, coord, height, base, sums, out, found);
         }
 
         Emit head; // declarations, ahead of the program's own
