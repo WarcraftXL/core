@@ -196,6 +196,43 @@ typedef struct wxl_core_area_file
     uint32_t    size;   ///< m_fileSize
 } wxl_core_area_file;
 
+/// What a split tile's area is pointed at (binding map_area_split_set): CMapArea's fields, then
+/// CMapArea::LoadTextures(texture_names, texture_names_size). Null pointers and zero counts for
+/// what the tile has not.
+typedef struct wxl_core_area_split
+{
+    void*     chunk_info;         ///< m_chunkInfo: 256 SMChunkInfo, an index of the root's MCNKs
+    void*     doodad_defs;        ///< m_doodadDef: MDDF
+    void*     map_obj_defs;       ///< m_mapObjDef: MODF
+    uint32_t  doodad_count;       ///< m_doodadDefCount
+    uint32_t  map_obj_count;      ///< m_mapObjDefCount
+    char*     model_names;        ///< m_m2FileNames: MMDX
+    char*     map_obj_names;      ///< m_wmoFileNames: MWMO
+    uint32_t* model_offsets;      ///< m_modelFilenamesOffsets: MMID
+    uint32_t* map_obj_offsets;    ///< m_wmoFilenamesOffsets: MWID
+    int32_t*  texture_flags;      ///< m_textureFlags: MTXF
+    char*     texture_names;      ///< MTEX, handed to CMapArea::LoadTextures
+    uint32_t  texture_names_size;
+} wxl_core_area_split;
+
+/// Where a chunk being made reads from (binding map_chunk_parts): CMapChunk.
+typedef struct wxl_core_map_chunk
+{
+    const void* begin;   ///< m_chunkInfoBeginPtr: its MCNK in the tile's file buffer
+    void*       header;  ///< m_header: the MCNK header (SMChunk)
+    int32_t     index_x; ///< m_aIndex.x: its column in its tile (0-15)
+    int32_t     index_y; ///< m_aIndex.y
+} wxl_core_map_chunk;
+
+/// A split tile's chunk pointed into its _tex0 and _obj0 (binding map_chunk_split_set): CMapChunk.
+typedef struct wxl_core_chunk_split
+{
+    void* layers; ///< m_layers: MCLY
+    void* alpha;  ///< m_additionalShadowmap: MCAL
+    void* shadow; ///< m_shadowMap: MCSH
+    void* refs;   ///< m_mcrfPtr: MCRD (CreateRefs is answered by the runtime for such a chunk)
+} wxl_core_chunk_split;
+
 /// A program's record (binding gx_shader_record): CGxShader.
 typedef struct wxl_core_shader_record
 {

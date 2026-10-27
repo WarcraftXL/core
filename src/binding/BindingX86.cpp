@@ -1234,6 +1234,60 @@ namespace wxl::core::binding
         return out->data && out->size ? WXL_TRUE : WXL_FALSE;
     }
 
+    /// Writes @p value at a byte offset from a base, without alignment assumptions.
+    template <class T>
+    void Put(void* base, std::size_t offset, T value)
+    {
+        std::memcpy(static_cast<char*>(base) + offset, &value, sizeof value);
+    }
+
+    wxl_bool map_area_split_set(void* area, const wxl_core_area_split* split)
+    {
+        if (!IsClient() || !OnMainThread() || !area || !split) return WXL_FALSE;
+        Put(area, WXL_FIELD("CMapArea", "m_chunkInfo"), split->chunk_info);
+        Put(area, WXL_FIELD("CMapArea", "m_doodadDef"), split->doodad_defs);
+        Put(area, WXL_FIELD("CMapArea", "m_mapObjDef"), split->map_obj_defs);
+        Put(area, WXL_FIELD("CMapArea", "m_doodadDefCount"), static_cast<int32_t>(split->doodad_count));
+        Put(area, WXL_FIELD("CMapArea", "m_mapObjDefCount"), static_cast<int32_t>(split->map_obj_count));
+        Put(area, WXL_FIELD("CMapArea", "m_m2FileNames"), split->model_names);
+        Put(area, WXL_FIELD("CMapArea", "m_wmoFileNames"), split->map_obj_names);
+        Put(area, WXL_FIELD("CMapArea", "m_modelFilenamesOffsets"), split->model_offsets);
+        Put(area, WXL_FIELD("CMapArea", "m_wmoFilenamesOffsets"), split->map_obj_offsets);
+        Put(area, WXL_FIELD("CMapArea", "m_textureFlags"), split->texture_flags);
+        // CMapArea::LoadTextures(names, size): __thiscall, two dwords, `ret 8` (0x007D6E0B).
+        if (split->texture_names && split->texture_names_size)
+            x86::CallMember<void>(WXL_SITE("CMapArea::LoadTextures", 0), area, split->texture_names, split->texture_names_size);
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_chunk_parts(const void* chunk, wxl_core_map_chunk* out)
+    {
+        if (!IsClient() || !chunk || !out) return WXL_FALSE;
+        out->begin   = Read<const void*>(chunk, WXL_FIELD("CMapChunk", "m_chunkInfoBeginPtr"));
+        out->header  = Read<void*>(chunk, WXL_FIELD("CMapChunk", "m_header"));
+        out->index_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_aIndex.x"));
+        out->index_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_aIndex.y"));
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_chunk_split_set(void* chunk, const wxl_core_chunk_split* split)
+    {
+        if (!IsClient() || !chunk || !split) return WXL_FALSE;
+        Put(chunk, WXL_FIELD("CMapChunk", "m_layers"), split->layers);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_additionalShadowmap"), split->alpha);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_shadowMap"), split->shadow);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_mcrfPtr"), split->refs);
+        return WXL_TRUE;
+    }
+
+    void map_chunk_create_refs(void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t map_objs)
+    {
+        // CMapChunk::CreateRefs(area, refs, doodads, map objects): __thiscall, four dwords, `ret 0x10`
+        // (0x007C647A).
+        if (!IsClient() || !OnMainThread() || !chunk || !area || (!refs && (doodads || map_objs))) return;
+        x86::CallMember<void>(WXL_SITE("CMapChunk::CreateRefs", 0), chunk, area, const_cast<uint32_t*>(refs), doodads, map_objs);
+    }
+
     const float* terrain_vertex_constants()
     {
         return IsClient() ? reinterpret_cast<const float*>(WXL_STATIC("CMapRenderChunk::s_vertexShaderConsts")) : nullptr;

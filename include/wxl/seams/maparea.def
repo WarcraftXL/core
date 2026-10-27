@@ -35,6 +35,20 @@ WXL_SEAM_BEFORE(MapArea, AsyncCallback, "CMapArea::AsyncCallback", void, cdecl, 
 WXL_SEAM_WITNESS(MapArea, AsyncCallback, 0x004B9B9E)    // AsyncFileReadPollHandler: call ecx; add esp, 4
 WXL_SEAM_RAISES(MapArea, AsyncCallback, TerrainTileLoad)
 
+// Points the tile at its file's chunks: CMapArea::m_header (the MHDR after MVER), the chunk index
+// (MCIN), the placements and their names (MDDF, MODF, MMDX, MMID, MWMO, MWID), MFBO, the liquid
+// (MH2O, a Liquid::CAreaData it allocates), the texture flags (MTXF), then CMapArea::LoadTextures
+// on MTEX, all from MHDR's offsets. Its one caller is CMapArea::AsyncCallback (0x007D7029), on
+// the main thread, with m_file still open. __thiscall, no argument, a bare `ret` (0x007D7014).
+// A root of Cataclysm and later has no MCIN and an MHDR of zeros but for MFBO and MH2O (every
+// root of a 37,768-tile retail survey): the client's own reading then sets the header, MFBO and
+// the liquid as for any tile, and the rest to empty chunks it never follows (every count 0,
+// LoadTextures of 0 bytes). Before asks the mods' tile providers for the tile's _tex0, _obj0
+// and _obj1 and indexes them; After points the area's chunk index, placements, names and texture
+// flags into them and loads _tex0's textures through CMapArea::LoadTextures. A root with MCIN is
+// left alone.
+WXL_SEAM(MapArea, ProcessIffChunks, "CMapArea::ProcessIffChunks", void, thiscall, (void* self))
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

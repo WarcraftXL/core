@@ -4,7 +4,8 @@
 // What wxl.modern-adt knows of the map, for its features to read:
 //
 //   per area   each ADT's textures (adt::TextureInfo: scale, heightScale, heightOffset, where they
-//              came from), read once from its bytes and read again when the area is loaded again
+//              came from), read once from its bytes and read again when the area is loaded again;
+//              a root without MCIN has them in its _tex0 (TileSet), read from there
 //   per layer  each texture layer the client made: its chunk, its place, its MTEX texture and
 //              that texture's info, as wxl.terrain showed it
 //
@@ -13,6 +14,7 @@
 #pragma once
 
 #include "adt/Reader.hpp"
+#include "store/TileSet.hpp"
 
 #include <cstdint>
 #include <string>
@@ -40,7 +42,8 @@ namespace wxl::modern_adt
     class Store
     {
     public:
-        explicit Store(adt::Prefer prefer = adt::Prefer::automatic) : prefer_(prefer) {}
+        /// @p tiles: where a split tile's _tex0 is found (null: roots only).
+        explicit Store(adt::Prefer prefer = adt::Prefer::automatic, const TileSet* tiles = nullptr) : prefer_(prefer), tiles_(tiles) {}
 
         /// The area of tile (x, y), read from @p file when it is new or was loaded again.
         const Area& AreaOf(int32_t tile_x, int32_t tile_y, const void* file, uint32_t size);
@@ -55,6 +58,7 @@ namespace wxl::modern_adt
 
     private:
         adt::Prefer                                prefer_;
+        const TileSet*                             tiles_;
         std::unordered_map<uint32_t, Area>         areas_;  ///< by tile: 64 * y + x
         std::unordered_map<uint64_t, Layer>        layers_; ///< by chunk and place
         uint64_t                                   reads_ = 0;

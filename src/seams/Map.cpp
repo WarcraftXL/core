@@ -10,6 +10,7 @@
 #include "runtime/Core.hpp"
 #include "services/TerrainService.hpp"
 #include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -90,4 +91,9 @@ namespace wxl::seam::Map::Unload
         wxl::host::ModHost* host = wxl::core::Host();
         if (host && host->Listening(WXL_EV_TerrainEditsCleared)) host->Raise(WXL_EV_TerrainEditsCleared, &args);
     }
+}
+
+namespace wxl::seam::Map::FreeArea
+{
+    void WXL_CALL Before(void* area) { wxl::core::services::terrain_tiles::AreaFreeing(area); }
 }

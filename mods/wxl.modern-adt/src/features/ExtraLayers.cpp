@@ -39,9 +39,20 @@ namespace wxl::modern_adt
         if (tile_x < 0 || tile_y < 0 || tile_x >= 64 || tile_y >= 64) return;
         const uint32_t key = static_cast<uint32_t>(tile_y) * 64u + static_cast<uint32_t>(tile_x);
         splits_.erase(key);
-        const std::string name = SplitName(path);
-        Split             split;
-        if (name.empty() || !read_ || !read_(name, split.bytes)) return;
+        const std::string    name = SplitName(path);
+        std::vector<uint8_t> bytes;
+        if (name.empty() || !read_ || !read_(name, bytes)) return;
+        TileLoaded(tile_x, tile_y, bytes);
+    }
+
+    void ExtraLayers::TileLoaded(int32_t tile_x, int32_t tile_y, const std::vector<uint8_t>& tex0)
+    {
+        if (tile_x < 0 || tile_y < 0 || tile_x >= 64 || tile_y >= 64) return;
+        const uint32_t key = static_cast<uint32_t>(tile_y) * 64u + static_cast<uint32_t>(tile_x);
+        splits_.erase(key);
+        if (tex0.empty()) return;
+        Split split;
+        split.bytes = tex0;
         const adt::Reader reader(split.bytes.data(), split.bytes.size());
         for (std::string_view n : reader.TextureNames()) split.names.emplace_back(n);
         split.textures = adt::ReadTextures(reader, adt::Prefer::automatic);

@@ -60,6 +60,12 @@ WXL_SEAM_AFTER(Map, LoadWdt, "CMap::LoadWdt", void, cdecl, ())
 WXL_SEAM_BEFORE(Map, Unload, "CMap::Unload", void, cdecl, ())
 WXL_SEAM_RAISES(Map, Unload, TerrainEditsCleared)
 
+// Frees a tile: unlinks it, destroys it (its liquid, its file's buffer) and gives its object back to
+// the area heap. Its two callers, CMap::PurgeArea (0x007C3700) and CMap::PurgeMaps (0x007C3730),
+// have purged the tile first. cdecl, one dword ([ebp+8], 0x007C00A5), a bare `ret` (0x007C0103).
+// Before lets go of what the runtime kept for the tile: a split tile's files and index.
+WXL_SEAM_BEFORE(Map, FreeArea, "CMap::FreeArea", void, cdecl, (void* area))
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 145 types, 886 field offsets, 11 member sizes.
+// 145 types, 897 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -541,10 +541,21 @@ WXL_LAYOUT_TYPE(CMapArea, "CMapArea", 0x4BC, "WoW/Source/WorldClient/MapArea.h",
 WXL_LAYOUT_FIELD(CMapArea, "m_index.x", 0x48, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_index.y", 0x4C, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_textures.m_data", 0x60, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_header", 0x68, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_file", 0x6C, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_asyncObject", 0x70, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_fileBuffer", 0x80, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_fileSize", 0x84, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_chunkInfo", 0x88, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_doodadDef", 0x90, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_mapObjDef", 0x94, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_doodadDefCount", 0x98, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_mapObjDefCount", 0x9C, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_m2FileNames", 0xA0, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_wmoFileNames", 0xA4, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_modelFilenamesOffsets", 0xA8, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_wmoFilenamesOffsets", 0xAC, "WoW/Source/WorldClient/MapArea.h", 37)
+WXL_LAYOUT_FIELD(CMapArea, "m_textureFlags", 0xB4, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_FIELD(CMapArea, "m_mapChunks", 0xBC, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_SIZE(CMapArea, "m_mapChunks[0]", 0x4, "WoW/Source/WorldClient/MapArea.h", 37)
 WXL_LAYOUT_TYPE(CMapAreaLow, "CMapAreaLow", 0x5C, "WoW/Source/WorldClient/MapLowDetail.h", 16)

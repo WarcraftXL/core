@@ -15,14 +15,19 @@
 //   extra_layers   a chunk's layers past the client's four (up to 8), from the tile's split
 //                  texture file (<tile>_tex0.adt) or else the root ADT's own MCNK, through
 //                  wxl.terrain's chunk_fn.
+//   split_tiles    tiles split by file name (Cataclysm to Legion: a root without MCIN, its _tex0,
+//                  _obj0, _obj1), through wxl.terrain's tile provider: the runtime loads them
+//                  natively from the files the mod reads (store/TileSet).
 //
 // Main thread only, as wxl.terrain and wxl.gx call their providers.
 
 #include "Options.hpp"
 #include "features/ExtraLayers.hpp"
 #include "features/HeightBlend.hpp"
+#include "features/SplitTiles.hpp"
 #include "features/TextureScale.hpp"
 #include "store/Store.hpp"
+#include "store/TileSet.hpp"
 
 #include "wxl/sdk.hpp"
 #include "wxl/services/gx.h"
@@ -67,12 +72,31 @@ namespace
         {
             options_ = ReadOptions();
             for (const std::string& line : options_.problems) wxl::Log(WXL_LOG_WARN, kTag, line.c_str());
-            store_ = std::make_unique<wxl::modern_adt::Store>(options_.source);
+            tiles_ = std::make_unique<wxl::modern_adt::TileSet>(&ReadFile);
+            store_ = std::make_unique<wxl::modern_adt::Store>(options_.source, tiles_.get());
             scale_ = std::make_unique<wxl::modern_adt::TextureScale>(*store_);
             blend_ = std::make_unique<wxl::modern_adt::HeightBlend>(*store_, &FileExists, options_.require_wdt_flag);
+            if (options_.split_tiles && g_terrain && wxl::detail::Carries(g_terrain.Get(), &wxl_terrain_api::set_tile_provider))
+            {
+                split_ = std::make_unique<wxl::modern_adt::SplitTiles>(*tiles_);
+                wxl_terrain_tile_provider tiles{};
+                tiles.struct_size = sizeof tiles;
+                tiles.fn          = &ModernAdtMod::OnSplitTile;
+                tiles.user        = this;
+                if (g_terrain->set_tile_provider(&tiles) != WXL_OK)
+                {
+                    wxl::Log(WXL_LOG_ERROR, kTag, "wxl.terrain refused the tile provider: split tiles load untextured");
+                    split_.reset();
+                }
+                else
+                    wxl::Log(WXL_LOG_INFO, kTag, "split_tiles on: tiles split into _tex0, _obj0 and _obj1 load natively");
+            }
+            else if (options_.split_tiles)
+                wxl::Log(WXL_LOG_WARN, kTag, "wxl.terrain has no tile provider (a runtime before abi 0.1.45): split_tiles does nothing");
+            if (split_) tileEvents_ = wxl::Subscribe(WXL_EV_TerrainTileLoad, &ModernAdtMod::OnTile, this);
             if (!options_.texture_scale && !options_.height_blend && !options_.extra_layers)
             {
-                wxl::Log(WXL_LOG_INFO, kTag, "texture_scale and height_blend off (enabled = 0): no feature runs");
+                wxl::Log(WXL_LOG_INFO, kTag, "texture_scale, height_blend and extra_layers off (enabled = 0): no layer feature runs");
                 return WXL_OK;
             }
             if (!g_terrain || !wxl::detail::Carries(g_terrain.Get(), &wxl_terrain_api::set_layer_provider))
@@ -97,7 +121,7 @@ namespace
             {
                 extra_         = std::make_unique<wxl::modern_adt::ExtraLayers>(*store_, blend_.get(), &ReadFile);
                 provider.chunk_fn = &ModernAdtMod::OnChunk;
-                tiles_ = wxl::Subscribe(WXL_EV_TerrainTileLoad, &ModernAdtMod::OnTile, this);
+                if (!split_) tileEvents_ = wxl::Subscribe(WXL_EV_TerrainTileLoad, &ModernAdtMod::OnTile, this);
             }
             if (g_terrain->set_layer_provider(&provider) != WXL_OK)
             {
@@ -137,7 +161,15 @@ namespace
         {
             if (g_terrain && wxl::detail::Carries(g_terrain.Get(), &wxl_terrain_api::set_layer_provider)) g_terrain->set_layer_provider(nullptr);
             if (blending_) g_gx->set_shader_provider(nullptr);
-            tiles_ = wxl::Subscription();
+            if (split_) g_terrain->set_tile_provider(nullptr);
+            tileEvents_ = wxl::Subscription();
+            if (split_)
+            {
+                char line[200];
+                std::snprintf(line, sizeof line, "split_tiles: %llu tile(s) handed to the runtime, %llu without their _tex0 or _obj0",
+                              static_cast<unsigned long long>(split_->Tiles()), static_cast<unsigned long long>(split_->Missing()));
+                wxl::Log(WXL_LOG_INFO, kTag, line);
+            }
             if (extra_ && layering_)
             {
                 char line[200];
@@ -188,7 +220,17 @@ namespace
         {
             auto*       self = static_cast<ModernAdtMod*>(user);
             const auto* tile = static_cast<const wxl_terrain_tile_args*>(args);
-            if (tile && self->extra_) self->extra_->TileLoaded(std::string_view(tile->path.data, tile->path.size), tile->tile_x, tile->tile_y);
+            if (!tile) return;
+            // The tile's other files, read once for every feature.
+            const wxl::modern_adt::TileSet::Files& files =
+                self->tiles_->Loaded(std::string_view(tile->path.data, tile->path.size), tile->tile_x, tile->tile_y, tile->data, tile->size);
+            if (self->extra_) self->extra_->TileLoaded(tile->tile_x, tile->tile_y, files.tex0);
+        }
+
+        static void WXL_CALL OnSplitTile(void* user, const wxl_terrain_tile* tile, wxl_terrain_tile_files* out)
+        {
+            auto* self = static_cast<ModernAdtMod*>(user);
+            if (tile && out && self->split_) self->split_->Answer(*tile, *out);
         }
 
         static wxl_bool WXL_CALL OnProgram(void* user, const wxl_gx_shader_code* code, wxl_gx_shader_answer* answer)
@@ -217,11 +259,13 @@ namespace
         }
 
         wxl::modern_adt::Options                       options_;
+        std::unique_ptr<wxl::modern_adt::TileSet>      tiles_;
         std::unique_ptr<wxl::modern_adt::Store>        store_;
         std::unique_ptr<wxl::modern_adt::TextureScale> scale_;
         std::unique_ptr<wxl::modern_adt::HeightBlend>  blend_;
         std::unique_ptr<wxl::modern_adt::ExtraLayers>  extra_;
-        wxl::Subscription                              tiles_;
+        std::unique_ptr<wxl::modern_adt::SplitTiles>   split_;
+        wxl::Subscription                              tileEvents_;
         bool                                           blending_ = false;
         bool                                           layering_ = false;
         std::vector<uint32_t>                          program_; ///< the last program answered, read by the runtime before the call returns

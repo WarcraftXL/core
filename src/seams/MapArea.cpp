@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The MapArea seams: what the runtime does when a terrain chunk is built, on both builds.
+// The MapArea seams: what the runtime does when a terrain tile is read and a chunk is built, on
+// both builds.
 
 #include "wxl/seams/seams.h"
 
@@ -12,6 +13,7 @@
 
 #include "binding/Binding.hpp"
 #include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 #include "runtime/Core.hpp"
 
 #include "wxl/events.h"
@@ -82,4 +84,12 @@ namespace wxl::seam::MapArea::AsyncCallback
         args.size   = size;
         host->Raise(WXL_EV_TerrainTileLoad, &args);
     }
+}
+
+namespace wxl::seam::MapArea::ProcessIffChunks
+{
+    // A root without MCIN (a tile split into _tex0 and _obj0): its files asked for and indexed
+    // before the client reads the root, the area pointed into them after.
+    void WXL_CALL Before(void* self) { wxl::core::services::terrain_tiles::AreaReading(self); }
+    void WXL_CALL After(void* self) { wxl::core::services::terrain_tiles::AreaRead(self); }
 }

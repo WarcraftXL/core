@@ -945,6 +945,17 @@ type CMapArea WoW/Source/WorldClient/MapArea.h CMapArea
   m_asyncObject                           game/ADT:kOffTileAsyncRead,game/World:kOffTileAsyncRead
   m_fileBuffer                            game/ADT:kOffTileFileBuffer,game/World:kOffTileFileBuffer
   m_fileSize                              game/ADT:kOffTileFileSize,game/World:kOffTileFileId   # World.hpp calls it "file id"
+  m_header                                -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_chunkInfo                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_doodadDef                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_mapObjDef                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_doodadDefCount                        -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_mapObjDefCount                        -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_m2FileNames                           -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_wmoFileNames                          -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_modelFilenamesOffsets                 -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_wmoFilenamesOffsets                   -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_textureFlags                          -                                            # binding map_area_split_set: a split tile pointed into its files
   m_mapChunks                             game/ADT:kOffTileChunkSlots
   sizeof(m_mapChunks[0])                  game/ADT:kTileSlotStride
 

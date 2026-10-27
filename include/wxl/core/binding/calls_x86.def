@@ -66,6 +66,8 @@ WXL_BINDING_CALL_X86(TerrainCall, CreateBounds, "CMapChunk::CreateBounds", void,
 WXL_BINDING_CALL_X86(TerrainCall, AddBatch, "CMapRenderChunk::AddBatch", void, thiscall, (void* self, void* chunk1, void* chunk2, const wxl_vec3* position, uint8_t flags))
 WXL_BINDING_CALL_X86(TerrainCall, FreeInst, "CDetailDoodad::FreeInst", void, cdecl, (void* inst))
 WXL_BINDING_CALL_X86(TerrainCall, OnFallLocal, "CMovement_C::OnFallLocal", void, thiscall, (void* self, uint32_t event_time))
+WXL_BINDING_CALL_X86(TerrainCall, LoadTextures, "CMapArea::LoadTextures", void, thiscall, (void* self, char* names, uint32_t size))
+WXL_BINDING_CALL_X86(TerrainCall, CreateRefs, "CMapChunk::CreateRefs", void, thiscall, (void* self, void* area, uint32_t* refs, uint32_t doodads, uint32_t map_objs))
 WXL_BINDING_CALL_X86(AnimCall, PlayBaseAnimation, "CGUnit_C::PlayBaseAnimation", void, thiscall, (void* self, uint32_t anim, int32_t flags))
 WXL_BINDING_CALL_X86(AnimCall, UpdateBaseAnimation, "CGUnit_C::UpdateBaseAnimation", void, thiscall, (void* self, uint32_t anim_flags, int32_t mask))
 WXL_BINDING_CALL_X86(AnimCall, GetCurrentTorsoAnimId, "CGUnit_C::GetCurrentTorsoAnimId", uint32_t, thiscall, (const void* self))

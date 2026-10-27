@@ -283,6 +283,8 @@ add_library(wxl-core SHARED
     src/services/TerrainService.cpp
     src/services/ShaderCode.cpp
     src/services/TerrainLayers.cpp
+    src/services/TerrainTiles.cpp
+    src/services/SplitTile.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -348,6 +350,8 @@ add_executable(wxl-core-seam-harness
     src/services/TerrainService.cpp
     src/services/ShaderCode.cpp
     src/services/TerrainLayers.cpp
+    src/services/TerrainTiles.cpp
+    src/services/SplitTile.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -438,7 +442,8 @@ set(WXL_MODERN_ADT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt")
 add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt_tests.cpp" "${WXL_MODERN_ADT_DIR}/src/Options.cpp"
     "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp"
     "${WXL_MODERN_ADT_DIR}/src/features/HeightBlend.cpp" "${WXL_MODERN_ADT_DIR}/src/features/ExtraLayers.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp")
+    "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp"
+    "${WXL_MODERN_ADT_DIR}/src/store/TileSet.cpp" "${WXL_MODERN_ADT_DIR}/src/features/SplitTiles.cpp")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
 # A chunk of a real DawnlightWorld root ADT (WorldGen's, five layers), compiled into the tests.
 file(READ "${WXL_MODERN_ADT_DIR}/tests/data/DawnlightWorld_38_19_chunk_14_4.bin" _root_chunk HEX)
@@ -450,9 +455,11 @@ target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
 add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)
 # Every tile of a folder of maps surveyed as wxl.modern-adt reads it (the user's own corpus):
 #   wxl-core-modern-adt-corpus <maps folder>
+# A split set is also indexed as the runtime does (src/services/SplitTile.cpp) from the files the
+# mod's TileSet reads.
 add_executable(wxl-core-modern-adt-corpus "${WXL_MODERN_ADT_DIR}/tests/corpus_tool.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp")
-target_include_directories(wxl-core-modern-adt-corpus PRIVATE "${WXL_MODERN_ADT_DIR}/src")
+    "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp" "${WXL_MODERN_ADT_DIR}/src/store/TileSet.cpp" src/services/SplitTile.cpp)
+target_include_directories(wxl-core-modern-adt-corpus PRIVATE "${WXL_MODERN_ADT_DIR}/src" src)
 target_compile_features(wxl-core-modern-adt-corpus PRIVATE cxx_std_20)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 

@@ -14,6 +14,9 @@
 //   [extra_layers]
 //   enabled = 1        ; up to 8 layers a chunk, from each tile's _tex0.adt or its root (needs height_blend)
 //
+//   [split_tiles]
+//   enabled = 1        ; tiles split by file name (a root without MCIN, its _tex0, _obj0, _obj1) loaded natively
+//
 // A missing file or key keeps the default; a line not understood is logged and left out.
 
 #pragma once
@@ -33,6 +36,7 @@ namespace wxl::modern_adt
         bool        height_blend = true;
         bool        require_wdt_flag = true;
         bool        extra_layers = true;
+        bool        split_tiles = true;
         std::vector<std::string> problems; ///< lines not understood
     };
 

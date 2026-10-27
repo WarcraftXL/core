@@ -17,6 +17,12 @@ WXL_BINDING_FIELD(map_area_tile_y, int32_t, CMapArea, m_index.y, -1)
 // which CMapChunk::Create fills; null for an empty slot or indices out of range.
 WXL_BINDING(map_area_chunk, void*, (const void* area, int32_t chunk_x, int32_t chunk_y), (area, chunk_x, chunk_y), 0)
 
+// Points a split tile (a root ADT without MCIN, after CMapArea::ProcessIffChunks has read it) at
+// its other files: m_chunkInfo, m_doodadDef, m_mapObjDef and their counts, m_m2FileNames,
+// m_wmoFileNames, m_modelFilenamesOffsets, m_wmoFilenamesOffsets, m_textureFlags, then calls
+// CMapArea::LoadTextures with the names. False for a null area. Main thread only.
+WXL_BINDING(map_area_split_set, wxl_bool, (void* area, const wxl_core_area_split* split), (area, split), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

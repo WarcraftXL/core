@@ -96,8 +96,18 @@ namespace wxl::modern_adt
                 else
                     problem("an unknown key of [extra_layers] (enabled)");
             }
+            else if (Same(section, "split_tiles"))
+            {
+                if (Same(key, "enabled"))
+                {
+                    if (value == "0" || value == "1") out.split_tiles = value == "1";
+                    else problem("not 0 or 1");
+                }
+                else
+                    problem("an unknown key of [split_tiles] (enabled)");
+            }
             else
-                problem("an unknown section (texture_scale, height_blend, extra_layers)");
+                problem("an unknown section (texture_scale, height_blend, extra_layers, split_tiles)");
         }
         return out;
     }

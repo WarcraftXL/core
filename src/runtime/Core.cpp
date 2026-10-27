@@ -31,6 +31,7 @@
 #include "services/TerrainService.hpp"
 #include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 #include "services/DrawService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
@@ -148,6 +149,8 @@ namespace
         wxl::core::services::terrain::ForgetMod(token);
         // Its layer provider goes: the chunks loaded from now on are drawn as the client draws them.
         wxl::core::services::terrain_layers::ForgetMod(token);
+        // Its tile provider goes: split tiles loaded from now on come without its files.
+        wxl::core::services::terrain_tiles::ForgetMod(token);
         wxl::core::services::shader_code::ForgetMod(token);
         // Its shapes go.
         wxl::core::services::draw::ForgetMod(token);

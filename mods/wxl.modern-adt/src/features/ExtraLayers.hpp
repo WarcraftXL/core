@@ -41,6 +41,8 @@ namespace wxl::modern_adt
 
         /// The tile at @p path (a root ADT) was read: its split texture file is read too.
         void TileLoaded(std::string_view path, int32_t tile_x, int32_t tile_y);
+        /// The tile (x, y) was read with its split texture file @p tex0 (empty: none).
+        void TileLoaded(int32_t tile_x, int32_t tile_y, const std::vector<uint8_t>& tex0);
 
         /// A chunk's layers past its four.
         void Answer(const wxl_terrain_chunk& chunk, wxl_terrain_extra_layers& out);

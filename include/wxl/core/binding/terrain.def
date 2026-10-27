@@ -70,6 +70,19 @@ WXL_BINDING(terrain_area_file, wxl_bool, (const void* area, wxl_core_area_file* 
 // animation offset, c18 + k its texture scale. Null without a client.
 WXL_BINDING(terrain_vertex_constants, const float*, (void), (), 0)
 
+// Where a chunk being made reads from: its MCNK (m_chunkInfoBeginPtr), its header (m_header) and
+// its place in its tile (m_aIndex). False for a null chunk.
+WXL_BINDING(map_chunk_parts, wxl_bool, (const void* chunk, wxl_core_map_chunk* out), (chunk, out), WXL_FALSE)
+
+// Points a chunk of a split tile at its _tex0's and _obj0's parts: m_layers, m_additionalShadowmap,
+// m_shadowMap, m_mcrfPtr. False for a null chunk.
+WXL_BINDING(map_chunk_split_set, wxl_bool, (void* chunk, const wxl_core_chunk_split* split), (chunk, split), WXL_FALSE)
+
+// Places a chunk's map objects and doodads with the client's own CMapChunk::CreateRefs(area,
+// refs, doodads, map objects): the first `doodads` of `refs` index MDDF, the next `map_objs` MODF.
+// Main thread only, while the chunk is made.
+WXL_BINDING(map_chunk_create_refs, void, (void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t map_objs), (chunk, area, refs, doodads, map_objs), (void)0)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

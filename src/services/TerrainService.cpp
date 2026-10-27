@@ -18,6 +18,7 @@
 
 #include "services/TerrainService.hpp"
 #include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -786,6 +787,13 @@ namespace wxl::core::services
         return terrain_layers::SetProvider(host ? host->CurrentMod() : 0u, provider);
     }
 
+    static wxl_result WXL_CALL TerrainSetTileProvider(const wxl_terrain_tile_provider* provider)
+    {
+        const wxl::host::ModHost* host = wxl::core::Host();
+        if (host && !host->OnMainThread()) return WXL_E_INVALID;
+        return terrain_tiles::SetProvider(host ? host->CurrentMod() : 0u, provider);
+    }
+
     const wxl_terrain_api& TerrainApi()
     {
         static const wxl_terrain_api api = [] {
@@ -802,6 +810,7 @@ namespace wxl::core::services
             table.stats       = &TerrainStats;
             table.vertices_in = &TerrainVerticesIn;
             table.set_layer_provider = &TerrainSetLayerProvider;
+            table.set_tile_provider  = &TerrainSetTileProvider;
             return table;
         }();
         return api;

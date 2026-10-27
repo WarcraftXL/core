@@ -14,7 +14,11 @@ namespace wxl::modern_adt
         {
             area.file     = file;
             area.size     = size;
-            const adt::Reader reader(file, size);
+            // A split tile's textures are its _tex0's, which its layers' MTEX indices name.
+            const TileSet::Files* set = tiles_ ? tiles_->Of(tile_x, tile_y) : nullptr;
+            const bool            split = set && set->root == file && set->split && !set->tex0.empty();
+            const adt::Reader     reader(split ? static_cast<const void*>(set->tex0.data()) : file,
+                                         split ? set->tex0.size() : size);
             area.textures = adt::ReadTextures(reader, prefer_);
             area.names.clear();
             for (std::string_view name : reader.TextureNames()) area.names.emplace_back(name);
