@@ -132,12 +132,14 @@ namespace wxl::vk::test::rig
         draw::Renderer        renderer;
         uint32_t              width = 0, height = 0;
 
-        bool Make(uint32_t w, uint32_t h, char* why, uint32_t size, const draw::Renderer::Paths& paths = {})
+        /// @p bar: the renderer's buffers in the device's mapped device-local memory ([gx] vk_rebar).
+        bool Make(uint32_t w, uint32_t h, char* why, uint32_t size, const draw::Renderer::Paths& paths = {}, bool bar = false)
         {
             vk::device::Options options;
             options.floor.present = false;
             if (!context.Create(options, why, size) || !allocator.Create(context, why, size) || !timeline.Create(context, why, size))
                 return false;
+            allocator.SetBar(bar);
             vk::present::Display::Options d;
             d.frames = 2;
             d.filter = vk::present::Filter::Nearest;

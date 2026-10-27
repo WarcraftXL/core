@@ -52,6 +52,12 @@ namespace wxl::vk::test
     /// textures, wxl.render's compute pipelines, dispatches and palettes.
     bool V7LiveCases();
 
+    /// V5: the session's distributions, the charges by cause and the profiler's zones (pure); each
+    /// pass timed on the GPU, pools written in place in the BAR heap, the earlier launch's programs
+    /// and pipelines made at the start, a program's part for a texture made in the background (live).
+    void V5PureCases();
+    bool V5LiveCases();
+
     /// wxl.draw: its geometry (pure) and its passes on the driver (live).
     void ShapesPureCases();
     bool ShapesLiveCases();

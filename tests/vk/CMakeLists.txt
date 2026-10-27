@@ -42,7 +42,7 @@ set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../deps/spirv-tools" spirv-tools EXCLUDE_FROM_ALL)
 
 add_executable(wxl-vk-tests vk_tests.cpp present_tests.cpp capture_tests.cpp draw_tests.cpp spirv_tests.cpp translate_tests.cpp
-    v4_tests.cpp parity_tests.cpp render_tests.cpp v7_tests.cpp shapes_tests.cpp)
+    v4_tests.cpp parity_tests.cpp render_tests.cpp v7_tests.cpp shapes_tests.cpp v5_tests.cpp)
 target_link_libraries(wxl-vk-tests PRIVATE wxl-vk SPIRV-Tools-static)
 include("${CMAKE_CURRENT_SOURCE_DIR}/programs.cmake")
 wxl_vk_add_test_programs(wxl-vk-tests)
@@ -65,3 +65,11 @@ if(DEFINED ENV{WXL_VK_CORPUS})
     add_test(NAME vk-corpus COMMAND wxl-vk-corpus "$ENV{WXL_VK_CORPUS}" --device)
     set_tests_properties(vk-corpus PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+# What the renderer costs the main thread on this machine's driver, on a made-up zone drawn with the
+# client's own programs (a corpus folder, as wxl-vk-corpus reads):
+#   wxl-vk-bench [--corpus <folder>] [--draws N] [--frames N] [--cache <folder>] [--quick]
+add_executable(wxl-vk-bench bench_tool.cpp)
+target_link_libraries(wxl-vk-bench PRIVATE wxl-vk)
+add_test(NAME vk-bench COMMAND wxl-vk-bench --quick)
+set_tests_properties(vk-bench PROPERTIES SKIP_RETURN_CODE 77)

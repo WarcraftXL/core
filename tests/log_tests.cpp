@@ -252,12 +252,18 @@ int main(int argc, char** argv)
                               "gpu = GeForce RTX\n"
                               "frames_in_flight = 3\n"
                               "present_filter = Nearest\n"
-                              "Async_Pipelines = 0\n";
+                              "Async_Pipelines = 0\n"
+                              "vk_rebar = 0\n"
+                              "VK_PREWARM = 0\n"
+                              "vk_gpu_times = 0 ; no timestamps\n";
         wxl::core::settings::Settings gx;
         wxl::core::settings::Parse(gxText, sizeof gxText - 1, gx);
         Check(gx.gx_api == GxApi::vulkan && gx.gx_validation && std::strcmp(gx.gx_gpu, "GeForce RTX") == 0 &&
-                  gx.gx_frames == 3 && gx.gx_nearest && !gx.gx_async && gx.problem_count == 0,
-              "[gx] api, validation, gpu, frames_in_flight, present_filter and async_pipelines, in any case, a comment after a value");
+                  gx.gx_frames == 3 && gx.gx_nearest && !gx.gx_async && !gx.gx_rebar && !gx.gx_prewarm && !gx.gx_gpu_times &&
+                  gx.problem_count == 0,
+              "[gx] api, validation, gpu, frames_in_flight, present_filter, async_pipelines, vk_rebar, vk_prewarm and vk_gpu_times, in "
+              "any case, a comment after a value");
+        Check(none.gx_rebar && none.gx_prewarm && none.gx_gpu_times, "ReBAR rings, the prewarm and the GPU's pass times are on by default");
         const char gxRange[] = "[gx]\n"
                                "frames_in_flight = 4\n"
                                "present_filter = cubic\n";
