@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.42-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.43-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -475,6 +475,7 @@ source. Everything else observes.
 | `MapRenderChunk.CreateLayer` | `CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate)`, a texture layer appended to a render chunk | nothing itself: after, `wxl.terrain` asks the layer providers for the layer's texture scale and keeps it |
 | `MapRenderChunk.RenderSinglePassVertexPixelShader`, `RenderMultiPassVertexPixelShader`, `RenderMultiPassVertexPixelShaderBigAlpha`, `RenderSinglePassPixelShader`, `RenderMultiPassPixelShader`, `RenderMultiPassPixelShaderBigAlpha`, `RenderMultiPassAdditive`, `RenderMultiPassAlpha` | the eight functions that draw a chunk's layers, by vertex program or texture-stage matrix, in one draw or a layer a draw | nothing itself: before and after, which chunk is drawn on which path, for `Gx.D3dDraw` |
 | `Gx.D3dDraw`, `Gx.D3d9ExDraw` | `CGxDeviceD3d::Draw(batch, count)`, `CGxDeviceD3d9Ex::Draw` (vtable slot 42); the Vulkan renderer's `draw_begin` and `draw_end` stand for them | nothing itself: before, a draw of a chunk with a scaled layer gets its texture coordinates scaled through the vertex constants or the stage matrices; after, the client's own come back |
+| `Gx.D3dIShaderCreatePixel`, `Gx.D3dIShaderCreateVertex` (and `Gx.D3d9ExIShaderCreatePixel`, `Vertex`, x64 only: the stock client's 9Ex device runs the D3D9 bodies) | `CGxDeviceD3d::IShaderCreatePixel(CGxShader*)`, `IShaderCreateVertex`: a DX9 program made from its record's bytecode | nothing itself: before, a `wxl.gx` shader provider's answer is put in the record for the call; after, the record's own code comes back. The Vulkan renderer translates the same answer (its backend's `shader_create`) |
 | `Map.CreateDoodadDef`, `Map.CreateDoodadDefAt`, `Map.CreateDoodadDefInMapObj` | the three `CMap::CreateDoodadDef` overloads: a tile's doodad, one the game places at a position, one of a map object's doodad set | `DoodadSpawn` after, for a def the call allocated, with the model's path and the position |
 | `ObjectMgr.FillInPartialObjectData` | `FillInPartialObjectData(CGObject_C*, WOWGUID, CDataStore*, bool, bool)`, where an update block's fields are written | nothing itself: after, notes a tracked object, once per packet |
 | `ObjectMgr.Packet_SMSG_UPDATE_OBJECT` | `Packet_SMSG_UPDATE_OBJECT(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the compressed form's too | `ObjectUpdate` after, once per object the packet's field writes noted and still tracked, in the packet's order |
@@ -524,7 +525,7 @@ what newer ADT files carry.
 |---|---|---|
 | `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
 | `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
-| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]` in `modern-adt.ini`); requires `wxl.terrain` |
+| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), and retail's height blend from `MTXP`'s heights and each texture's `_h.blp`, in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan (`[height_blend]`), both in `modern-adt.ini`; requires `wxl.terrain` |
 
 `wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
 logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it

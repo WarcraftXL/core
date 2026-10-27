@@ -531,6 +531,25 @@ the translation too keeps an animated layer's speed in yards. A chunk answered 1
 never entered: the client draws it byte for byte as it does. The ADT reading itself is a mod's
 (`mods/wxl.modern-adt`).
 
+Since abi 0.1.43 a layer's look also carries an extra texture (a path, opened with `texture_open`
+and closed when the map goes) and four numbers. On the two single-pass paths, at the chunk's draw,
+layer k's extra texture is bound on stage 12 + k (`gx_texture_stage_set`, wrapped by
+`gx_texture_wrap`) once it is loaded, and its numbers go in pixel row c32 + k
+(`gx_pixel_constants_set`; zeros for a layer whose texture is still loading); both are given back
+after the draw. A provider set with `WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW` has every chunk entered on
+those paths, so a stock chunk's rows are written as zeros and a program never reads another
+chunk's. Stages 0 to 4 are the layers and their alpha maps, 5 to 8 the shadow maps of Terrain3:
+12 to 15 are free in every terrain program.
+
+Programs (`wxl.gx` set_shader_provider, `src/services/ShaderCode.cpp`): the Direct3D 9 device makes
+a program from its record's bytecode in `IShaderCreatePixel`/`Vertex` (`Gx.D3dIShaderCreatePixel`
+and its siblings): Before asks the providers (name `"Terrain1:6"`, stage, code) and swaps their
+answer into the record (`gx_shader_record`, `gx_shader_code_set`), After puts the record's own
+back, so the engine never frees the answer. The Vulkan renderer's backend row `shader_create`
+(`src/gx/Vulkan.cpp`) asks the same providers and translates the answer: one DX9 answer, drawn alike
+on both devices and both clients. `wxl.modern-adt` rewrites the client's own terrain programs with
+it (its `shader/Ps3.cpp`: the height blend inserted after the alpha maps' read).
+
 ### Shapes in the world
 
 `wxl.draw` (`src/services/DrawService.cpp`) keeps the shapes mods draw, by mod: immediate ones (built
