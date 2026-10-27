@@ -6,7 +6,9 @@
 
 #include "wxl/seams/seams.h"
 
+#include "services/AnimationService.hpp"
 #include "services/PoseService.hpp"
+#include "services/TerrainService.hpp"
 #include "services/SelectionCircleService.hpp"
 
 #include "binding/Binding.hpp"
@@ -20,6 +22,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -170,6 +174,24 @@ namespace wxl::seam::Unit::PreAnimate
     {
         // The game has set its own twist on the unit's head bone; a mod's turn goes over it.
         wxl::core::services::pose::PreAnimate(self);
+
+        // The mods' animations on units are followed, and the active player lifted onto ground
+        // raised under them.
+        const bool animating = wxl::core::services::animation::Busy();
+        const bool lifting   = wxl::core::services::terrain::Lifting();
+        if (!animating && !lifting) return;
+        const bool active = self && self == wxl::core::binding::local_player_object();
+        if (lifting && active) wxl::core::services::terrain::Lift(self);
+        if (!animating) return;
+        wxl::core::services::animation::PreAnimate(self, active);
+        static std::vector<wxl_unit_animation_args> ended;
+        wxl::core::services::animation::TakeEnded(ended);
+        if (ended.empty()) return;
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (!host) return;
+        const std::vector<wxl_unit_animation_args> raised = std::move(ended);
+        ended.clear();
+        for (const wxl_unit_animation_args& args : raised) host->Raise(WXL_EV_UnitAnimationEnded, &args);
     }
 }
 

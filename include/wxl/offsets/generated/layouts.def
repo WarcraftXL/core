@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 139 types, 864 field offsets, 11 member sizes.
+// 139 types, 865 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -188,6 +188,7 @@ WXL_LAYOUT_FIELD(CGUnit_C, "m_channelSpellId", 0xA80, "WoW/Source/Object/ObjectC
 WXL_LAYOUT_FIELD(CGUnit_C, "m_channelStartTime", 0xA84, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_FIELD(CGUnit_C, "m_channelEndTime", 0xA88, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_FIELD(CGUnit_C, "m_characterComponent", 0xB4C, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
+WXL_LAYOUT_FIELD(CGUnit_C, "m_torsoKeyBone", 0xB84, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_FIELD(CGUnit_C, "m_auras", 0xC50, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_FIELD(CGUnit_C, "m_auras.m_dynamic.m_data", 0xC58, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)
 WXL_LAYOUT_FIELD(CGUnit_C, "m_auras.m_count", 0xDD0, "WoW/Source/Object/ObjectClient/Unit_C.h", 146)

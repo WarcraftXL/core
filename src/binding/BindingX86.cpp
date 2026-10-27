@@ -2672,4 +2672,59 @@ namespace wxl::core::binding
         // CMovement_C::OnFallLocal(eventTime): __thiscall, `ret 4` (0x006ECCF0).
         x86::CallMember<void>(WXL_SITE("CMovement_C::OnFallLocal", 0), movement, os_time_ms());
     }
+
+    // --- Animation: a unit's animation as the client plays it --------------------------------
+
+    void unit_play_animation(void* unit, uint32_t anim, uint32_t flags)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        // CGUnit_C::PlayBaseAnimation(animId, flags): __thiscall, `ret 8` (0x007385C0).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::PlayBaseAnimation", 0), unit, anim, static_cast<int32_t>(flags));
+    }
+
+    void unit_update_animation(void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        // CGUnit_C::UpdateBaseAnimation(animFlags, mask): __thiscall, `ret 8` (0x0073AC30).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::UpdateBaseAnimation", 0), unit, 0u, int32_t(-1));
+    }
+
+    uint32_t unit_shown_animation(const void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return 0xFFFFFFFFu;
+        // CGUnit_C::GetCurrentTorsoAnimId(): __thiscall, bare `ret` (0x00717260).
+        return x86::CallMember<uint32_t>(WXL_SITE("CGUnit_C::GetCurrentTorsoAnimId", 0), unit);
+    }
+
+    void unit_animation_speed(void* unit, uint32_t anim, float speed)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        void* model = Read<void*>(unit, WXL_FIELD("CGObject_C", "m_worldModel"));
+        if (!model || (Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & 1u) == 0) return;
+        const int32_t torso = Read<int32_t>(unit, WXL_FIELD("CGUnit_C", "m_torsoKeyBone"));
+        const uint32_t bones[2] = {0xFFFFFFFFu, static_cast<uint32_t>(torso)};
+        for (int i = 0; i < (torso == -1 ? 1 : 2); ++i)
+        {
+            // CM2Model::GetBoneSequenceId(bone): __thiscall, `ret 4` (0x008267E0).
+            if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::GetBoneSequenceId", 0), model, bones[i]) != anim) continue;
+            // CGUnit_C::SetKeyBoneSequenceSpeed(model, bone, speed, force): __thiscall, `ret 0x10` (0x00735CC0).
+            x86::CallMember<void>(WXL_SITE("CGUnit_C::SetKeyBoneSequenceSpeed", 0), unit, model, bones[i], speed, int32_t(0));
+        }
+    }
+
+    uint32_t unit_animation_length(const void* unit, uint32_t anim)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return 0;
+        void* model = Read<void*>(unit, WXL_FIELD("CGObject_C", "m_worldModel"));
+        return model ? m2_animation_length(model, anim) : 0;
+    }
+
+    void unit_lift_local(void* unit, float z)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        void* movement = Read<void*>(unit, WXL_FIELD("CGUnit_C", "m_movement"));
+        if (!movement) return;
+        // CMovement_C's position, a CPassenger's: its z.
+        std::memcpy(static_cast<char*>(movement) + WXL_FIELD("CPassenger", "m_position") + 2 * sizeof(float), &z, sizeof z);
+    }
 }

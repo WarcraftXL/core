@@ -22,6 +22,7 @@
 #include "services/Assets.hpp"
 #include "services/CameraService.hpp"
 #include "services/InputService.hpp"
+#include "services/AnimationService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/RenderService.hpp"
@@ -144,6 +145,8 @@ namespace
         wxl::core::services::terrain::ForgetMod(token);
         // Its shapes go.
         wxl::core::services::draw::ForgetMod(token);
+        // Its animations on units end; the game chooses theirs again.
+        wxl::core::services::animation::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

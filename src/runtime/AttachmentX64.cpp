@@ -17,6 +17,7 @@
 #include "services/CameraService.hpp"
 #include "services/InputService.hpp"
 #include "services/WorldService.hpp"
+#include "services/AnimationService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/RenderService.hpp"
@@ -100,6 +101,7 @@ namespace wxl::core::attachment
             { WXL_CVAR_SERVICE, WXL_CVAR_SERVICE_VERSION, &services::CVarApi() },
             { WXL_TERRAIN_SERVICE, WXL_TERRAIN_SERVICE_VERSION, &services::TerrainApi() },
             { WXL_DRAW_SERVICE, WXL_DRAW_SERVICE_VERSION, &services::DrawApi() },
+            { WXL_ANIMATION_SERVICE, WXL_ANIMATION_SERVICE_VERSION, &services::AnimationApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif

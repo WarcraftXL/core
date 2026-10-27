@@ -49,6 +49,15 @@ namespace wxl::core::services
         /// or freed, the map unloaded. What is laid on the ground is laid again when it moved.
         uint64_t Generation();
 
+        /// Whether the active player is being lifted onto ground raised under them by more than a
+        /// step: Lift is then called at each of their frames.
+        bool Lifting();
+
+        /// The active player readies its model for the frame (Unit.PreAnimate After, while
+        /// Lifting): lifted on towards the ground under them; once there, they land through the
+        /// client's own fall. Ends at once if they move (put on the ground), jump, fall or swim.
+        void Lift(void* unit);
+
         /// A mod's edits are taken off: disabled or unloaded.
         void ForgetMod(uint32_t mod);
 

@@ -19,6 +19,7 @@
 #include "services/CameraService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/InputService.hpp"
+#include "services/AnimationService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
@@ -69,6 +70,7 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::cvar::Clear();
         wxl::core::services::terrain::Clear();
         wxl::core::services::draw::Clear();
+        wxl::core::services::animation::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
         {
             wxl::core::objects::Service().DropWatches(token);

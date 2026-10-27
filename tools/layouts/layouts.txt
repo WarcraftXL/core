@@ -792,6 +792,7 @@ type CGUnit_C WoW/Source/Object/ObjectClient/Unit_C.h CGUnit_C
   m_channelEndTime                        -                                            # binding unit_channel_end
   m_mountDisplayId                        -                                            # binding unit_mount_model: what IsMounted reads
   m_clientFlags                           -                                            # binding unit_client_flags
+  m_torsoKeyBone                          -                                            # binding unit_animation_speed: the bone the upper body plays on
 
 # The unit descriptor block follows the 0x18-byte object block: hand value = 0x18 + field.
 type CGUnitData WoW/Source/Object/Unit.h CGUnitData

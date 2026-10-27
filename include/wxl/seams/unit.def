@@ -62,8 +62,11 @@ WXL_SEAM_WITNESS(Unit, MountDisplayIDUpdateHandler, 0x004D5254)
 // head while it turns, its pitch. A virtual of CGObject_C, called for every object in view by
 // CGWorldFrame::UpdateObject (0x004F8D10) right before the object animates; the player's
 // override calls this one first. thiscall (frame), `ret 4` (0x0073E40D). After applies the head
-// turns of wxl.pose over what the game just set on the head bone.
+// turns of wxl.pose over what the game just set on the head bone, follows the animations of
+// wxl.animation on the unit (ending, playing again, handing back) and raises UnitAnimationEnded
+// for those that ended, and lifts the active player onto ground wxl.terrain raised under them.
 WXL_SEAM_AFTER(Unit, PreAnimate, "CGUnit_C::PreAnimate", void, thiscall, (void* self, void* frame))
+WXL_SEAM_RAISES(Unit, PreAnimate, UnitAnimationEnded)
 
 // The circles the game projects on the ground under a unit (wxl.selectioncircle). Each draws
 // between the device's RsPush and RsPop: CGObject_C::SetCircleRenderStates binds the static

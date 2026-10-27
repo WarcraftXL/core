@@ -4,8 +4,8 @@
 // The client functions the x86 binding calls for wxl.m2's models of the world and its bone
 // watchers, for the object reads of what the player can do with a unit or a game object, for
 // the textures wxl.selectioncircle draws the game's circles with, for wxl.cvar's variables, for
-// the interface's signature the FrameXML seam asks about, and for the ground wxl.terrain reshapes
-// and the fall it starts (src/binding/BindingX86.cpp), and the device's own work the Vulkan
+// the interface's signature the FrameXML seam asks about, for the ground wxl.terrain reshapes
+// and the fall it starts, and for the units' animations wxl.animation plays (src/binding/BindingX86.cpp), and the device's own work the Vulkan
 // renderer's adapter of the stock client keeps (src/gx/x86/), as data: one row per function, with
 // the convention and the parameters BindingX86 calls it with. check_conventions.py holds every row against Wow.exe
 // as it holds the seams; BindingX86 resolves each symbol when it compiles.
@@ -57,6 +57,11 @@ WXL_BINDING_CALL_X86(TerrainCall, CreateBounds, "CMapChunk::CreateBounds", void,
 WXL_BINDING_CALL_X86(TerrainCall, AddBatch, "CMapRenderChunk::AddBatch", void, thiscall, (void* self, void* chunk1, void* chunk2, const wxl_vec3* position, uint8_t flags))
 WXL_BINDING_CALL_X86(TerrainCall, FreeInst, "CDetailDoodad::FreeInst", void, cdecl, (void* inst))
 WXL_BINDING_CALL_X86(TerrainCall, OnFallLocal, "CMovement_C::OnFallLocal", void, thiscall, (void* self, uint32_t event_time))
+WXL_BINDING_CALL_X86(AnimCall, PlayBaseAnimation, "CGUnit_C::PlayBaseAnimation", void, thiscall, (void* self, uint32_t anim, int32_t flags))
+WXL_BINDING_CALL_X86(AnimCall, UpdateBaseAnimation, "CGUnit_C::UpdateBaseAnimation", void, thiscall, (void* self, uint32_t anim_flags, int32_t mask))
+WXL_BINDING_CALL_X86(AnimCall, GetCurrentTorsoAnimId, "CGUnit_C::GetCurrentTorsoAnimId", uint32_t, thiscall, (const void* self))
+WXL_BINDING_CALL_X86(AnimCall, SetKeyBoneSequenceSpeed, "CGUnit_C::SetKeyBoneSequenceSpeed", void, thiscall, (void* self, void* model, uint32_t bone, float speed, int32_t force))
+WXL_BINDING_CALL_X86(AnimCall, GetBoneSequenceId, "CM2Model::GetBoneSequenceId", uint32_t, thiscall, (void* self, uint32_t bone))
 
 WXL_BINDING_CALL_X86(GxCall, DeviceCreate, "CGxDevice::DeviceCreate@0x00682CB0", int32_t, thiscall, (void* self, void* window_proc, const void* format))
 WXL_BINDING_CALL_X86(GxCall, DeviceDestroy, "CGxDevice::DeviceDestroy", void, thiscall, (void* self))

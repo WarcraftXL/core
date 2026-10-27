@@ -307,37 +307,125 @@ namespace
         return true;
     }
 
-    /// Where the player stands before a reshaping, to tell after it whether the ground left them.
+    /// Where the player stands before a reshaping, to tell after it whether the ground left them
+    /// or rose over their feet.
     struct Stand
     {
-        const void* unit = nullptr;
+        void*       unit = nullptr;
         wxl_vec3    position{};
         float       ground = 0.0f;
         bool        onGround = false;
+        bool        moving = false;
     };
+
+    /// Rises up to this are put under the player at once, as the client's own step up does;
+    /// higher ones lift them at kLiftSpeed.
+    constexpr float kInstantRise = 0.6f;
+    /// Yards a second a higher rise lifts the player.
+    constexpr float kLiftSpeed = 8.0f;
+    /// What must be clear above the new ground for the player to stand there: their height.
+    constexpr float kHeadroom = 2.0f;
+    /// A lift ends where the ground under the player is no more than this over their feet.
+    constexpr float kOnGround = 0.02f;
+    /// The client's line of sight without the terrain (doodads 0x1, map objects 0x10, game
+    /// objects with collision 0x100000): what a lift must not pass through.
+    constexpr uint32_t kRoofTrace = 0x00100011u;
+
+    /// A higher rise lifting a player standing still, frame by frame (Unit.PreAnimate).
+    struct LiftState
+    {
+        bool     active = false;
+        float    x = 0.0f, y = 0.0f;
+        float    target = 0.0f;
+        uint32_t last = 0; ///< os_time_ms of the last step
+    };
+    LiftState g_lift;
 
     Stand Before()
     {
         Stand stand;
-        stand.unit = binding::local_player_object();
+        stand.unit = const_cast<void*>(binding::local_player_object());
         if (!stand.unit || binding::object_position(stand.unit, &stand.position) != WXL_TRUE) return stand;
         const uint32_t flags = binding::unit_movement_flags(stand.unit);
-        if ((flags & (kNotStanding | kMoving)) != 0) return stand;
+        if ((flags & kNotStanding) != 0) return stand;
+        stand.moving = (flags & kMoving) != 0;
         // Standing on the terrain itself, not on a building or a rock above it.
         stand.onGround = GroundAt(stand.position.x, stand.position.y, false, stand.ground) &&
                          std::fabs(stand.position.z - stand.ground) < 0.5f;
         return stand;
     }
 
+    /// The highest ground under the player's footprint (the middle and eight points on the
+    /// circle of their bounding radius): where the client's collision box would rest.
+    bool GroundUnder(const void* unit, float x, float y, float& top)
+    {
+        float radius = binding::unit_bounding_radius(unit);
+        if (!(radius >= 0.2f)) radius = 0.2f;
+        if (radius > 1.0f) radius = 1.0f;
+        bool any = GroundAt(x, y, false, top);
+        for (int i = 0; i < 8; ++i)
+        {
+            const float angle = static_cast<float>(i) * 0.78539816f;
+            float       z     = 0.0f;
+            if (!GroundAt(x + radius * std::cos(angle), y + radius * std::sin(angle), false, z)) continue;
+            if (!any || z > top) top = z;
+            any = true;
+        }
+        return any;
+    }
+
+    /// Whether something of the world (a roof, a floor of a building, a rock) lies between the
+    /// player's feet and their head on the new ground: such a lift is not made.
+    bool Covered(const wxl_vec3& feet, float top)
+    {
+        const wxl_vec3 low{feet.x, feet.y, feet.z + 0.1f};
+        const wxl_vec3 high{feet.x, feet.y, top + kHeadroom};
+        wxl_vec3 hit{};
+        return binding::world_trace(low, high, kRoofTrace, &hit) == WXL_TRUE ||
+               binding::world_trace(high, low, kRoofTrace, &hit) == WXL_TRUE;
+    }
+
+    /// Puts the player's feet at `z`; one standing still lands there through the client's own
+    /// fall, which sends the movement to the server (a heartbeat, then a landing).
+    void Place(void* unit, float z, bool standing)
+    {
+        binding::unit_lift_local(unit, z);
+        binding::terrain_forget_collision();
+        if (standing) binding::unit_fall_local(unit);
+    }
+
     /// A player standing still on ground that went down falls, as off a transport that left; a
-    /// moving one meets the new ground at its next step.
+    /// player on ground that rose over their feet is put on it, through the client's own
+    /// movement, unless something of the world is in the way.
     void After(const Stand& stand)
     {
         if (!stand.onGround) return;
         float ground = 0.0f;
         const bool there = GroundAt(stand.position.x, stand.position.y, false, ground);
-        if (there && ground >= stand.position.z - 0.05f) return;
-        binding::unit_fall_local(stand.unit);
+        if (!stand.moving && !(there && ground >= stand.position.z - 0.05f))
+        {
+            g_lift.active = false;
+            binding::unit_fall_local(stand.unit);
+            return;
+        }
+        float top = 0.0f;
+        if (!GroundUnder(stand.unit, stand.position.x, stand.position.y, top) || top <= stand.position.z + kOnGround) return;
+        if (Covered(stand.position, top))
+        {
+            WLOG_DEBUG(kTag, "ground raised under the player, but something of the world is above it: not lifted");
+            return;
+        }
+        if (stand.moving || top - stand.position.z <= kInstantRise)
+        {
+            g_lift.active = false;
+            Place(stand.unit, top, !stand.moving);
+            return;
+        }
+        g_lift.active = true;
+        g_lift.x      = stand.position.x;
+        g_lift.y      = stand.position.y;
+        g_lift.target = top;
+        g_lift.last   = binding::os_time_ms();
     }
 
     /// The vertices a chunk's loading may change the normals of: its own, and those of its
@@ -761,6 +849,7 @@ namespace wxl::core::services
             }
             g_chunks.clear();
             g_deferredClutter.clear();
+            g_lift.active = false;
             ++g_generation;
             CountStats();
             if (edited) WLOG_INFO(kTag, "the map is unloaded: the edits of %u chunks are dropped", edited);
@@ -809,6 +898,58 @@ namespace wxl::core::services
             g_inWorld = false;
             g_serial  = 0;
             g_stats   = wxl_terrain_stats{};
+            g_lift    = LiftState{};
+        }
+
+        bool Lifting() { return g_lift.active; }
+
+        void Lift(void* unit)
+        {
+            if (!g_lift.active || !unit) return;
+            wxl_vec3 at{};
+            if (binding::object_position(unit, &at) != WXL_TRUE)
+            {
+                g_lift.active = false;
+                return;
+            }
+            const uint32_t flags = binding::unit_movement_flags(unit);
+            const uint32_t now   = binding::os_time_ms();
+            float          dt    = static_cast<float>(now - g_lift.last) / 1000.0f;
+            if (!(dt >= 0.0f) || dt > 0.25f) dt = 0.25f;
+            g_lift.last = now;
+
+            // The ground under the player now: an edit since may have moved it.
+            float      top    = 0.0f;
+            const bool ground = GroundUnder(unit, at.x, at.y, top);
+            if ((flags & kNotStanding) != 0)
+            {
+                g_lift.active = false; // jumping, falling, swimming: the movement takes them
+                return;
+            }
+            const bool moved = (flags & kMoving) != 0 || std::fabs(at.x - g_lift.x) > 0.05f || std::fabs(at.y - g_lift.y) > 0.05f;
+            if (!ground || top <= at.z + kOnGround)
+            {
+                // Nothing to rise to any more: a player left above the ground lands on it.
+                g_lift.active = false;
+                if (!moved && ground && top < at.z - 0.05f) binding::unit_fall_local(unit);
+                return;
+            }
+            if (moved)
+            {
+                // Put on the new ground at once; a player walking on is carried by the movement,
+                // one pushed aside lands there.
+                g_lift.active = false;
+                Place(unit, top, (flags & kMoving) == 0);
+                return;
+            }
+            const float z = std::min(top, at.z + kLiftSpeed * dt);
+            if (z >= top - 0.0001f)
+            {
+                g_lift.active = false;
+                Place(unit, top, true);
+                return;
+            }
+            binding::unit_lift_local(unit, z);
         }
     }
 }
