@@ -23,7 +23,7 @@ namespace wxl::modern_adt::shader
         enum Op : uint32_t
         {
             kMov = 0x01, kAdd = 0x02, kMad = 0x04, kMul = 0x05, kRcp = 0x06, kDp4 = 0x09, kMax = 0x0B,
-            kDcl = 0x1F, kDef = 0x51, kDefI = 0x52, kDefB = 0x53, kCmp = 0x58, kTexld = 0x42,
+            kDcl = 0x1F, kDef = 0x51, kDefI = 0x52, kDefB = 0x53, kCmp = 0x58, kTexld = 0x42, kDp3 = 0x08, kLrp = 0x12,
         };
         enum Reg : uint32_t
         {
@@ -347,6 +347,23 @@ namespace wxl::modern_adt::shader
         }
 
         const uint32_t A = NumOf(alpha);
+        // How the program mixes its layers from the alpha maps: each over the ones below (lrp, the
+        // client's programs for maps without big alpha), or summed with layer 0 the rest (dp3_sat
+        // of the alphas, then 1 minus it: its programs for maps with big alpha, MPHD 0x4).
+        bool lerps = false, sums = false;
+        for (const Ins& in : ins)
+        {
+            if (in.at <= alphaAt || in.len < 3) continue;
+            const auto reads = [&](uint32_t k) { return TypeOf(w[in.at + k]) == kTemp && NumOf(w[in.at + k]) == A; };
+            if (in.op == kLrp && in.len == 4 && reads(2)) lerps = true;
+            if (in.op == kDp3 && (reads(2) || reads(3))) sums = true;
+        }
+        if (lerps == sums)
+        {
+            why = "the layers' mix is neither the lerps nor the sum of the client's programs";
+            return false;
+        }
+        found.sums = sums;
         const uint32_t W = base, H = base + 1, F = base + 2, P = base + 3, M = base + 4, D = base + 5, X = base + 6;
         const auto     c = [](uint32_t row, uint32_t comp, bool neg = false) { return Src(kConst, row, Rep(comp), neg); };
         const auto     t = [](uint32_t r, uint32_t comp, bool neg = false) { return Src(kTemp, r, Rep(comp), neg); };
@@ -364,15 +381,26 @@ namespace wxl::modern_adt::shader
             if (height[k]) head(kDcl, {0x80000000u | (kTex2d << 27), Dst(kSampler, kHeightSampler + k)});
 
         Emit e; // after the alpha maps' read
-        // w: each layer's share of the client's mix; X.x the part left under the layers above.
+        // w: each layer's share of the client's mix.
         e(kMov, {Dst(kTemp, W), c(kK, 0)});
-        e(kMov, {Dst(kTemp, X, m(0)), c(kK, 1)});
-        for (uint32_t k = layers - 1; k >= 1; --k)
+        if (sums)
         {
-            e(kMul, {Dst(kTemp, W, m(k)), t(A, k - 1), t(X, 0)});
-            e(kMad, {Dst(kTemp, X, m(0)), t(A, k - 1, true), t(X, 0), t(X, 0)});
+            // Layer k's alpha is its share; layer 0 has what the others leave, as the program has it.
+            e(kDp3, {Dst(kTemp, D, m(0), true), Src(kTemp, A), c(kK, 1)});
+            e(kAdd, {Dst(kTemp, W, m(0)), c(kK, 1), t(D, 0, true)});
+            for (uint32_t k = 1; k < layers; ++k) e(kMov, {Dst(kTemp, W, m(k)), t(A, k - 1)});
         }
-        e(kMov, {Dst(kTemp, W, m(0)), t(X, 0)});
+        else
+        {
+            // Each layer over the ones below; X.x the part left under the layers above.
+            e(kMov, {Dst(kTemp, X, m(0)), c(kK, 1)});
+            for (uint32_t k = layers - 1; k >= 1; --k)
+            {
+                e(kMul, {Dst(kTemp, W, m(k)), t(A, k - 1), t(X, 0)});
+                e(kMad, {Dst(kTemp, X, m(0)), t(A, k - 1, true), t(X, 0), t(X, 0)});
+            }
+            e(kMov, {Dst(kTemp, W, m(0)), t(X, 0)});
+        }
         // h: the height textures' alpha.
         e(kMov, {Dst(kTemp, H), c(kK, 0)});
         for (uint32_t k = 0; k < layers; ++k)
@@ -403,20 +431,30 @@ namespace wxl::modern_adt::shader
         e(kMax, {Dst(kTemp, M, m(1)), t(M, 1), c(kK, 2)});
         e(kRcp, {Dst(kTemp, M, m(1)), t(M, 1)});
         e(kMul, {Dst(kTemp, P), Src(kTemp, P), t(M, 1)});
-        // The shares back into the client's alphas: layer k's over what is left under the ones above.
-        e(kMov, {Dst(kTemp, M, m(3)), c(kK, 1)});
-        for (uint32_t k = layers - 1; k >= 1; --k)
+        // The shares back into the program's alphas: summed, layer k's share itself (the program
+        // gives layer 0 the rest); otherwise layer k's over what is left under the ones above.
+        if (sums)
         {
-            e(kMax, {Dst(kTemp, M, m(2)), t(M, 3), c(kK, 2)});
-            e(kRcp, {Dst(kTemp, M, m(2)), t(M, 2)});
-            e(kMul, {Dst(kTemp, X, m(k - 1), true), t(P, k), t(M, 2)});
-            e(kAdd, {Dst(kTemp, M, m(3)), t(M, 3), t(P, k, true)});
+            // Alphas of layers the chunk lacks are zero, so that the program's sum is the shares'.
+            e(kMov, {Dst(kTemp, X, 0x7), c(kK, 0)});
+            for (uint32_t k = 1; k < layers; ++k) e(kMov, {Dst(kTemp, X, m(k - 1)), t(P, k)});
+        }
+        else
+        {
+            e(kMov, {Dst(kTemp, M, m(3)), c(kK, 1)});
+            for (uint32_t k = layers - 1; k >= 1; --k)
+            {
+                e(kMax, {Dst(kTemp, M, m(2)), t(M, 3), c(kK, 2)});
+                e(kRcp, {Dst(kTemp, M, m(2)), t(M, 2)});
+                e(kMul, {Dst(kTemp, X, m(k - 1), true), t(P, k), t(M, 2)});
+                e(kAdd, {Dst(kTemp, M, m(3)), t(M, 3), t(P, k, true)});
+            }
         }
         // No layer with its height in the chunk: the client's own alphas.
         e(kMov, {Dst(kTemp, M, m(2)), c(kK, 0)});
         for (uint32_t k = 0; k < layers; ++k)
             if (height[k]) e(kMax, {Dst(kTemp, M, m(2)), t(M, 2), c(kParamRow + k, 2)});
-        const uint32_t alphas = (1u << (layers - 1)) - 1; // x, xy or xyz
+        const uint32_t alphas = sums ? 0x7u : (1u << (layers - 1)) - 1; // summed: all three; else x, xy or xyz
         e(kCmp, {Dst(kTemp, A, alphas), t(M, 2, true), Src(kTemp, A), Src(kTemp, X)});
 
         // The program: version, our declarations, its own up to the alpha maps' read, the blend, the rest.
