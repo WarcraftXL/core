@@ -2272,6 +2272,20 @@ namespace
     }
     void WXL_CALL FakeTextureClose(void*) { ++g_texturesClosed; }
 
+    // The device's side of a texture (wxl.draw): a CGxTex whose Direct3D 9 texture is a made-up
+    // pointer, once the file has loaded (a path naming "Loading" never does).
+    wxl::engine::CGxTex g_fakeGxTex{};
+    char                g_fakeD3dTexture[16]{};
+    int                 g_texturesReadied = 0;
+    void* WXL_CALL FakeGxTextureReady(void* texture)
+    {
+        const auto* t = static_cast<const FakeCircleTexture*>(texture);
+        if (!t || t->path.find("Loading") != std::string::npos) return nullptr;
+        ++g_texturesReadied;
+        g_fakeGxTex.m_apiSpecificData = g_fakeD3dTexture;
+        return &g_fakeGxTex;
+    }
+
     void* WXL_CALL FakeCameraWorld() { return g_worldCamera; }
 
     wxl_bool WXL_CALL FakeCameraRead(const void* camera, wxl_core_camera* out)
@@ -2396,6 +2410,7 @@ namespace
         init.gx_device_api          = &FakeGxDeviceApi;
         init.gx_invalidate_state    = &FakeGxInvalidate;
         init.gx_world_view          = &FakeGxWorldView;
+        init.gx_texture_ready       = &FakeGxTextureReady;
         init.component_wearer       = &FakeComponentWearer;
         init.m2_object_model        = &FakeObjectModel;
         init.m2_item_display        = &FakeItemDisplay;
@@ -6725,6 +6740,24 @@ namespace
             drawn   = CallGlobal("__wxl_draw", args, &drawFound);
             Check(drawn.size() == 2 && drawn[0].type == WXL_VALUE_NIL && drawn[1].string.find("invalid") == 0,
                   "draw: a circle of no radius answers nil and why");
+            // abi 0.1.38's arguments: a textured, modulated, feathered inside and a shadowed line.
+            args.resize(43, Number(0));
+            args[4]  = Number(3);
+            args[18] = Number(0.8);
+            args[22] = Number(-1);
+            args[24] = Number(-1);
+            args[25] = Number(-1);
+            args[27] = Number(0.5);
+            args[28] = Number(1.5);
+            args[29] = Number(1.5);
+            args[31] = String("SPELLS\\CrackedGround.blp");
+            args[40] = Number(2);
+            args[41] = Number(0.5);
+            drawn    = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 1 && drawn[0].type == WXL_VALUE_BOOL, "draw: WxlDraw's native half takes a texture, a blend, a feather and a shadow");
+            args[40] = Number(9);
+            drawn    = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 2 && drawn[0].type == WXL_VALUE_NIL, "draw: a blend that is none answers nil and why");
             wxl::core::services::draw::Clear();
         }
         bool found = false;
@@ -14229,8 +14262,17 @@ namespace
         {
             UINT  vertices;
             DWORD zEnable, colorWrite, blend;
+            DWORD source = 0, destination = 0;
+            const void* pixel = nullptr;
+            const void* texture = nullptr;
+            float       surface[6][4] = {};
+            size_t      first = 0;
         };
-        std::vector<Run> runs;
+        std::vector<Run>             runs;
+        const void*                  pixel = nullptr;
+        const void*                  texture0 = nullptr;
+        float                        pixelConstants[256][4]{};
+        std::map<int, DWORD>         sampler0;
 
         DrawDevice()
         {
@@ -14282,23 +14324,33 @@ namespace
         DWORD VertexShaderVersion(IDirect3DVertexShader9*) override { return 0xFFFE0300u; }
         void  SetViewport(const D3DVIEWPORT9& v) override { viewport = v; }
         void  SetRenderState(D3DRENDERSTATETYPE state, DWORD value) override { states[state] = value; }
-        void  SetSamplerState(DWORD, D3DSAMPLERSTATETYPE, DWORD) override {}
-        void  SetTexture(DWORD, IDirect3DBaseTexture9*) override {}
+        void  SetSamplerState(DWORD s, D3DSAMPLERSTATETYPE state, DWORD value) override
+        {
+            if (s == 0) sampler0[state] = value;
+        }
+        void  SetTexture(DWORD s, IDirect3DBaseTexture9* t) override
+        {
+            if (s == 0) texture0 = t;
+        }
         void  SetDeclaration(IDirect3DVertexDeclaration9* d) override { declaration = d; }
         void  SetStreamSource(UINT, IDirect3DVertexBuffer9*, UINT, UINT) override {}
         void  SetIndices(IDirect3DIndexBuffer9*) override {}
         void  SetVertexShader(IDirect3DVertexShader9*) override {}
-        void  SetPixelShader(IDirect3DPixelShader9*) override {}
+        void  SetPixelShader(IDirect3DPixelShader9* p) override { pixel = p; }
         void  SetVertexConstants(UINT first, const float* values, UINT count) override { std::memcpy(constants[first], values, count * 16); }
-        void  SetPixelConstants(UINT, const float*, UINT) override {}
+        void  SetPixelConstants(UINT first, const float* values, UINT count) override { std::memcpy(pixelConstants[first], values, count * 16); }
         DWORD State(D3DRENDERSTATETYPE s) { return states.count(s) ? states[s] : 0xDEADu; }
         void  DrawIndexed(D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT) override {}
         void  DrawUp(D3DPRIMITIVETYPE type, UINT primitives, const void* data, UINT stride) override
         {
             if (type != D3DPT_TRIANGLELIST || stride != sizeof(wxl::gx::shapes::Vertex)) return;
             const auto* v = static_cast<const wxl::gx::shapes::Vertex*>(data);
+            Run run{primitives * 3, State(D3DRS_ZENABLE), State(D3DRS_COLORWRITEENABLE), State(D3DRS_ALPHABLENDENABLE),
+                    State(D3DRS_SRCBLEND), State(D3DRS_DESTBLEND), pixel, texture0};
+            std::memcpy(run.surface, pixelConstants[200], sizeof run.surface);
+            run.first = vertices.size();
             vertices.insert(vertices.end(), v, v + primitives * 3);
-            runs.push_back(Run{primitives * 3, State(D3DRS_ZENABLE), State(D3DRS_COLORWRITEENABLE), State(D3DRS_ALPHABLENDENABLE)});
+            runs.push_back(run);
         }
     };
 
@@ -14494,6 +14546,113 @@ namespace
         wxl_result fromThread = WXL_OK;
         std::thread([&] { fromThread = api.draw(&circle, &style); }).join();
         Check(fromThread == WXL_E_INVALID, "off the main thread a shape is refused");
+
+        // abi 0.1.38: a textured inside multiplied into the ground, feathered; its texture opened
+        // once, readied on the device each frame, let go of after the shapes that used it.
+        draw::Clear();
+        device.vertices.clear();
+        device.runs.clear();
+        const size_t   openedBefore = g_openedTextures.size();
+        const int      closedBefore = g_texturesClosed;
+        wxl_draw_style stain        = style;
+        stain.alpha          = 0.0f;
+        stain.fill_alpha     = 0.8f;
+        stain.texture        = "SPELLS\\CrackedGround.blp";
+        stain.blend          = WXL_DRAW_BLEND_MODULATE;
+        stain.uv             = WXL_DRAW_UV_WORLD;
+        stain.uv_size_x      = 4.0f;
+        stain.feather        = 0.5f;
+        stain.flags          = WXL_DRAW_STYLE_FILL_COLOR;
+        stain.fill_color     = 0x806040u;
+        Check(api.draw(&circle, &stain) == WXL_OK, "a textured circle is taken");
+        const wxl_handle kept2 = api.add(&circle, &stain, 0.0f);
+        Check(kept2 != WXL_HANDLE_NONE && g_openedTextures.size() == openedBefore + 1, "its texture is opened once for both shapes");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.textured == 2 && stats.textures == 1 && stats.textures_loading == 0, "both insides drawn as surfaces of one texture");
+        const DrawDevice::Run* surfaceRun = nullptr;
+        for (const auto& run : device.runs)
+            if (run.texture == g_fakeD3dTexture) surfaceRun = &run;
+        Check(surfaceRun && surfaceRun->source == D3DBLEND_DESTCOLOR && surfaceRun->destination == D3DBLEND_ZERO,
+              "MODULATE multiplies the scene (DESTCOLOR, ZERO) with the device's texture on sampler 0");
+        Check(surfaceRun && surfaceRun->surface[3][3] == 0.5f && surfaceRun->surface[5][1] == 1.0f && surfaceRun->surface[2][2] == 1.0f &&
+                  surfaceRun->surface[2][3] == 1.0f && surfaceRun->surface[3][1] == 3.0f,
+              "c200 to c205 carry its feather, its blend, its repeat and its radius");
+        Check(device.sampler0[D3DSAMP_ADDRESSU] == D3DTADDRESS_WRAP && device.sampler0[D3DSAMP_MIPFILTER] == D3DTEXF_LINEAR,
+              "WORLD repeats the picture, mipmapped");
+        Check(device.texture0 == nullptr, "the texture is unbound after the shapes");
+        bool inPlane = surfaceRun != nullptr, tinted = surfaceRun != nullptr;
+        for (size_t i = 0; surfaceRun && i < surfaceRun->vertices; ++i)
+        {
+            const auto& v = device.vertices[surfaceRun->first + i];
+            inPlane = inPlane && v.other[0] * v.other[0] + v.other[1] * v.other[1] <= 9.0f + 1e-3f && (v.side & 3) == 1;
+            tinted  = tinted && (v.color & 0xFFFFFFu) == 0x806040u && (v.color >> 24) == 204u;
+        }
+        Check(inPlane && tinted, "its corners carry the circle's plane, in the fill's own colour and opacity");
+        // A texture still loading: the inside waits, the lines do not.
+        wxl_draw_style loading = stain;
+        loading.texture        = "Textures\\Loading.blp";
+        loading.alpha          = 1.0f;
+        device.runs.clear();
+        Check(api.draw(&circle, &loading) == WXL_OK, "a texture not yet loaded is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.textures == 2 && stats.textured == 1 && stats.drawn == 2, "its inside is left out of the frame, its outline drawn");
+        // Let go of: the immediate one at once, the kept one when removed; closed a while later.
+        api.remove(kept2);
+        wxl::seam::Gx::ScenePresent::Before();
+        Check(g_texturesClosed == closedBefore, "a texture lingers a few seconds after its last shape");
+        // Refusals of abi 0.1.38's fields.
+        wxl_draw_style badStyle = stain;
+        badStyle.blend          = 7;
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a blend that is none is refused");
+        badStyle         = stain;
+        badStyle.texture = "Textures\\Missing.blp";
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a texture the client makes none of is refused");
+        badStyle             = stain;
+        badStyle.radial_fade = 2.0f;
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a radial fade past 1 is refused");
+        // The sizes of abi 0.1.36 are still taken, as the look they had.
+        wxl_draw_style old = style;
+        old.struct_size    = WXL_DRAW_STYLE_SIZE_0136;
+        old.texture        = "Textures\\Missing.blp"; // past its size: not read
+        wxl_draw_shape oldShape = circle;
+        oldShape.struct_size    = WXL_DRAW_SHAPE_SIZE_0136;
+        Check(api.draw(&oldShape, &old) == WXL_OK, "a shape and a style of abi 0.1.36 are taken, the fields past them not read");
+
+        // Lines along, soft, shadowed: one more copy of the segments, under the lines, moved.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        const std::vector<wxl_vec3> path = {{100, 200, 0}, {110, 200, 0}, {110, 210, 0}};
+        const std::vector<float>    fades = {0.0f, 1.0f, 1.0f};
+        wxl_draw_shape              line{};
+        line.struct_size  = sizeof line;
+        line.kind         = WXL_DRAW_LINE;
+        line.points       = path.data();
+        line.point_count  = 3;
+        line.point_alphas = fades.data();
+        wxl_draw_style gold = style;
+        gold.color           = 0xE0B040u;
+        gold.softness        = 1.0f;
+        gold.shadow_alpha    = 0.5f;
+        gold.shadow_x        = 1.5f;
+        gold.shadow_y        = 1.5f;
+        gold.shadow_softness = 1.0f;
+        Check(api.draw(&line, &gold) == WXL_OK, "a soft gold line with a shadow is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        size_t shadows = 0, lines = 0, faded = 0;
+        for (const auto& v : device.vertices)
+        {
+            const bool moved = (v.side >> 2) == 3 && (v.end >> 1) == 3;
+            shadows += moved && (v.color & 0xFFFFFFu) == 0 ? 1 : 0;
+            lines += !moved && (v.color & 0xFFFFFFu) == 0xE0B040u && (v.flags >> 2) == 4 ? 1 : 0;
+            faded += (v.color & 0xFFFFFFu) == 0xE0B040u && (v.color >> 24) == 0 ? 1 : 0;
+        }
+        Check(stats.shadows == 1 && shadows == 12 && lines == 12, "its shadow is its segments once more, 1.5 pixels right and down, black");
+        Check(faded == 3, "the line starts transparent at its first point");
+        Check(!device.vertices.empty() && (device.vertices[0].color & 0xFFFFFFu) == 0, "the shadow is drawn before the line");
 
         // A device without shader model 3 says so.
         device.caps.VertexShaderVersion = D3DVS_VERSION(2, 0);
