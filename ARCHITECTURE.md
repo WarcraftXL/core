@@ -779,7 +779,9 @@ a tab or a line break, as `\xNN` before the line reaches the sink. `src/runtime/
   own level. `WXL_LOG_LEVEL` wins over the file's `level`. The log's gate is the lowest of all
   levels, which the host's `log_minimum` takes; the file sink then filters by tag. Section
   `[profile]`: `enabled`, `port`, `listen` (above). Section `[gx]`: `api`, `validation`, `gpu`,
-  `frames_in_flight`, `present_filter`, `async_pipelines`, `vk_prewarm`, `vk_rebar`, `vk_gpu_times` (the Vulkan renderer, above). A key or value that does not read is warned in
+  `frames_in_flight`, `present_filter`, `async_pipelines`, `vk_prewarm`, `vk_rebar`, `vk_gpu_times` (the Vulkan renderer, above). Section `[engine]`: `animate_threads`, `trim_alloc`
+  (`src/tuning/`: the M2 animate gates' thread pool; the calls of `include/wxl/tuning/drops_x86.def`
+  taken out at the x86 attachment, which `check_conventions.py` holds against Wow.exe). A key or value that does not read is warned in
   the header with its line number. `session::CurrentSettings` hands the file to `Core::Start`.
 - **Files.** `log::OpenSession` renames the previous `WarcraftXL.log` after its first line's
   `launch YYYY-MM-DD HH:MM:SS` (or its last write) to `WarcraftXL-<time>.log` and prunes the oldest

@@ -166,6 +166,16 @@ too). When that holds at every call site, no caller uses an answer, the row is r
 After must find what it needs another way (PrepareChunk's reads its tile's slot). A path that
 leaves the caller, or reads EAX, keeps the row.
 
+## Dropped calls
+
+`include/wxl/tuning/drops_x86.def` lists the calls the x86 runtime writes a five-byte NOP over
+(`[engine] trim_alloc`: SMemAlloc's and SMemFree's `_msize`). Each row is held to three facts read
+from Wow.exe: the bytes at its address are a five-byte `call` to its callee, inside the function it
+names; every `ret` of the callee before its padding pops nothing, so the caller's own cleanup of
+the arguments it pushed stays balanced; and on every path after the call, inside the caller, EAX is
+written before it is read (the same walk as the answers' above), so nothing uses what the callee
+answered. That the callee does nothing else is written by hand beside the row.
+
 ## Witnesses
 
 Some functions do not say what they take. A handler reached only through a table of pointers may

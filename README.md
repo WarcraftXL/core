@@ -198,6 +198,13 @@ cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test
    the frames came (percentiles, hitches and, under Vulkan, their causes, the uploads per frame,
    the main thread's time per draw and the GPU's per pass); `/console gxStats <label>` in the chat
    box writes the same lines for the stretch since the previous one.
+7. `[engine]` in `WarcraftXL.ini` holds the client work the runtime does its own way, each with
+   the same result as the client's, each on by default and logged at start: `animate_threads =
+   auto|0|2..16` (auto: as many threads as processors, at most 8) animates the scene's models on
+   that many threads, the main thread among them, when the client animates on threads
+   (`M2UseThreads`), where the client uses two; 0 leaves the client's two. `trim_alloc = 0|1`
+   (stock client only) takes out the heap size query `SMemAlloc` and `SMemFree` make and whose
+   answer they drop.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own
@@ -398,6 +405,7 @@ source. Everything else observes.
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
 | `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound (on Vulkan, `batch`: the renderer's record of the draw, for `wxl.render`). The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens; two more while nothing is highlighted, else a batch of a highlighted object is kept for `wxl.highlight` |
 | `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton, then the bone watchers get the pose; one load while none is |
+| `M2.BeginThread`, `M2.WaitThread` (gated) | `CM2Cache::BeginThread(func, param)` and `WaitThread()`, the model cache's animate worker woken and waited for by `CM2Scene::Animate` | nothing: with `[engine] animate_threads`, BeginThread's gate animates every model of the scene's animate list on the runtime's threads (each once, with the floating point state of the thread the client would have run it on) and hides the list from the client's own loop; WaitThread's puts it back. Not taken with the setting at 0, for another function, or without the threads |
 | `M2Shared.Initialize` | `CM2Shared::Initialize()`, a parsed model made ready | `ModelParsed` before, ahead of its skin profile's choice and its textures |
 | `M2Shared.InitializeSkinProfile` | `CM2Shared::InitializeSkinProfile()`, a parsed skin profile sized for drawing | `SkinProfileParsed` before, with the model's header and the skin's |
 | `M2Shared.FinishLoadingLowPrioritySequence` | `CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequence_index, uint8_t* buffer, uint32_t size)`, an external sequence file parsed against its model | `ModelSequenceLoad` before, with the sequence's unparsed bytes |
