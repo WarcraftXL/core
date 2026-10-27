@@ -26,6 +26,7 @@
 #include "services/InputService.hpp"
 #include "services/WorldService.hpp"
 #include "services/ImGuiService.hpp"
+#include "services/AnimationService.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
@@ -170,6 +171,15 @@ namespace
         uint32_t movementFlags  = 0; ///< the movement block's flags
         float    facing         = 0.0f;
         uint32_t money          = 0; ///< the local block's coinage
+        // The animation rows: what the model shows, and what was asked of it.
+        uint32_t shownAnim      = 0;     ///< 0 Stand
+        bool     modelLoading   = false; ///< the model shows nothing yet
+        bool     refusePlay     = false; ///< the client plays nothing (a transition)
+        uint32_t plays          = 0;
+        uint32_t lastPlayFlags  = 0;
+        uint32_t updates        = 0;
+        float    animSpeed      = 1.0f;
+        uint32_t lifts          = 0;
         std::vector<uint32_t> block; ///< the descriptor block, empty for none
     };
 
@@ -256,6 +266,9 @@ namespace
     void WXL_CALL FakeForgetCollision(void) { ++g_groundForgets; }
     void WXL_CALL FakeFallLocal(const void*) { ++g_groundFalls; }
 
+    /// A roof over the ground for the lift's traces, at this height; 0 for none.
+    float g_roofZ = 0.0f;
+
     /// A terrain click and a sprite click, as the GameUI rows read them.
     struct FakeTerrainClick
     {
@@ -321,6 +334,40 @@ namespace
     uint32_t WXL_CALL FakeTypeId(const void* object) { return Obj(object)->typeId; }
     uint32_t WXL_CALL FakeEntry(const void* object) { return Obj(object)->entry; }
     int32_t WXL_CALL FakeHealth(const void* object) { return Obj(object)->health; }
+
+    // The animation rows. The fake model has no EmoteWorkNoSheathe (136): it falls back to
+    // EmoteWork (62) unless the id is taken as given; every animation lasts a second.
+    void WXL_CALL FakePlayAnimation(void* object, uint32_t anim, uint32_t flags)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        ++o->plays;
+        o->lastPlayFlags = flags;
+        if (o->refusePlay || o->modelLoading) return;
+        o->shownAnim = (anim == 136 && !(flags & 0x4)) ? 62u : anim;
+        o->animSpeed = 1.0f;
+    }
+    void WXL_CALL FakeUpdateAnimation(void* object)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        ++o->updates;
+        o->shownAnim = 0;
+    }
+    uint32_t WXL_CALL FakeShownAnimation(const void* object)
+    {
+        return Obj(object)->modelLoading ? 0xFFFFFFFFu : Obj(object)->shownAnim;
+    }
+    void WXL_CALL FakeAnimationSpeed(void* object, uint32_t anim, float speed)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        if (o->shownAnim == anim) o->animSpeed = speed;
+    }
+    uint32_t WXL_CALL FakeAnimationLength(const void*, uint32_t) { return 1000; }
+    void WXL_CALL FakeLiftLocal(void* object, float z)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        o->position.z = z;
+        ++o->lifts;
+    }
     uint32_t WXL_CALL FakeCastingSpellId(const void* object) { return Obj(object)->castingSpellId; }
     uint32_t WXL_CALL FakeChannelSpellId(const void* object) { return Obj(object)->channelSpellId; }
 
@@ -2115,6 +2162,12 @@ namespace
     wxl_bool WXL_CALL FakeTrace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
     {
         g_traceFlags = flags;
+        // A roof over the terrain, for an upright ray across it.
+        if (g_roofZ != 0.0f && start.x == finish.x && start.y == finish.y && (start.z - g_roofZ) * (finish.z - g_roofZ) <= 0.0f)
+        {
+            *hit = wxl_vec3{start.x, start.y, g_roofZ};
+            return WXL_TRUE;
+        }
         // The ground at z = 0, for a ray straight down.
         if (start.x == finish.x && start.y == finish.y && start.z >= 0.0f && finish.z <= 0.0f)
         {
@@ -2370,6 +2423,12 @@ namespace
         init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
         init.terrain_forget_collision = &FakeForgetCollision;
         init.unit_fall_local        = &FakeFallLocal;
+        init.unit_play_animation    = &FakePlayAnimation;
+        init.unit_update_animation  = &FakeUpdateAnimation;
+        init.unit_shown_animation   = &FakeShownAnimation;
+        init.unit_animation_speed   = &FakeAnimationSpeed;
+        init.unit_animation_length  = &FakeAnimationLength;
+        init.unit_lift_local        = &FakeLiftLocal;
         return init;
     }
 }
@@ -3904,6 +3963,71 @@ namespace
         me.position.z = 94.0f;
         api.set_heights(&raise, 1, 0);
         Check(g_groundFalls == 1, "terrain: one moving, one on something above the ground, and ground raised start no fall");
+        wxl::core::services::terrain::ForgetMod(kMod);
+
+        // Ground raised under the player's feet lifts them onto it through the client's movement.
+        const auto groundAt = [&](float x, float y) {
+            double z = -1.0;
+            api.height(x, y, WXL_FALSE, &z);
+            return static_cast<float>(z);
+        };
+        me.position      = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.movementFlags = 0;
+        me.lifts         = 0;
+        g_groundFalls    = 0;
+        const wxl_terrain_height step{501, 601, grid::InnerIndex(5, 5), 100.4f};
+        api.set_heights(&step, 1, 0);
+        Check(me.lifts == 1 && std::fabs(me.position.z - 100.4f) < 0.01f && g_groundFalls == 1,
+              "terrain: a step's rise under a player standing still puts them on it at once, landing through the client's fall");
+        me.movementFlags = 0x1u;
+        const wxl_terrain_height stepMore{501, 601, grid::InnerIndex(5, 5), 100.9f};
+        api.set_heights(&stepMore, 1, 0);
+        Check(me.lifts == 2 && std::fabs(me.position.z - 100.9f) < 0.01f && g_groundFalls == 1,
+              "terrain: a moving player is put on it too, the movement's next message carrying it");
+        me.movementFlags = 0;
+
+        // Partly under: the highest ground under the footprint, as the collision box rests.
+        const grid::Point2 aside{feet.x + 0.15f, feet.y + 0.15f};
+        wxl::core::services::terrain::ForgetMod(kMod);
+        me.position = wxl_vec3{aside.x, aside.y, groundAt(aside.x, aside.y)};
+        const wxl_terrain_height partly{501, 601, grid::InnerIndex(5, 5), 100.5f};
+        api.set_heights(&partly, 1, 0);
+        Check(me.position.z > groundAt(aside.x, aside.y) + 0.005f && me.position.z < 100.5f,
+              "terrain: an edit partly under the player lifts them to the highest ground under their footprint");
+
+        // A higher rise lifts them frame by frame, never more than a step at a time.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        g_localPlayer = &me;
+        me.position   = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.lifts      = 0;
+        g_groundFalls = 0;
+        g_timeMs      = 50000;
+        const wxl_terrain_height mound{501, 601, grid::InnerIndex(5, 5), 103.0f};
+        api.set_heights(&mound, 1, 0);
+        Check(me.lifts == 0 && wxl::core::services::terrain::Lifting(), "terrain: three yards are not put at once");
+        float lastZ = me.position.z, worstStep = 0.0f;
+        int   frames = 0;
+        while (wxl::core::services::terrain::Lifting() && frames < 100)
+        {
+            g_timeMs += 33;
+            wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+            worstStep = std::max(worstStep, me.position.z - lastZ);
+            lastZ     = me.position.z;
+            ++frames;
+        }
+        Check(!wxl::core::services::terrain::Lifting() && std::fabs(me.position.z - groundAt(feet.x, feet.y)) < 0.05f &&
+                  worstStep <= 8.0f * 0.033f + 0.01f && frames > 5 && g_groundFalls == 1,
+              "terrain: they rise at a steady pace, in steps no higher than a frame's, and land on top");
+
+        // Nothing is lifted through what stands above: a roof, a floor of a building.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        me.position = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.lifts    = 0;
+        g_roofZ     = 101.5f;
+        api.set_heights(&step, 1, 0);
+        Check(me.lifts == 0 && !wxl::core::services::terrain::Lifting(), "terrain: ground raised under a roof lifts nobody");
+        g_roofZ = 0.0f;
+        wxl::core::services::terrain::ForgetMod(kMod);
         g_localPlayer = nullptr;
 
         // Refusals: nothing set.
@@ -4704,6 +4828,167 @@ namespace
         std::thread([&] { fromThread = api.head(unit, 0, 0, 0); }).join();
         Check(fromThread == WXL_E_INVALID, "off the main thread a head is refused");
         wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
+    }
+
+    // --- wxl.animation: animations of the game played on units -------------------------------
+
+    void CheckAnimation()
+    {
+        namespace anim = wxl::core::services::animation;
+        const wxl_animation_api& api = wxl::core::services::AnimationApi();
+        FakeObject me;
+        me.guid   = 0x7A1;
+        me.typeId = WXL_OBJECT_PLAYER;
+        me.health = 100;
+        FakeObject wolf;
+        wolf.guid   = 0x7A2;
+        wolf.typeId = WXL_OBJECT_UNIT;
+        wolf.health = 50;
+        FakeObject stone;
+        stone.guid   = 0x7A3;
+        stone.typeId = WXL_OBJECT_ITEM;
+        wxl::seam::ObjectMgr::InitObject::After(&me, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&wolf, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&stone, nullptr, 100u);
+        const wxl_handle player = wxl::core::objects::HandleOf(&me);
+        const wxl_handle unit   = wxl::core::objects::HandleOf(&wolf);
+        const wxl_handle item   = wxl::core::objects::HandleOf(&stone);
+        g_localPlayer = &me;
+        constexpr wxl::host::ModHost::ModToken kMod = 31, kOther = 32;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+        const auto frame = [&](uint32_t at) {
+            g_timeMs = at;
+            wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+            wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        };
+        const auto ended = [&](wxl_animation_end reason, uint32_t anim_id) {
+            const Received* got = Only(WXL_EV_UnitAnimationEnded);
+            if (!got) return false;
+            const auto args = got->As<wxl_unit_animation_args>();
+            return args.reason == static_cast<uint32_t>(reason) && args.anim_id == anim_id;
+        };
+
+        // Refusals.
+        Check(api.play(item, 17, 0, 0) == WXL_E_INVALID && api.play(0xDEAD, 17, 0, 0) == WXL_E_NOT_FOUND &&
+                  api.play(unit, 600, 0, 0) == WXL_E_INVALID && api.play(unit, 17, 0x10, 0) == WXL_E_INVALID &&
+                  api.play(unit, 17, 0, 50.0) == WXL_E_INVALID && api.play(unit, 17, 0, -1.0) == WXL_E_INVALID &&
+                  api.play(unit, 17, 0, std::numeric_limits<double>::quiet_NaN()) == WXL_E_INVALID && wolf.plays == 0,
+              "animation: an item, a unit gone, an id, a flag or a speed out of range are refused, nothing played");
+        wolf.health = 0;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED, "animation: a dead unit plays nothing");
+        wolf.health       = 50;
+        wolf.modelLoading = true;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED, "animation: nor a unit whose model loads");
+        wolf.modelLoading = false;
+        wolf.refusePlay   = true;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED && wolf.plays == 1, "animation: nor one the client did not play");
+        wolf.refusePlay = false;
+        uint32_t shown = 0;
+        Check(api.playing(unit, &shown) == WXL_E_NOT_FOUND && api.current(unit, &shown) == WXL_OK && shown == 0 &&
+                  api.current(item, &shown) == WXL_E_INVALID,
+              "animation: nothing played, the model shows its stand");
+
+        // A one-shot: played its length, handed back to the game.
+        g_received.clear();
+        g_timeMs = 1000;
+        Check(api.play(unit, 17, 0, 0) == WXL_OK && wolf.shownAnim == 17 && wolf.lastPlayFlags == 0, "animation: Attack1H is played as an emote is");
+        Check(api.playing(unit, &shown) == WXL_OK && shown == 17 && api.current(unit, &shown) == WXL_OK && shown == 17,
+              "animation: playing and current answer it");
+        frame(1500);
+        Check(g_received.empty() && wolf.updates == 0, "animation: halfway through it plays on");
+        frame(2000);
+        Check(ended(WXL_ANIMATION_END_FINISHED, 17) && wolf.updates == 1 && wolf.shownAnim == 0 &&
+                  api.playing(unit, &shown) == WXL_E_NOT_FOUND,
+              "animation: after its length the game is handed the unit back, and UnitAnimationEnded says finished");
+
+        // Speed, fallback, flags.
+        g_received.clear();
+        Check(api.play(unit, 62, 0, 2.0) == WXL_OK && wolf.animSpeed == 2.0f, "animation: a speed is set on the model");
+        frame(2400);
+        Check(g_received.empty(), "animation: twice as fast, it plays on at 400 ms");
+        frame(2500);
+        Check(ended(WXL_ANIMATION_END_FINISHED, 62), "animation: and is over at 500 ms");
+        Check(api.play(unit, 136, WXL_ANIMATION_NO_BLEND, 0) == WXL_OK && wolf.shownAnim == 62 && wolf.lastPlayFlags == 0x1 &&
+                  api.playing(unit, &shown) == WXL_OK && shown == 136,
+              "animation: an animation the model lacks falls back, unblended; playing answers what was asked");
+        Check(api.play(unit, 136, WXL_ANIMATION_EXACT, 0) == WXL_OK && wolf.shownAnim == 136 && wolf.lastPlayFlags == 0x4,
+              "animation: exact asks the client for that id alone");
+
+        // Interrupted, and replaced.
+        frame(2600);
+        g_received.clear();
+        g_timeMs = 3000;
+        api.play(unit, 17, 0, 0);
+        frame(3000);
+        Check(ended(WXL_ANIMATION_END_REPLACED, 136), "animation: a play takes the place of the one before, said at the next frame");
+        g_received.clear();
+        wolf.shownAnim = 5; // the game runs
+        frame(3100);
+        Check(ended(WXL_ANIMATION_END_INTERRUPTED, 17) && wolf.plays == 6, "animation: the game replacing a one-shot ends it, not played again");
+        g_received.clear();
+        g_timeMs = 3200;
+        api.play(unit, 18, WXL_ANIMATION_OVERRIDE, 0);
+        wolf.shownAnim = 5;
+        frame(3300);
+        Check(ended(WXL_ANIMATION_END_INTERRUPTED, 18) && wolf.plays == 7 && wolf.shownAnim == 5,
+              "animation: override is a loop's: a one-shot under it ends when the game replaces it, not played again");
+
+        // A loop yields to the game and comes back when the unit is idle; override at once.
+        g_received.clear();
+        g_timeMs = 4000;
+        api.play(unit, 62, WXL_ANIMATION_LOOP, 0);
+        frame(6500);
+        Check(g_received.empty() && wolf.shownAnim == 62, "animation: a loop goes on past its length");
+        wolf.shownAnim = 5;
+        const uint32_t plays = wolf.plays;
+        frame(6600);
+        Check(wolf.plays == plays && wolf.shownAnim == 5, "animation: while the unit runs, a loop waits");
+        wolf.shownAnim = 0;
+        frame(6700);
+        Check(wolf.plays == plays + 1 && wolf.shownAnim == 62 && g_received.empty(), "animation: idle again, it comes back");
+        api.play(unit, 62, WXL_ANIMATION_LOOP | WXL_ANIMATION_OVERRIDE, 0);
+        wolf.shownAnim = 5;
+        frame(6800);
+        Check(wolf.plays == plays + 3 && wolf.shownAnim == 62, "animation: override plays it again over the run at once");
+        wolf.health    = 0;
+        wolf.shownAnim = 1;
+        frame(6900);
+        Check(wolf.plays == plays + 3, "animation: but never over death");
+        wolf.health = 50;
+
+        // Stopped by its mod only; a mod that goes stops its own.
+        g_received.clear();
+        g_host->SwapCurrentMod(kOther);
+        Check(api.stop(unit) == WXL_E_NOT_FOUND, "animation: another mod cannot stop it");
+        g_host->SwapCurrentMod(kMod);
+        wolf.shownAnim     = 62;
+        const uint32_t ups = wolf.updates;
+        Check(api.stop(unit) == WXL_OK && wolf.updates == ups + 1 && api.stop(unit) == WXL_E_NOT_FOUND,
+              "animation: its mod stops it once, and the game chooses again");
+        frame(7000);
+        Check(ended(WXL_ANIMATION_END_STOPPED, 62), "animation: UnitAnimationEnded says stopped at the next frame");
+        g_received.clear();
+        api.play(player, 53, 0, 0);
+        anim::ForgetMod(kMod);
+        frame(7100);
+        Check(ended(WXL_ANIMATION_END_STOPPED, 53) && me.updates == 1, "animation: a mod that goes stops its animations");
+
+        // A unit that leaves view ends its play, seen at the player's frame.
+        g_received.clear();
+        api.play(unit, 17, 0, 0);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+        g_timeMs = 7200;
+        wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+        Check(ended(WXL_ANIMATION_END_GONE, 17) && !anim::Busy(), "animation: a unit gone ends its play");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.play(player, 17, 0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID, "animation: off the main thread a play is refused");
+        anim::Clear();
+        g_host->SwapCurrentMod(previous);
+        g_localPlayer = nullptr;
+        wxl::seam::ObjectMgr::ObjDelete::Before(&me);
         wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
     }
 
@@ -13887,6 +14172,7 @@ int main(int argc, char** argv)
     CheckWorldTrace();
     CheckMouseLookBlock();
     CheckPose();
+    CheckAnimation();
     CheckSelectionCircle();
     CheckTexture();
     CheckHighlight();

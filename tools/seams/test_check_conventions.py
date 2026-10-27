@@ -1084,6 +1084,17 @@ GROUND_TRUTH = {
     "TerrainCall.AddBatch":            ("0x007B7AF0", "thiscall", ["ecx"], 4),
     "TerrainCall.FreeInst":            ("0x007B3960", "cdecl", [], 1),
     "TerrainCall.OnFallLocal":         ("0x006ECCF0", "thiscall", ["ecx"], 1),
+    # wxl.animation's calls (calls_x86.def), read by hand: PlayBaseAnimation moves ECX to EBX
+    # (0x007385CA) and ends `ret 8` (0x0073880C); UpdateBaseAnimation moves ECX to ESI
+    # (0x0073AC34) and ends `ret 8` (0x0073ACF9); GetCurrentTorsoAnimId moves ECX to ESI
+    # (0x00717261) and ends in bare `ret`s (0x007172A4, 0x007172A9); SetKeyBoneSequenceSpeed
+    # moves ECX to ESI (0x00735CCA), reads [ebp+8] to [ebp+0x14] and ends `ret 0x10` (0x00735DC6);
+    # CM2Model::GetBoneSequenceId moves ECX to ESI (0x008267E4) and ends `ret 4` (0x00826853).
+    "AnimCall.PlayBaseAnimation":      ("0x007385C0", "thiscall", ["ecx"], 2),
+    "AnimCall.UpdateBaseAnimation":    ("0x0073AC30", "thiscall", ["ecx"], 2),
+    "AnimCall.GetCurrentTorsoAnimId":  ("0x00717260", "thiscall", ["ecx"], 0),
+    "AnimCall.SetKeyBoneSequenceSpeed": ("0x00735CC0", "thiscall", ["ecx"], 4),
+    "AnimCall.GetBoneSequenceId":      ("0x008267E0", "thiscall", ["ecx"], 1),
     # wxl.cvar's calls (calls_x86.def), read by hand: Lookup reads its name at [ebp+8]
     # (0x00767443) and ends in bare `ret`s (0x00767456); Register reads up to its ninth dword
     # at [ebp+0x28] (0x00768068) and ends in bare `ret`s (0x00768085, 0x007681E0); Set moves ECX
