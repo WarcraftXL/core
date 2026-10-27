@@ -617,7 +617,31 @@ client when neither it nor its stand-in opens). Each model a chunk places is jud
 read through the client's own file layer (a file a mod serves is judged as served; ".mdx" and
 ".mdl" read as ".m2", as `CM2Cache::CreateShared` does), and logged once; a chunk whose models all
 load is not taken, so a stock tile is placed by the client's own call. The placements are read
-with binding `map_area_placements`.
+with binding `map_area_placements`. A WMO root of version 17 holding a chunk 3.3.5a's roots do not
+have (GFID, MOUV, MODI and the like: its reader takes the chunks by position) is left out the same
+way.
+
+What the client assumes of a chunk, kept for a split tile: at least one layer it can draw and four
+entries of `m_layers` it can read (`CMap::QueryGroundTypeTerrain` reads `m_layers[k]` for the k
+the chunk's low-quality map names, whatever nLayers says). A chunk none of whose layers can be
+drawn (textures not named, none at all) gets one of `Tileset\Elwynn\ElwynnDirtBase.blp`,
+appended to the tile's textures; one whose MCLY holds fewer than four entries is handed a table of
+the runtime's (its entries, then copies of the first, without alpha map or ground effect). Each
+copied file is padded with zeros, so an alpha map the client reads past the end of `_tex0` reads
+zeros. Liquids (MH2O) of later clients are made safe in the root before the client reads them
+(`split_tile::FixLiquids`): a vertex format past 3 (a LiquidObject id) is taken from the size of
+its vertex data, format 3 read as 1 (this client draws 3 flat), a liquid type its LiquidType.dbc
+(read once through the file layer) has not becomes Water, or Ocean without heights (the client
+looks types up unchecked), and a chunk whose liquid lies outside MH2O or past its 8 x 8 cells is
+left dry.
+
+The map's far terrain (`MapLowDetail.Load` gate, `src/services/TerrainLowDetail.cpp`): 3.3.5a's
+`CMapLowDetail::Load` takes MAOF to follow MVER (or MWMO/MWID/MODF); a WDL of Legion and later puts
+MLDD, MLDX, MLMD, MLMX, MSSN, MSSO, MSSF first and MAOE between MARE and MAHO. Such a file is read
+by the runtime (`low_detail::Read`, portable: MAOF by its id, MAHO past MAOE), copied into a block
+of the client's (`SMemAlloc`, which `Unload` frees), and each area made by `CMap::AllocAreaLow`
+with the fields the client's loop sets (bindings `map_low_detail_set`, `map_area_low_add`); its map
+objects are left out. A WDL laid out as 3.3.5a's is left to the client.
 
 FileDataIDs (abi 0.1.46, the tile provider's `name_fn`): 8.1 and later name a tile's textures by
 id in `_tex0` (MDID in place of MTEX) and some placements' models in `_obj0` (MDDF flag 0x40, MODF
