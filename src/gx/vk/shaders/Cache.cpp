@@ -5,7 +5,7 @@
 //
 // The pack: a header (uint32 "WXSP", uint32 format), then records, each uint32 "REC ", uint32 the
 // body's size, the body: the 16-byte key, a byte 1 for a module or 0 for a refusal, three zeros,
-// then for a module its ProgramInfo (bytes pixel, major, minor, fixed fog; uint32 inputs, const
+// then for a module its ProgramInfo (bytes pixel, major, minor, fixed fog (bit 0) and palette (bit 1); uint32 inputs, const
 // rows, samplers, cube) and its SPIR-V words, for a refusal the reason's text.
 
 #include "gx/vk/shaders/Cache.hpp"
@@ -33,7 +33,7 @@ namespace wxl::vk::shaders
             to[0] = info.pixel ? 1 : 0;
             to[1] = info.major;
             to[2] = info.minor;
-            to[3] = info.fixed_fog ? 1 : 0;
+            to[3] = static_cast<uint8_t>((info.fixed_fog ? 1 : 0) | (info.palette ? 2 : 0));
             std::memcpy(to + 4, &info.inputs, 4);
             std::memcpy(to + 8, &info.const_rows, 4);
             std::memcpy(to + 12, &info.samplers, 4);
@@ -45,7 +45,8 @@ namespace wxl::vk::shaders
             info.pixel     = from[0] != 0;
             info.major     = from[1];
             info.minor     = from[2];
-            info.fixed_fog = from[3] != 0;
+            info.fixed_fog = (from[3] & 1) != 0;
+            info.palette   = (from[3] & 2) != 0;
             std::memcpy(&info.inputs, from + 4, 4);
             std::memcpy(&info.const_rows, from + 8, 4);
             std::memcpy(&info.samplers, from + 12, 4);

@@ -181,7 +181,8 @@ namespace wxl::vk::gxfront
             const engine::CGxBuf* fields = resolver.Buffer(d.m_primIndexBuf);
             out.indices                  = fields ? resolver.Pool(fields->m_pool) : nullptr;
             if (!out.indices) return Verdict::Unready;
-            out.first_index = batch.start + (fields->m_index >> 1);
+            // m_index is in bytes: two an index, four in a 32-bit index pool.
+            out.first_index = batch.start + (fields->m_index >> (out.indices->target == draw::kIndex32Pool ? 2 : 1));
         }
 
         // Blend, colour, alpha, depth, cull, fill (IRsSendToHw and IStateSyncEnables).

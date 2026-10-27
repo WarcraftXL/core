@@ -75,15 +75,27 @@ namespace wxl::vk::shaders
     /// The rows of a register file (c0..c255).
     constexpr uint32_t kRegisterRows = 256;
 
+    /// The bone palette (GxBonePaletteSet): the bones a draw reads, three vec4 rows each, what the
+    /// engine's skinned vertex programs read through a0 from c31 (c31 + 3 * bone, the rows of the
+    /// bone's 4x3 matrix). A palette holds at most kPaletteBones.
+    constexpr uint32_t kPaletteBase  = 31;
+    constexpr uint32_t kPaletteBones = 256;
+    constexpr uint32_t kPaletteRows  = kPaletteBones * 3;
+
     /**
      * The push constants of every draw. A stage's word is its texture's bindless slot (low 16 bits)
      * and its sampler's (high 16 bits). The register files are the frame's copies of the engine's
      * vertex and pixel registers, as many rows as the bound programs read; the draw's data is the
      * block the renderer's own programs read (draw::DrawData).
+     *
+     * A translated vertex program that reads bones (a0-relative c31..c33) reads them from the
+     * draw's bone palette when the flags count its bones (kFlagBonesShift): at `data`, or at `pixel`
+     * when kFlagPaletteAtPixel says so (the pixel program is the renderer's own, which reads its
+     * data at `data` and no pixel registers). With no palette, its bones are the vertex registers.
      */
     struct Push
     {
-        uint32_t data[2];     ///< the address of the draw's DrawData
+        uint32_t data[2];     ///< the address of the draw's DrawData, or of its bone palette
         uint32_t vertex[2];   ///< the address of the vertex registers (vec4 rows)
         uint32_t pixel[2];    ///< the address of the pixel registers
         float    alpha_ref;   ///< the alpha test's reference, 1..255; 0: no test
@@ -102,6 +114,10 @@ namespace wxl::vk::shaders
         kFlagFog         = 1u << 1, ///< D3D9's fog after the pixel program (below ps_3_0, and fixed function)
         kFlagPointSprite = 1u << 2, ///< points drawn as sprites: every texture coordinate is the point's
         kFlagClip        = 1u << 3, ///< the user clip plane is on
+        /// Bits 4..12: the bones of the draw's palette, 0 for none (its bones are the vertex registers').
+        kFlagBonesShift     = 4,
+        kFlagBonesMask      = 0x1FFu,
+        kFlagPaletteAtPixel = 1u << 13, ///< the palette's address is at Push::pixel (else at Push::data)
         /// From this bit, one per vertex input location: a D3DCOLOR the device reads in RGBA order
         /// (no B8G8R8A8 vertex format), its program swaps it back.
         kFlagSwizzleShift = 16,

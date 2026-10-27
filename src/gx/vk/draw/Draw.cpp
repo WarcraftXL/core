@@ -219,6 +219,10 @@ namespace wxl::vk::draw
         stats_ = Stats{};
         vertex_regs_ = RegisterFile{};
         pixel_regs_  = RegisterFile{};
+        // The palette the engine set last stays (it sets one only when its bones change), copied
+        // again into the new device's frames.
+        palette_.dirty   = true;
+        palette_.address = 0;
         return true;
     }
 
@@ -363,6 +367,41 @@ namespace wxl::vk::draw
         RegisterFile& file = pixel ? pixel_regs_ : vertex_regs_;
         std::memcpy(file.rows + first * 4, values, rows * 4 * sizeof(float));
         file.dirty = true;
+    }
+
+    void Renderer::BonePalette(const float* bones, uint32_t count)
+    {
+        if (!bones) count = 0;
+        count = std::min(count, shaders::kPaletteBones);
+        for (uint32_t b = 0; b < count; ++b)
+        {
+            const float* m = bones + b * 12; // a0 a1 a2 b0 b1 b2 c0 c1 c2 d0 d1 d2
+            float*       r = palette_.rows + b * 12;
+            for (uint32_t row = 0; row < 3; ++row)
+            {
+                r[row * 4 + 0] = m[0 + row];
+                r[row * 4 + 1] = m[3 + row];
+                r[row * 4 + 2] = m[6 + row];
+                r[row * 4 + 3] = m[9 + row];
+            }
+        }
+        palette_.bones = count;
+        palette_.dirty = true;
+    }
+
+    VkDeviceAddress Renderer::SnapshotPalette()
+    {
+        const uint64_t frame = display_->FrameNumber();
+        if (!palette_.dirty && palette_.frame == frame && palette_.address) return palette_.address;
+        const uint64_t bytes = palette_.bones * 48ull;
+        resources::Ring::Span span;
+        if (!bytes || !data_.Allocate(bytes, 16, span)) return 0;
+        std::memcpy(span.data, palette_.rows, bytes);
+        stats_.register_bytes += bytes;
+        palette_.address = span.address;
+        palette_.frame   = frame;
+        palette_.dirty   = false;
+        return palette_.address;
     }
 
     bool Renderer::FrameData(const void* bytes, uint32_t size, VkDeviceAddress& address)
@@ -720,7 +759,7 @@ namespace wxl::vk::draw
                 pool->retired.erase(pool->retired.begin() + static_cast<ptrdiff_t>(i));
                 return static_cast<uint8_t*>(pool->current.mapped);
             }
-        const VkBufferUsageFlags usage = pool->target == kIndexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        const VkBufferUsageFlags usage = pool->target != kVertexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         if (!allocator_->CreateBuffer(pool->size, usage, resources::Access::Upload, pool->current) || !pool->current.mapped)
         {
             allocator_->Destroy(pool->current);
@@ -774,7 +813,7 @@ namespace wxl::vk::draw
     {
         if (pool->device.buffer) return true;
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                         (pool->target == kIndexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+                                         (pool->target != kVertexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         if (!allocator_->CreateBuffer(std::max(pool->size, 4u), usage, resources::Access::Device, pool->device)) return false;
         pool->dirty_from = 0;
         pool->dirty_to   = pool->size;
@@ -1213,10 +1252,29 @@ namespace wxl::vk::draw
                 last_address_ = span.address;
             }
         }
+        // The bones of a skinned program: the palette when the engine set one, else its registers
+        // from c31, all of them.
+        uint32_t        vrows   = vinfo.const_rows;
+        uint32_t        bones   = 0;
+        VkDeviceAddress palette = 0;
+        if (vinfo.palette)
+        {
+            if (palette_.bones)
+            {
+                palette = SnapshotPalette();
+                if (!palette)
+                {
+                    ++stats_.refused;
+                    return false;
+                }
+                bones = palette_.bones;
+            }
+            else vrows = shaders::kRegisterRows;
+        }
         // The engine's registers, as many rows as the programs read.
-        const VkDeviceAddress vregs = Snapshot(vertex_regs_, vinfo.const_rows);
+        const VkDeviceAddress vregs = Snapshot(vertex_regs_, vrows);
         const VkDeviceAddress pregs = Snapshot(pixel_regs_, pinfo.const_rows);
-        if ((vinfo.const_rows && !vregs) || (pinfo.const_rows && !pregs))
+        if ((vrows && !vregs) || (pinfo.const_rows && !pregs))
         {
             ++stats_.refused;
             return false;
@@ -1245,6 +1303,15 @@ namespace wxl::vk::draw
         push.alpha_ref = packet.alpha_ref;
         push.flags     = packet.flags | (carried & ~0xFFFFu);
         if (!pinfo.fixed_fog) push.flags &= ~shaders::kFlagFog;
+        if (palette)
+        {
+            // Beside the renderer's own pixel program, which reads its data at Push::data and no
+            // registers, the palette goes where the pixel registers would.
+            uint32_t* at = own ? push.pixel : push.data;
+            at[0]        = static_cast<uint32_t>(palette);
+            at[1]        = static_cast<uint32_t>(palette >> 32);
+            push.flags |= bones << shaders::kFlagBonesShift | (own ? shaders::kFlagPaletteAtPixel : 0u);
+        }
         std::memcpy(push.clip_plane, packet.clip_plane, sizeof push.clip_plane);
         push.fog_color  = packet.fog_color;
         push.point_size = packet.point_size;
@@ -1278,6 +1345,7 @@ namespace wxl::vk::draw
             last_.count        = packet.count;
             last_.index        = packet.indexed ? (packet.indices->usage == kStream ? packet.indices->current.buffer : packet.indices->device.buffer)
                                                 : VK_NULL_HANDLE;
+            last_.index32      = packet.indexed && packet.indices->target == kIndex32Pool;
             last_.stream_count = packet.stream_count;
             std::copy(buffers, buffers + packet.stream_count, last_.buffers);
             std::copy(offsets, offsets + packet.stream_count, last_.offsets);
@@ -1364,10 +1432,12 @@ namespace wxl::vk::draw
         if (packet.indexed)
         {
             const VkBuffer index = packet.indices->usage == kStream ? packet.indices->current.buffer : packet.indices->device.buffer;
-            if (index != index_buffer_)
+            const bool     wide  = packet.indices->target == kIndex32Pool;
+            if (index != index_buffer_ || wide != index32_)
             {
-                vkCmdBindIndexBuffer(cmd, index, 0, VK_INDEX_TYPE_UINT16);
+                vkCmdBindIndexBuffer(cmd, index, 0, wide ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
                 index_buffer_ = index;
+                index32_      = wide;
             }
         }
 

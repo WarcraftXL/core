@@ -555,6 +555,11 @@ namespace
 
     uint32_t WXL_CALL SampleCountsRow(void* device) { return Mine(device) ? g_front->SampleCounts() : 1u; }
 
+    void WXL_CALL BonePaletteRow(void* device, const float* bones, uint32_t count)
+    {
+        if (Mine(device)) g_front->Renderer().BonePalette(bones, count);
+    }
+
     const wxl_gx_vk_backend kBackend = {
         sizeof(wxl_gx_vk_backend),
         0,
@@ -598,6 +603,7 @@ namespace
         QueryResultRow,
         ReadPixelsRow,
         SampleCountsRow,
+        BonePaletteRow,
     };
 }
 

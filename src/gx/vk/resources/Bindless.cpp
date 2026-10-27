@@ -64,11 +64,11 @@ namespace wxl::vk::resources
         bindings[0].binding         = 0;
         bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         bindings[0].descriptorCount = capacity_;
-        bindings[0].stageFlags      = VK_SHADER_STAGE_ALL_GRAPHICS;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[1].binding         = 1;
         bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
         bindings[1].descriptorCount = samplers;
-        bindings[1].stageFlags      = VK_SHADER_STAGE_ALL_GRAPHICS;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
         const VkDescriptorBindingFlags flags[2] = {
             VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                 VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,

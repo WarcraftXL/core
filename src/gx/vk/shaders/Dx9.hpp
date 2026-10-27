@@ -135,7 +135,8 @@ namespace wxl::vk::shaders::dx9
         // What the code reads and writes, gathered as it is decoded.
         uint32_t temps = 0;           ///< r0..r(temps-1)
         uint32_t const_rows = 0;      ///< c0..c(const_rows-1) read with a fixed index
-        bool     relative_const = false; ///< a c register read through a0 or aL
+        bool     relative_const = false; ///< a c register read through a0 or aL, bones aside
+        bool     relative_bones = false; ///< a vertex program's bones read: c31..c33 through a0
         uint32_t textures = 0;        ///< ps 1.x/2.0: t0..t(textures-1) read or written
         uint32_t outputs = 0;         ///< vs below 3.0: oT0..oT(outputs-1)
         uint32_t sampler_mask = 0;    ///< the samplers sampled (s# of a texld, or the stage of a ps 1.x tex)

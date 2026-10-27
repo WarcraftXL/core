@@ -10,6 +10,7 @@
 #include "gx/vk/Log.hpp"
 #include "gx/vk/present/Present.hpp"
 
+#include "wxl/core/gx_vk.h"
 #include "wxl/engine/gx.hpp"
 
 #include <algorithm>
@@ -317,6 +318,10 @@ namespace wxl::vk::gxfront
         caps.m_shaderAlphaRef        = 1;
         caps.unk_0134                = 0;
         caps.unk_0138                = 0;
+        // The recompiled client's own caps (wxl/core/gx_vk.h): a bone palette of 256 bones, and
+        // index pools of 32-bit indices (fullDrawIndexUint32 is part of the floor).
+        caps.unused_0114[WXL_GX_VK_CAP_BONE_PALETTE] = shaders::kPaletteBones;
+        caps.unused_0114[WXL_GX_VK_CAP_INDEX32]      = 1;
     }
 
     void Front::WindowSize(uint32_t width, uint32_t height, bool minimized)

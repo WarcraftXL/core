@@ -54,11 +54,12 @@ namespace wxl::vk::draw
         kTriangleFan   = 5,
     };
 
-    /// EGxPoolTarget, EGxPoolUsage.
+    /// EGxPoolTarget (the recompiled client's GxPoolTarget_Index32 included), EGxPoolUsage.
     enum PoolTarget : uint32_t
     {
-        kVertexPool = 0,
-        kIndexPool  = 1,
+        kVertexPool  = 0,
+        kIndexPool   = 1, ///< 16-bit indices
+        kIndex32Pool = 2, ///< 32-bit indices
     };
     enum PoolUsage : uint32_t
     {
@@ -189,7 +190,7 @@ namespace wxl::vk::draw
         uint32_t  primitive = kTriangles;
         bool      indexed = false;
         Pool*     indices = nullptr;
-        uint32_t  first_index = 0;   ///< indexed: into the index pool, in 16-bit indices
+        uint32_t  first_index = 0;   ///< indexed: into the index pool, in its indices (16 or 32 bits)
         uint32_t  count = 0;         ///< indices when indexed, vertices otherwise
         uint32_t  attribute_count = 0;
         Attribute attributes[14];
@@ -241,7 +242,8 @@ namespace wxl::vk::draw
         bool            scene = false;  ///< drawn into the scene (not a texture)
         uint32_t        first_index = 0;
         uint32_t        count = 0;
-        VkBuffer        index = VK_NULL_HANDLE; ///< 16-bit indices
+        VkBuffer        index = VK_NULL_HANDLE;
+        bool            index32 = false;        ///< its indices are 32-bit (else 16-bit)
         uint32_t        stream_count = 0;
         VkBuffer        buffers[14] = {};
         VkDeviceSize    offsets[14] = {};
@@ -325,6 +327,16 @@ namespace wxl::vk::draw
         /// Rows @p first.. of the vertex (@p pixel false) or pixel register file changed.
         void Constants(bool pixel, uint32_t first, uint32_t rows, const float* values);
         const float* Registers(bool pixel) const { return pixel ? pixel_regs_.rows : vertex_regs_.rows; }
+        /**
+         * @brief The engine's bone palette (GxBonePaletteSet): @p count bones (at most
+         *        shaders::kPaletteBones), each a C34Matrix of 12 floats (a0 a1 a2 b0 b1 b2 c0 c1 c2 d0
+         *        d1 d2), what the skinned vertex programs read from now on in the place of the
+         *        registers from c31: bone i's rows (a0 b0 c0 d0), (a1 b1 c1 d1), (a2 b2 c2 d2). It stays
+         *        until the next one, from frame to frame, as the registers do.
+         */
+        void BonePalette(const float* bones, uint32_t count);
+        /// The bones of the palette the next draws read; 0 before the engine sets one.
+        uint32_t PaletteBones() const { return palette_.bones; }
 
         // --- Textures ---------------------------------------------------------------------------
         /// Null when the device cannot make it (its format, its size, the bindless table full).
@@ -470,6 +482,8 @@ namespace wxl::vk::draw
         /// What the frame's upload pass holds open goes to SHADER_READ_ONLY; the rings' writes reach the GPU.
         void CloseUploads(VkCommandBuffer upload);
         VkDeviceAddress Snapshot(RegisterFile& file, uint32_t rows);
+        /// The palette's copy in this frame's ring (made when the palette changed or the frame is new).
+        VkDeviceAddress SnapshotPalette();
         /// The rendering draws go into now, begun when it is not open; its pipeline target id.
         VkCommandBuffer Rendering(uint8_t& target_id);
         VkImageView AttachView(Texture* texture, uint32_t face);
@@ -506,6 +520,15 @@ namespace wxl::vk::draw
 
         RegisterFile          vertex_regs_;
         RegisterFile          pixel_regs_;
+        struct Palette
+        {
+            float           rows[shaders::kPaletteRows * 4] = {};
+            uint32_t        bones = 0;
+            bool            dirty = true;
+            VkDeviceAddress address = 0;
+            uint64_t        frame = 0; ///< the frame the copy is in
+        };
+        Palette               palette_;
 
         Target                target_;       ///< what the engine draws into
         Target                open_;         ///< what the open target rendering draws into (color null: none)
@@ -525,6 +548,7 @@ namespace wxl::vk::draw
         VkBuffer   vertex_buffers_[16] = {};
         VkDeviceSize vertex_offsets_[16] = {};
         VkBuffer   index_buffer_ = VK_NULL_HANDLE;
+        bool       index32_ = false; ///< the index type index_buffer_ is bound with
         float      viewport_[6] = {};
         int32_t    scissor_[4] = {};
         uint32_t   dynamic_[8] = {}; ///< cull, topology, depth test, depth write, compare, bias enable, bias bits, blend factor bits

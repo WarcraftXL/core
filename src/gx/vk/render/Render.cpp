@@ -261,10 +261,28 @@ namespace wxl::vk::render
         for (auto& zones : zones_) zones.clear();
         open_zones_.clear();
         seen_frame_ = 0;
+        // Compute programs where the queue runs them: the bindless set, 128 bytes of push constants.
+        if (context.QueueFamily() < families && (props[context.QueueFamily()].queueFlags & VK_QUEUE_COMPUTE_BIT))
+        {
+            const VkDescriptorSetLayout set = renderer.Table().Layout();
+            const VkPushConstantRange   push{VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushBytes};
+            VkPipelineLayoutCreateInfo  info{};
+            info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            info.setLayoutCount         = 1;
+            info.pSetLayouts            = &set;
+            info.pushConstantRangeCount = 1;
+            info.pPushConstantRanges    = &push;
+            if (vkCreatePipelineLayout(context.Device(), &info, nullptr, &compute_layout_) != VK_SUCCESS) compute_layout_ = VK_NULL_HANDLE;
+        }
         // What a mod made on the previous device: its programs again (the variants come at their
-        // first draw, the images at their first use, the buffers' zeros with the next frame).
+        // first draw or dispatch, the images at their first use, the buffers' zeros with the next frame).
         for (Pipeline* pipeline : pipelines_)
         {
+            if (pipeline->spec.kind == kCompute)
+            {
+                pipeline->compute = Module(context.Device(), pipeline->spec.compute.data(), pipeline->spec.compute.size());
+                continue;
+            }
             pipeline->fragment = Module(context.Device(), pipeline->spec.fragment.data(), pipeline->spec.fragment.size());
             if (pipeline->spec.kind == kGraphics)
                 pipeline->vertex = Module(context.Device(), pipeline->spec.vertex.data(), pipeline->spec.vertex.size());
@@ -298,10 +316,13 @@ namespace wxl::vk::render
             pipeline->variants.clear();
             if (pipeline->vertex) vkDestroyShaderModule(device, pipeline->vertex, nullptr);
             if (pipeline->fragment) vkDestroyShaderModule(device, pipeline->fragment, nullptr);
-            pipeline->vertex = pipeline->fragment = VK_NULL_HANDLE;
+            if (pipeline->compute) vkDestroyShaderModule(device, pipeline->compute, nullptr);
+            pipeline->vertex = pipeline->fragment = pipeline->compute = VK_NULL_HANDLE;
         }
         if (fullscreen_) vkDestroyShaderModule(device, fullscreen_, nullptr);
         fullscreen_ = VK_NULL_HANDLE;
+        if (compute_layout_) vkDestroyPipelineLayout(device, compute_layout_, nullptr);
+        compute_layout_ = VK_NULL_HANDLE;
         if (query_pool_) vkDestroyQueryPool(device, query_pool_, nullptr);
         query_pool_ = VK_NULL_HANDLE;
         for (auto& zones : zones_) zones.clear();
@@ -699,11 +720,12 @@ namespace wxl::vk::render
             why = "no Vulkan device";
             return nullptr;
         }
-        if (spec.kind > kBatch)
+        if (spec.kind > kCompute)
         {
             why = "no such pipeline kind";
             return nullptr;
         }
+        if (spec.kind == kCompute) return CreateCompute(spec, why);
         if (spec.fragment.empty() || (spec.kind == kGraphics) != !spec.vertex.empty())
         {
             why = spec.kind == kGraphics ? "a graphics pipeline takes a vertex and a fragment program"
@@ -784,6 +806,61 @@ namespace wxl::vk::render
         return pipeline;
     }
 
+    Pipeline* Render::CreateCompute(const PipelineSpec& spec, std::string& why)
+    {
+        if (!compute_layout_)
+        {
+            why = "the device's queue runs no compute programs";
+            return nullptr;
+        }
+        if (spec.compute.empty() || !spec.vertex.empty() || !spec.fragment.empty())
+        {
+            why = "a compute pipeline takes a compute program and no vertex or fragment program";
+            return nullptr;
+        }
+        if (spec.compute.size() < 5 || spec.compute[0] != 0x07230203u)
+        {
+            why = "a program is no SPIR-V module (its header is missing or cut short)";
+            return nullptr;
+        }
+        auto* pipeline     = new Pipeline();
+        pipeline->spec     = spec;
+        pipeline->compute  = Module(context_->Device(), spec.compute.data(), spec.compute.size());
+        const VkPipeline made = pipeline->compute ? MakeCompute(*pipeline) : VK_NULL_HANDLE;
+        if (!made)
+        {
+            why = pipeline->compute ? "the device refused the pipeline (its program; the log may say more)" : "the device refused its SPIR-V";
+            if (pipeline->compute) vkDestroyShaderModule(context_->Device(), pipeline->compute, nullptr);
+            delete pipeline;
+            return nullptr;
+        }
+        pipeline->variants.emplace(0, made);
+        ++stats_.variants;
+        pipelines_.push_back(pipeline);
+        stats_.pipelines = pipelines_.size();
+        return pipeline;
+    }
+
+    VkPipeline Render::MakeCompute(const Pipeline& pipeline) const
+    {
+        VkComputePipelineCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        info.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        info.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module = pipeline.compute;
+        info.stage.pName  = "main";
+        info.layout       = compute_layout_;
+        VkPipeline made = VK_NULL_HANDLE;
+        const VkResult result = vkCreateComputePipelines(context_->Device(), renderer_->PipelineCache().CacheHandle(), 1, &info, nullptr, &made);
+        if (result != VK_SUCCESS)
+        {
+            Log(LogLevel::Warn, "wxl.render: vkCreateComputePipelines (%s): %s", pipeline.spec.name.empty() ? "a mod's pipeline" : pipeline.spec.name.c_str(),
+                ResultName(result));
+            return VK_NULL_HANDLE;
+        }
+        return made;
+    }
+
     void Render::DestroyPipeline(Pipeline* pipeline)
     {
         auto at = std::find(pipelines_.begin(), pipelines_.end(), pipeline);
@@ -796,10 +873,12 @@ namespace wxl::vk::render
             const VkDevice       device   = context_->Device();
             const VkShaderModule vertex   = pipeline->vertex;
             const VkShaderModule fragment = pipeline->fragment;
+            const VkShaderModule compute  = pipeline->compute;
             Bury([=]() {
                 for (VkPipeline p : variants) vkDestroyPipeline(device, p, nullptr);
                 if (vertex) vkDestroyShaderModule(device, vertex, nullptr);
                 if (fragment) vkDestroyShaderModule(device, fragment, nullptr);
+                if (compute) vkDestroyShaderModule(device, compute, nullptr);
             });
         }
         if (bound_ && pipeline->variants.size())
@@ -1163,7 +1242,8 @@ namespace wxl::vk::render
     bool Render::Draw(Pipeline* pipeline, uint32_t vertices, uint32_t instances, const void* push, uint32_t size)
     {
         VkPipeline made = VK_NULL_HANDLE;
-        if (!PreparePush(pipeline, made) || pipeline->spec.kind == kBatch || size > kPushBytes) return ++stats_.refused, false;
+        if (!PreparePush(pipeline, made) || pipeline->spec.kind == kBatch || pipeline->spec.kind == kCompute || size > kPushBytes)
+            return ++stats_.refused, false;
         made = VariantOf(pipeline, nullptr);
         if (!made) return ++stats_.refused, false;
         const VkCommandBuffer cmd = display_->Cmd();
@@ -1187,7 +1267,11 @@ namespace wxl::vk::render
         if (!made) return ++stats_.refused, false;
         const VkCommandBuffer cmd = display_->Cmd();
         if (made != bound_) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bound_ = made);
-        if (indices->buffer.buffer != bound_index_) vkCmdBindIndexBuffer(cmd, bound_index_ = indices->buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+        if (indices->buffer.buffer != bound_index_ || !bound_index32_)
+        {
+            vkCmdBindIndexBuffer(cmd, bound_index_ = indices->buffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+            bound_index32_ = true;
+        }
         vkCmdSetCullMode(cmd, CullOf(pipeline->spec.cull));
         vkCmdSetPrimitiveTopology(cmd, OwnTopology(pipeline->spec.topology));
         PushOwn(push, size);
@@ -1213,6 +1297,14 @@ namespace wxl::vk::render
         shaders::Push push = batch.push;
         VkDeviceAddress address = 0;
         if (!renderer_->FrameData(constants, size, address)) return ++stats_.refused, false;
+        // A palette the batch read at the pixel registers' place moves to Push::data: the mod's
+        // constants take that place, and the mod's program reads no DrawData.
+        if (push.flags & shaders::kFlagPaletteAtPixel)
+        {
+            push.data[0] = push.pixel[0];
+            push.data[1] = push.pixel[1];
+            push.flags &= ~shaders::kFlagPaletteAtPixel;
+        }
         push.pixel[0] = static_cast<uint32_t>(address);
         push.pixel[1] = static_cast<uint32_t>(address >> 32);
 
@@ -1223,10 +1315,11 @@ namespace wxl::vk::render
         const VkBuffer     zero   = renderer_->ZeroBuffer();
         const VkDeviceSize origin = 0;
         vkCmdBindVertexBuffers(cmd, draw::Renderer::kZeroBinding, 1, &zero, &origin);
-        if (batch.indexed && batch.index != bound_index_)
+        if (batch.indexed && (batch.index != bound_index_ || batch.index32 != bound_index32_))
         {
-            vkCmdBindIndexBuffer(cmd, batch.index, 0, VK_INDEX_TYPE_UINT16);
-            bound_index_ = batch.index;
+            vkCmdBindIndexBuffer(cmd, batch.index, 0, batch.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+            bound_index_   = batch.index;
+            bound_index32_ = batch.index32;
         }
         // Where the client drew it on the scene, scaled to the pass, moved by D3D9's half pixel as
         // the client's draws are.
@@ -1252,6 +1345,66 @@ namespace wxl::vk::render
         vkCmdSetViewport(cmd, 0, 1, &whole);
         ++stats_.draws;
         ++stats_.batches;
+        return true;
+    }
+
+    // --- Compute -----------------------------------------------------------------------------------------
+
+    bool Render::Dispatch(Pipeline* pipeline, uint32_t x, uint32_t y, uint32_t z, const void* push, uint32_t size, std::string* why)
+    {
+        auto refuse = [&](const char* text) {
+            if (why) *why = text;
+            ++stats_.refused;
+            return false;
+        };
+        if (!renderer_ || !display_->InFrame()) return refuse("no frame is open");
+        if (pass_open_) return refuse("a pass is open: end it first");
+        if (!pipeline || pipeline->spec.kind != kCompute) return refuse("the pipeline is no compute pipeline");
+        if (size > kPushBytes) return refuse("push constants are 128 bytes at most");
+        const uint32_t* most = context_->Properties().limits.maxComputeWorkGroupCount;
+        if (x > most[0] || y > most[1] || z > most[2]) return refuse("more workgroups than the device dispatches at once");
+        const auto found = pipeline->variants.find(0);
+        VkPipeline made  = found != pipeline->variants.end() ? found->second : VK_NULL_HANDLE;
+        if (!made && pipeline->compute)
+        {
+            // The pipeline of a device made again since: compiled now, once.
+            const auto   begin = Clock::now();
+            made               = MakeCompute(*pipeline);
+            ++stats_.stalls;
+            stats_.stall_ms += std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+            if (made)
+            {
+                pipeline->variants.emplace(0, made);
+                ++stats_.variants;
+            }
+        }
+        if (!made) return refuse("the pipeline could not be made on this device");
+
+        // The engine's rendering ends; what the frame drew and wrote before is seen by the program,
+        // and what the program writes by everything after it.
+        display_->EndRendering();
+        const VkCommandBuffer cmd = display_->Cmd();
+        MemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, made);
+        const VkDescriptorSet set = renderer_->Table().Set();
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout_, 0, 1, &set, 0, nullptr);
+        uint8_t block[kPushBytes] = {};
+        if (push && size) std::memcpy(block, push, size);
+        vkCmdPushConstants(cmd, compute_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, kPushBytes, block);
+        if (x && y && z) vkCmdDispatch(cmd, x, y, z);
+        MemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                      VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        ++stats_.dispatches;
+        return true;
+    }
+
+    bool Render::BonePalette(const float* rows, uint32_t count, VkDeviceAddress& address)
+    {
+        address = 0;
+        if (!renderer_ || !rows || !count || count > kPaletteBytes / 48u) return false;
+        if (!renderer_->FrameData(rows, count * 48u, address)) return false;
+        ++stats_.palettes;
         return true;
     }
 

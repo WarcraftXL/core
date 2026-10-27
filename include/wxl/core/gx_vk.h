@@ -38,6 +38,19 @@ enum
     WXL_GX_API_VULKAN = 6, ///< appended to the client's EGxApi after GxApi_GLL
 };
 
+/**
+ * The caps of the recompiled client's own, which device_caps writes into words of CGxCaps the
+ * stock layout leaves unused (m_caps.unused_0114[i], i below); the D3D9 devices leave them zero.
+ */
+enum
+{
+    /// The bones a bone palette holds (GxBonePaletteSet, bone_palette below); 0: the device has
+    /// none, and the bones go through the vertex registers from c31.
+    WXL_GX_VK_CAP_BONE_PALETTE = 0,
+    /// 1: index pools of 32-bit indices (GxPoolTarget_Index32, the pool's m_target 2).
+    WXL_GX_VK_CAP_INDEX32 = 1,
+};
+
 /// What a frame came to (scene_begin, scene_present).
 enum
 {
@@ -225,6 +238,15 @@ typedef struct wxl_gx_vk_backend
     /// (bit 0, one sample, always), for the formats the client offers (gxMultisample). A format
     /// asking for a count the device lacks gets the most it has below it.
     uint32_t(WXL_CALL* sample_counts)(void* device);
+
+    /**
+     * @brief The engine's bone palette (GxBonePaletteSet): @p count bones (at most the caps'
+     *        WXL_GX_VK_CAP_BONE_PALETTE), each a C34Matrix of 12 floats (a0 a1 a2 b0 b1 b2 c0 c1 c2
+     *        d0 d1 d2). The skinned vertex programs of the draws after it read bone i there, in
+     *        the place of the registers c31 + 3i to c33 + 3i (the rows (a0 b0 c0 d0), (a1 b1 c1
+     *        d1), (a2 b2 c2 d2)). It stays until the next one.
+     */
+    void(WXL_CALL* bone_palette)(void* device, const float* bones, uint32_t count);
 } wxl_gx_vk_backend;
 
 /// The renderer's table; never null from a runtime that exports it.

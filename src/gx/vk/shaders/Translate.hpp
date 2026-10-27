@@ -37,7 +37,7 @@
 namespace wxl::vk::shaders
 {
     /// Bumped whenever the translator's output changes: a cache keyed with it drops older modules.
-    constexpr uint32_t kTranslatorVersion = 2;
+    constexpr uint32_t kTranslatorVersion = 3;
 
     struct Options
     {
@@ -51,7 +51,10 @@ namespace wxl::vk::shaders
         uint8_t  major = 0;
         uint8_t  minor = 0;
         uint32_t inputs = 0;      ///< a vertex program: the attribute locations it reads (a bit each)
-        uint32_t const_rows = 0;  ///< the register rows it reads from the engine's file (256 with a0/aL indexing)
+        uint32_t const_rows = 0;  ///< the register rows it reads from the engine's file (256 with a0/aL indexing, bones aside)
+        /// A vertex program reading bones (c31..c33 through a0): from the draw's palette when it has
+        /// one, else from the register file, all 256 rows of it.
+        bool     palette = false;
         uint32_t samplers = 0;    ///< the stages it samples (a bit each)
         uint32_t cube = 0;        ///< of those, the ones sampled as cube maps
         bool     fixed_fog = false; ///< a pixel program below ps_3_0: D3D9's fog applies after it

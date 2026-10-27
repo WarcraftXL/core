@@ -13,7 +13,10 @@
 //   Buffer    device memory read by address (and as 32-bit indices); written through the frame's
 //             upload pass, which waits for the frames before it to have read it
 //   Pipeline  the mod's SPIR-V and its state; a variant per target (formats, samples) and, for a
-//             batch program, per engine vertex program and layout, made on first use
+//             batch program, per engine vertex program and layout, made on first use; a compute
+//             pipeline is one program, dispatched between passes
+//   a palette bones (or any rows) of the caller's in the frame's ring, read by address until the
+//             frame completes
 //   a pass    a rendering of the caller's own (Display::BeginOwnRendering): the engine's rendering
 //             ends, the pass draws, the engine's next draw opens its own again
 //   a batch   draw::Batch: an engine draw kept by the renderer, drawn again with a batch program
@@ -46,6 +49,7 @@ namespace wxl::vk::render
         kGraphics   = 0,
         kFullscreen = 1,
         kBatch      = 2,
+        kCompute    = 3,
     };
     enum BlendMode : uint32_t
     {
@@ -71,6 +75,8 @@ namespace wxl::vk::render
     constexpr uint32_t kPushBytes  = 128;
     constexpr uint32_t kBatchBytes = 4096;
     constexpr uint32_t kNoSlot     = 0xFFFFFFFFu;
+    /// The bytes of a bone palette a mod hands over at once (BonePalette).
+    constexpr uint32_t kPaletteBytes = 16u << 20;
 
     /// The VkFormat of a Format; UNDEFINED for a number that is none.
     VkFormat FormatOf(uint32_t format);
@@ -121,7 +127,8 @@ namespace wxl::vk::render
         uint32_t              kind = kGraphics;
         std::string           name;
         std::vector<uint32_t> vertex;   ///< SPIR-V words (GRAPHICS)
-        std::vector<uint32_t> fragment;
+        std::vector<uint32_t> fragment; ///< (GRAPHICS, FULLSCREEN, BATCH)
+        std::vector<uint32_t> compute;  ///< (COMPUTE)
         uint32_t              color_count = 1;
         uint32_t              color_formats[kMaxColors] = {kBgra8};
         uint32_t              depth_format = 0;
@@ -138,7 +145,8 @@ namespace wxl::vk::render
         PipelineSpec   spec;
         VkShaderModule vertex = VK_NULL_HANDLE;
         VkShaderModule fragment = VK_NULL_HANDLE;
-        std::unordered_map<uint64_t, VkPipeline> variants; ///< by target, and engine program for a batch
+        VkShaderModule compute = VK_NULL_HANDLE;
+        std::unordered_map<uint64_t, VkPipeline> variants; ///< by target, and engine program for a batch; a compute one's at 0
         bool           said = false; ///< a refusal was logged
     };
 
@@ -175,6 +183,8 @@ namespace wxl::vk::render
             uint64_t passes = 0;        ///< passes opened
             uint64_t draws = 0;         ///< the mods' draws recorded, batches included
             uint64_t batches = 0;       ///< of those, batches drawn again
+            uint64_t dispatches = 0;    ///< compute dispatches recorded
+            uint64_t palettes = 0;      ///< bone palettes written into frames
             uint64_t refused = 0;       ///< draws refused (no pass, a wrong target, no pipeline, a stale batch)
             uint64_t variants = 0;      ///< pipelines made
             uint64_t stalls = 0;        ///< variants made at a draw
@@ -245,6 +255,21 @@ namespace wxl::vk::render
         /// @p batch drawn again with a batch pipeline, @p constants at pc.pixelRegs. False for a
         /// batch of another frame, a pipeline of another kind, or without a pass.
         bool DrawBatch(const draw::Batch& batch, Pipeline* pipeline, const void* constants, uint32_t size);
+        /**
+         * @brief A compute pipeline over @p x x @p y x @p z workgroups, @p push (up to 128 bytes) as
+         *        its push constants, outside a pass: the engine's rendering ends for it. What it
+         *        writes through buffer addresses is seen by every draw and dispatch after it. False
+         *        with @p why outside a frame, inside a pass, or for another kind of pipeline.
+         */
+        bool Dispatch(Pipeline* pipeline, uint32_t x, uint32_t y, uint32_t z, const void* push, uint32_t size, std::string* why = nullptr);
+        /// Whether the device's queue runs compute programs.
+        bool Computes() const { return compute_layout_ != VK_NULL_HANDLE; }
+        /**
+         * @brief @p count matrices of 12 floats (three vec4 rows each, as the caller's programs read
+         *        them) written into the open frame: their @p address, read until the frame
+         *        completes. False outside a frame, for none, or past kPaletteBytes.
+         */
+        bool BonePalette(const float* rows, uint32_t count, VkDeviceAddress& address);
 
         /// The scene's colour (resolved) and depth (its first sample) as drawn so far, copied for
         /// sampling: their slots, kNoSlot outside a frame or inside a pass. One copy per @p epoch
@@ -278,6 +303,8 @@ namespace wxl::vk::render
         VkPipeline VariantOf(Pipeline* pipeline, const draw::Batch* batch);
         VkPipeline Make(const Pipeline& pipeline, const draw::Batch* batch, const VkFormat* colors, uint32_t color_count, VkFormat depth,
                         VkSampleCountFlagBits samples) const;
+        Pipeline*  CreateCompute(const PipelineSpec& spec, std::string& why);
+        VkPipeline MakeCompute(const Pipeline& pipeline) const;
         void       Bury(std::function<void()> release);
         void       Collect();
         bool       PreparePush(Pipeline* pipeline, VkPipeline& bound);
@@ -293,6 +320,7 @@ namespace wxl::vk::render
         present::Display*     display_ = nullptr;
         draw::Renderer*       renderer_ = nullptr;
         VkShaderModule        fullscreen_ = VK_NULL_HANDLE;
+        VkPipelineLayout      compute_layout_ = VK_NULL_HANDLE; ///< the bindless set and 128 bytes of push constants
         bool                  releasing_ = false; ///< Release runs: what is given back goes at once
         std::unordered_map<std::string, uint32_t> targets_;
 
@@ -325,6 +353,7 @@ namespace wxl::vk::render
         uint64_t         pass_key_ = 0;
         VkPipeline       bound_ = VK_NULL_HANDLE;
         VkBuffer         bound_index_ = VK_NULL_HANDLE;
+        bool             bound_index32_ = false;
 
         // Copies of the scene for sampling.
         Image            scene_color_{};

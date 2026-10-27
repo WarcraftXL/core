@@ -318,7 +318,12 @@ namespace wxl::vk::shaders::dx9
             {
             case Reg::Temp: out.temps = std::max(out.temps, o.index + 1); break;
             case Reg::Const:
-                if (o.relative) out.relative_const = true;
+                if (o.relative)
+                {
+                    // The bones of a skinned program (c31 + 3 * bone through a0) are the palette's to serve.
+                    if (!out.pixel && o.rel_type == Reg::Address && o.index >= 31 && o.index <= 33) out.relative_bones = true;
+                    else out.relative_const = true;
+                }
                 else if (!defined(Reg::Const, o.index)) out.const_rows = std::max(out.const_rows, o.index + 1);
                 break;
             case Reg::Address:

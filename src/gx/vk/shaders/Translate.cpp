@@ -133,6 +133,7 @@ namespace wxl::vk::shaders
             Id  FileRow(Id index);
             Id  ConstRead(const Operand& s, std::string& why);
             Id  RelativeIndex(const Operand& s, std::string& why);
+            Id  BoneRead(const Operand& s, std::string& why);
             bool Write(const Operand& d, Id value, std::string& why);
             const Definition* Defined(Reg type, uint32_t index) const;
             Id  DefConst(const Definition& d);
@@ -161,6 +162,12 @@ namespace wxl::vk::shaders
             Id flags_ = 0;
             Id regs_ = 0;          ///< the register file's pointer, loaded at the start
             Id row_pointer_ = 0;   ///< PhysicalStorageBuffer pointer to a vec4
+            // A program reading bones: where they are (the palette's address, else the register
+            // file's), what a0 + c# becomes there, and the last row a read may take.
+            Id palette_pointer_ = 0;
+            Id palette_address_ = 0;
+            Id palette_offset_ = 0;
+            Id palette_last_ = 0;
             Id images2d_ = 0, images_cube_ = 0, samplers_ = 0;
             Id point_coord_ = 0;
             // Registers, as local variables (or values computed once at the start).
@@ -227,6 +234,30 @@ namespace wxl::vk::shaders
             return Ext(GLSLstd450SClamp, i32_, {index, I(0), I(static_cast<int32_t>(kRegisterRows) - 1)});
         }
 
+        // A bone's row (c31..c33 through a0): row a0 + c# - 31 of the draw's palette when it has
+        // one, else the register file's row a0 + c#, as D3D9 reads it.
+        Id Writer::BoneRead(const Operand& s, std::string& why)
+        {
+            if (!a0_)
+            {
+                Fail(why, "a0 read where there is none");
+                return 0;
+            }
+            const Id base  = m_.Op(SpvOpIAdd, i32_, {m_.Op(SpvOpCompositeExtract, i32_, {Load(ivec4_, a0_), s.rel_component}),
+                                                     I(static_cast<int32_t>(s.index))});
+            const Id index = Ext(GLSLstd450SClamp, i32_, {m_.Op(SpvOpIAdd, i32_, {base, palette_offset_}), I(0), palette_last_});
+            const Id file  = m_.Op(SpvOpBitcast, palette_pointer_, {palette_address_});
+            const Id row   = m_.Op(SpvOpAccessChain, row_pointer_, {file, I(0), index});
+            Id v = m_.Op(SpvOpLoad, vec4_, {row, SpvMemoryAccessAlignedMask, 16});
+            for (const Definition& d : p_.definitions)
+            {
+                if (d.type != Reg::Const || d.index < s.index) continue;
+                const Id hit = m_.Op(SpvOpIEqual, bool_, {base, I(static_cast<int32_t>(d.index))});
+                v            = m_.Op(SpvOpSelect, vec4_, {hit, DefConst(d), v});
+            }
+            return v;
+        }
+
         Id Writer::ConstRead(const Operand& s, std::string& why)
         {
             if (!s.relative)
@@ -237,6 +268,8 @@ namespace wxl::vk::shaders
                 if (ps1_) v = Clamp(v, -1.0f, 1.0f);
                 return v;
             }
+            if (palette_pointer_ && !p_.pixel && s.rel_type == Reg::Address && s.index >= kPaletteBase && s.index < kPaletteBase + 3)
+                return BoneRead(s, why);
             const Id index = RelativeIndex(s, why);
             if (!index) return 0;
             Id v = FileRow(index);
@@ -1115,6 +1148,7 @@ namespace wxl::vk::shaders
             info_.major      = p_.major;
             info_.minor      = p_.minor;
             info_.const_rows = p_.relative_const ? kRegisterRows : p_.const_rows;
+            info_.palette    = !p_.pixel && p_.relative_bones;
             info_.fixed_fog  = p_.pixel && p_.major < 3;
             for (const Declaration& d : p_.declarations)
                 if (d.type == Reg::Sampler && d.texture == 3) info_.cube |= 1u << d.index;
@@ -1131,6 +1165,27 @@ namespace wxl::vk::shaders
                 row_pointer_          = m_.Pointer(SpvStorageClassPhysicalStorageBuffer, vec4_);
                 const Id address      = PushMember(p_.pixel ? kPushPixel : kPushVertex, uvec2_);
                 regs_                 = m_.Op(SpvOpBitcast, file_pointer, {address});
+            }
+            if (info_.palette)
+            {
+                // The bones' file: the palette (kPaletteRows rows at most) when the flags count its
+                // bones, at the address they name; else the register file, read from c31 as D3D9 reads it.
+                const Id rows = m_.Array(vec4_, kPaletteRows, 16);
+                const Id file = m_.Struct({rows});
+                m_.MemberDecorate(file, 0, SpvDecorationOffset, {0});
+                m_.Decorate(file, SpvDecorationBlock);
+                palette_pointer_ = m_.Pointer(SpvStorageClassPhysicalStorageBuffer, file);
+                if (!row_pointer_) row_pointer_ = m_.Pointer(SpvStorageClassPhysicalStorageBuffer, vec4_);
+                const Id bvec2  = m_.Vector(bool_, 2);
+                const Id bones  = m_.Op(SpvOpBitwiseAnd, u32_, {m_.Op(SpvOpShiftRightLogical, u32_, {flags_, U(kFlagBonesShift)}), U(kFlagBonesMask)});
+                const Id on     = m_.Op(SpvOpINotEqual, bool_, {bones, U(0)});
+                const Id pixel  = Flag(kFlagPaletteAtPixel);
+                const Id where  = m_.Op(SpvOpSelect, uvec2_, {m_.Op(SpvOpCompositeConstruct, bvec2, {pixel, pixel}), PushMember(kPushPixel, uvec2_),
+                                                              PushMember(kPushData, uvec2_)});
+                palette_address_ = m_.Op(SpvOpSelect, uvec2_, {m_.Op(SpvOpCompositeConstruct, bvec2, {on, on}), where, PushMember(kPushVertex, uvec2_)});
+                const Id last    = m_.Op(SpvOpISub, i32_, {m_.Op(SpvOpIMul, i32_, {m_.Op(SpvOpBitcast, i32_, {bones}), I(3)}), I(1)});
+                palette_last_    = m_.Op(SpvOpSelect, i32_, {on, last, I(static_cast<int32_t>(kRegisterRows) - 1)});
+                palette_offset_  = m_.Op(SpvOpSelect, i32_, {on, I(-static_cast<int32_t>(kPaletteBase)), I(0)});
             }
 
             if (!Prologue(why)) return false;

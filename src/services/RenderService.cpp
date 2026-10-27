@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -264,7 +265,10 @@ namespace
     {
         vkr::Render* r = Mods();
         if (!r || !desc || !OnGameThread("CreatePipeline")) return WXL_HANDLE_NONE;
-        if (desc->struct_size < sizeof(wxl_render_pipeline_desc))
+        // A description of abi 0.1.33 ends before `compute`.
+        constexpr uint32_t kFirstSize = static_cast<uint32_t>(offsetof(wxl_render_pipeline_desc, compute));
+        const bool         computes   = desc->struct_size >= sizeof(wxl_render_pipeline_desc);
+        if (desc->struct_size < kFirstSize)
         {
             WLOG_WARN(kRenderTag, "wxl.render: a pipeline description of %u bytes is shorter than the contract's", desc->struct_size);
             return WXL_HANDLE_NONE;
@@ -274,6 +278,7 @@ namespace
         spec.name        = desc->name ? desc->name : "";
         spec.vertex      = Words(desc->vertex, desc->vertex ? desc->vertex_size : 0);
         spec.fragment    = Words(desc->fragment, desc->fragment ? desc->fragment_size : 0);
+        if (computes) spec.compute = Words(desc->compute, desc->compute ? desc->compute_size : 0);
         spec.color_count = desc->color_count;
         for (uint32_t i = 0; i < WXL_RENDER_MAX_COLORS; ++i)
         {
@@ -374,6 +379,33 @@ namespace
         const wxl::vk::draw::Batch* b = BatchOf(batch);
         if (!p || !b || b->frame != Front()->Screen().FrameNumber()) return WXL_E_NOT_FOUND;
         return Drawn(g_in_point && r->DrawBatch(*b, p, constants, constants_size));
+    }
+
+    wxl_result WXL_CALL Dispatch(wxl_handle pipeline, uint32_t x, uint32_t y, uint32_t z, const void* push, uint32_t push_size)
+    {
+        vkr::Render* r = Mods();
+        if (!r) return WXL_E_UNSUPPORTED;
+        vkr::Pipeline* p = Find<vkr::Pipeline>(pipeline, Kind::Pipeline);
+        if (!p) return WXL_E_NOT_FOUND;
+        if (!g_in_point || !OnGameThread("Dispatch")) return WXL_E_INVALID;
+        std::string why;
+        if (r->Dispatch(p, x, y, z, push, push_size, &why)) return WXL_OK;
+        static bool said = false;
+        if (!said) WLOG_WARN(kRenderTag, "wxl.render: a dispatch was refused: %s", why.c_str());
+        said = true;
+        return WXL_E_INVALID;
+    }
+
+    wxl_result WXL_CALL BonePalette(const void* matrices, uint32_t size, uint64_t* address)
+    {
+        if (address) *address = 0;
+        vkr::Render* r = Mods();
+        if (!r) return WXL_E_UNSUPPORTED;
+        if (!matrices || !address || !size || size % WXL_RENDER_PALETTE_MATRIX_BYTES || !OnGameThread("BonePalette")) return WXL_E_INVALID;
+        VkDeviceAddress made = 0;
+        if (!r->BonePalette(static_cast<const float*>(matrices), size / WXL_RENDER_PALETTE_MATRIX_BYTES, made)) return WXL_E_INVALID;
+        *address = static_cast<uint64_t>(made);
+        return WXL_OK;
     }
 
     void* WXL_CALL KeepBatch(const void* batch)
@@ -592,6 +624,8 @@ namespace wxl::core::services
             t.scene_depth_slot    = &SceneDepthSlot;
             t.replace_shader      = &ReplaceShader;
             t.restore_shader      = &RestoreShader;
+            t.dispatch            = &Dispatch;
+            t.bone_palette        = &BonePalette;
             return t;
         }();
         return api;
