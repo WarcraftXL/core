@@ -27,6 +27,8 @@
 #include "services/WorldService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/AnimationService.hpp"
+#include "services/NetService.hpp"
+#include "net/Zlib.hpp"
 #include "services/PoseService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/SelectionCircleService.hpp"
@@ -1015,6 +1017,20 @@ namespace
     uint32_t WXL_CALL FakeMessageRead(const void* store)
     {
         return store ? static_cast<const FakeStore*>(store)->read : 0u;
+    }
+
+    /// What the fake client sent through net_send: the opcode as a u32 and the body.
+    std::vector<std::vector<uint8_t>>& NetSent()
+    {
+        static std::vector<std::vector<uint8_t>> sent;
+        return sent;
+    }
+
+    wxl_bool WXL_CALL FakeNetSend(const void* message, uint32_t size)
+    {
+        const uint8_t* at = static_cast<const uint8_t*>(message);
+        NetSent().emplace_back(at, at + size);
+        return WXL_TRUE;
     }
 
     /// A pending cast, as the spell rows read one.
@@ -2701,6 +2717,7 @@ namespace
         init.unit_animation_speed   = &FakeAnimationSpeed;
         init.unit_animation_length  = &FakeAnimationLength;
         init.unit_lift_local        = &FakeLiftLocal;
+        init.net_send               = &FakeNetSend;
         return init;
     }
 }
@@ -5179,6 +5196,198 @@ namespace
 
         g_host->Events().Unsubscribe(in);
         g_host->Events().Unsubscribe(out);
+    }
+
+    // --- wxl.net: claimed numbers through the ProcessMessage gate, sends behind the gate -------
+
+    /// What one handler of a claimed number was handed.
+    struct NetWatch
+    {
+        int                  calls  = 0;
+        uint32_t             opcode = 0;
+        std::vector<uint8_t> body;
+    };
+
+    void WXL_CALL OnNetMessage(void* user, uint32_t opcode, const void* data, uint32_t size)
+    {
+        NetWatch& watch = *static_cast<NetWatch*>(user);
+        ++watch.calls;
+        watch.opcode = opcode;
+        watch.body.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+    }
+
+    /// A message as a 3.3.5a world server puts it on the wire: the size of what follows (the
+    /// opcode included) in 2 bytes big-endian, or 3 with the high bit of the first set past
+    /// 0x7FFF, then the opcode as a u16 little-endian, then the body.
+    std::vector<uint8_t> ServerFrame(uint16_t opcode, const std::vector<uint8_t>& body)
+    {
+        const uint32_t       size = static_cast<uint32_t>(body.size()) + 2;
+        std::vector<uint8_t> frame;
+        if (size > 0x7FFF) frame.push_back(static_cast<uint8_t>(0x80 | (size >> 16)));
+        frame.push_back(static_cast<uint8_t>(size >> 8));
+        frame.push_back(static_cast<uint8_t>(size));
+        frame.push_back(static_cast<uint8_t>(opcode));
+        frame.push_back(static_cast<uint8_t>(opcode >> 8));
+        frame.insert(frame.end(), body.begin(), body.end());
+        return frame;
+    }
+
+    /// Reads a frame as WowConnection::DoMessageReads does (the header's size bytes, the high bit
+    /// for 3) and runs what NetClient::HandleData would: a CDataStore over what follows the
+    /// header, through the ProcessMessage gate. True when the gate took the call.
+    bool ReceiveFrame(const std::vector<uint8_t>& frame, int32_t* answer)
+    {
+        const bool     large  = (frame[0] & 0x80) != 0;
+        const uint32_t header = large ? 3u : 2u;
+        const uint32_t size   = large ? ((frame[0] & 0x7Fu) << 16 | frame[1] << 8 | frame[2]) : (frame[0] << 8 | frame[1]);
+        if (header + size != frame.size()) return false;
+        FakeStore store{ frame.data() + header, size, 0 };
+        void*     self    = reinterpret_cast<void*>(0x1000);
+        void*     message = &store;
+        uint32_t  when    = 1;
+        int32_t   unused  = 0;
+        return wxl::seam::NetClient::ProcessMessage::Gate(answer, &self, &when, &message, &unused);
+    }
+
+    std::vector<uint8_t> Bytes(std::initializer_list<uint8_t> bytes) { return std::vector<uint8_t>(bytes); }
+
+    void CheckNetOpcodes()
+    {
+        using namespace wxl::core::services;
+        constexpr wxl::host::ModHost::ModToken kMod = 41, kOther = 42;
+        const wxl_net_api& api = NetApi();
+        net::Clear();
+        NetSent().clear();
+        const wxl::host::ModHost::ModToken previous = g_host->SwapCurrentMod(kMod);
+
+        NetWatch updates, syncs;
+        Check(api.claim_opcode(0x521) == WXL_OK && api.claim_opcode(0x524) == WXL_OK &&
+                  api.claim_opcode(0x529) == WXL_OK && api.claim_opcode(0x52A) == WXL_OK &&
+                  api.claim_opcode(0x524) == WXL_OK,
+              "a mod claims numbers above 0x520, and its own again");
+        Check(api.set_handler(0x524, &OnNetMessage, &updates) == WXL_OK &&
+                  api.set_handler(0x529, &OnNetMessage, &syncs) == WXL_OK && api.set_compressed(0x529, 0x52A) == WXL_OK,
+              "it sets handlers, and pairs a compressed number with a plain one");
+        Check(api.set_handler(0x600, &OnNetMessage, &updates) == WXL_E_INVALID && api.set_compressed(0x529, 0x600) == WXL_E_INVALID,
+              "a handler or a pairing of a number it does not hold is refused");
+        Check(api.claim_opcode(0x10000) == WXL_E_INVALID && api.claim_opcode(0x100) == WXL_E_INVALID &&
+                  api.claim_opcode(0x520) == WXL_E_INVALID,
+              "a number past 0xFFFF, and the client's own without stock, are refused");
+        Check(api.reserved_opcode_limit() == 0x520 && api.max_send() == 10000, "the limit and the largest body");
+
+        g_host->SwapCurrentMod(kOther);
+        Check(api.claim_opcode(0x524) == WXL_E_INVALID && api.release_opcode(0x524) == WXL_E_NOT_FOUND &&
+                  api.send(0x521, "x", 1) == WXL_E_INVALID,
+              "another mod can neither claim, release nor send a held number");
+        g_host->SwapCurrentMod(kMod);
+
+        const uint8_t seq[4] = {1, 0, 0, 0};
+        Check(api.state() == WXL_NET_OFFLINE && api.connection() == 0 && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "offline: no connection, nothing sent");
+        wxl::seam::NetClient::HandleConnect::After(1, nullptr);
+        const uint32_t first = api.connection();
+        Check(api.state() == WXL_NET_CONNECTED && first != 0 && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "connected but not accepted: nothing sent");
+
+        // The client's own SMSG_AUTH_RESPONSE (0x1EE), AUTH_OK (0x0C): the session is accepted.
+        int32_t answer = -1;
+        Check(!ReceiveFrame(ServerFrame(0x1EE, Bytes({0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})), &answer) &&
+                  api.state() == WXL_NET_AUTHENTICATED,
+              "the client's own answer goes to its dispatch, and accepts the session");
+        Check(api.send(0x521, seq, 4) == WXL_E_FAILED && api.heard() == WXL_FALSE,
+              "the send gate: nothing of the mod's goes out before its server speaks");
+
+        MessageWatch observed;
+        const wxl_subscription watch = g_host->Events().Subscribe(WXL_EV_MessageReceived, &OnMessage, &observed, 0);
+        // SMSG 0x524: a packed guid, a u32, a float.
+        const std::vector<uint8_t> update = Bytes({0x03, 0x05, 0x01, 0x2A, 0, 0, 0, 0, 0, 0x20, 0x40});
+        answer                           = -1;
+        Check(ReceiveFrame(ServerFrame(0x524, update), &answer) && answer == 0,
+              "a claimed number past the client's 0x51F handlers stops at the gate");
+        Check(observed.calls == 1 && observed.opcode == 0x524, "MessageReceived saw it first");
+        Check(updates.calls == 1 && updates.opcode == 0x524 && updates.body == update,
+              "its handler gets the body, byte for byte");
+        Check(api.heard() == WXL_TRUE, "and the mod's gate opens");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.heard() == WXL_FALSE, "for that mod alone");
+        g_host->SwapCurrentMod(kMod);
+
+        Check(api.send(0x521, seq, 4) == WXL_OK && NetSent().size() == 1 &&
+                  NetSent().back() == Bytes({0x21, 0x05, 0, 0, 1, 0, 0, 0}),
+              "the mod sends: the client is handed the opcode as a u32 and the body");
+        Check(api.send(0x521, nullptr, 0) == WXL_OK && NetSent().back() == Bytes({0x21, 0x05, 0, 0}),
+              "an empty body is the opcode alone");
+        std::vector<uint8_t> big(10001, 0x55);
+        Check(api.send(0x521, big.data(), 10001) == WXL_E_INVALID && api.send(0x521, big.data(), 10000) == WXL_OK,
+              "a body is at most 10000 bytes");
+        // Counted by the second: a run that crosses into the next one counts again from there.
+        int        sent = 3;
+        wxl_result last = WXL_OK;
+        while (sent < 200 && (last = api.send(0x521, seq, 4)) == WXL_OK) ++sent;
+        Check(last == WXL_E_BUSY && sent >= 64 && sent <= 128, "past 64 messages of a number in a second, busy");
+
+        // SMSG 0x52A: a u32 size and a zlib stream, inflated and handed to 0x529's handler.
+        std::vector<uint8_t> payload(40000);
+        for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i % 7 + i / 1000);
+        std::vector<uint8_t> stream;
+        Check(wxl::core::zlib::Deflate(payload.data(), payload.size(), stream) && stream.size() < payload.size(),
+              "the runtime's deflate compresses");
+        std::vector<uint8_t> packed(4);
+        const uint32_t       length = static_cast<uint32_t>(payload.size());
+        std::memcpy(packed.data(), &length, 4);
+        packed.insert(packed.end(), stream.begin(), stream.end());
+        Check(ReceiveFrame(ServerFrame(0x52A, packed), &answer) && syncs.calls == 1 && syncs.opcode == 0x529 &&
+                  syncs.body == payload,
+              "a compressed message is inflated and handed to the plain number's handler as one of it");
+        // The same, raw, past 0x7FFF: the server's 3-byte header.
+        Check(ReceiveFrame(ServerFrame(0x529, payload), &answer) && syncs.calls == 2 && syncs.body == payload,
+              "a message past 0x7FFF bytes comes with the 3-byte header and arrives whole");
+        std::vector<uint8_t> lying = packed;
+        const uint32_t       more  = length + 1;
+        std::memcpy(lying.data(), &more, 4);
+        Check(ReceiveFrame(ServerFrame(0x52A, lying), &answer) && syncs.calls == 2,
+              "a stream that does not inflate to its size is dropped");
+        std::vector<uint8_t> huge(4 + 8);
+        const uint32_t       tooBig = WXL_NET_MAX_INFLATED + 1;
+        std::memcpy(huge.data(), &tooBig, 4);
+        Check(ReceiveFrame(ServerFrame(0x52A, huge), &answer) && syncs.calls == 2, "and so is one past 8 MB");
+
+        uint64_t got = 0;
+        std::vector<uint8_t> roundOut(payload.size());
+        Check(api.deflate(payload.data(), length, nullptr, 0, &got) == WXL_E_INVALID && got > 0 && got < payload.size(),
+              "deflate with no room says the room it needs");
+        std::vector<uint8_t> zipped(static_cast<size_t>(got));
+        Check(api.deflate(payload.data(), length, zipped.data(), got, &got) == WXL_OK &&
+                  api.inflate(zipped.data(), static_cast<uint32_t>(got), roundOut.data(), roundOut.size(), &got) == WXL_OK &&
+                  got == payload.size() && roundOut == payload,
+              "deflate and inflate go round");
+        Check(api.inflate("junk", 4, roundOut.data(), roundOut.size(), &got) == WXL_E_INVALID && got == 0,
+              "inflate refuses what is not zlib");
+
+        // A number nobody claimed past 0x51F is left to the client, which drops it.
+        Check(!ReceiveFrame(ServerFrame(0x600, Bytes({1})), &answer), "an unclaimed number goes to the client's dispatch");
+        // A MessageReceived handler that suppresses one stops it before the mod's handler.
+        observed.stop = true;
+        Check(ReceiveFrame(ServerFrame(0x524, update), &answer) && updates.calls == 1,
+              "a suppressing observer stops the message before the mod's handler");
+        observed.stop = false;
+        g_host->Events().Unsubscribe(watch);
+
+        wxl::seam::NetClient::HandleDisconnect::Before(nullptr);
+        Check(api.state() == WXL_NET_OFFLINE && api.connection() == 0 && api.heard() == WXL_FALSE &&
+                  api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "a disconnect closes every gate");
+        wxl::seam::NetClient::HandleConnect::After(1, nullptr);
+        ReceiveFrame(ServerFrame(0x1EE, Bytes({0x0C})), &answer);
+        Check(api.connection() != first && api.state() == WXL_NET_AUTHENTICATED && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "a new connection is a new number, and the gate stays closed until the server speaks again");
+
+        net::ForgetMod(kMod);
+        g_host->SwapCurrentMod(kOther);
+        Check(api.claim_opcode(0x524) == WXL_OK && !ReceiveFrame(ServerFrame(0x529, Bytes({1})), &answer),
+              "a mod that goes gives its numbers back");
+        g_host->SwapCurrentMod(previous);
+        net::Clear();
     }
 
     // --- Input: a gate that can answer a window message in the client's place -----------------
@@ -15387,6 +15596,7 @@ int main(int argc, char** argv)
     CheckCode();
     CheckFrameScript();
     CheckNetClient();
+    CheckNetOpcodes();
     CheckNetConnection();
     CheckClientError();
     CheckClientDestroy();

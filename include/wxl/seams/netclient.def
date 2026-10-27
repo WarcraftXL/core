@@ -26,8 +26,9 @@
 // caller is HandleData, which builds the CDataStore over the received bytes on its stack and
 // throws away both the store and this result; so a Gate that takes the call need only
 // answer 0, and may leave the store untouched. Gate raises MessageReceived and takes the
-// call when a handler suppressed it, which is how a mod serves an opcode the client does not
-// know.
+// call when a handler suppressed it, or when the opcode is one a mod claimed through wxl.net,
+// which then hands it to that mod's handler: the client's own dispatch drops every opcode from
+// 0x51F on (`cmp esi, 0x51f; jge` at 0x0063200B, past its table of 0x51F handlers).
 WXL_SEAM_GATE(NetClient, ProcessMessage, "NetClient::ProcessMessage", int32_t, thiscall, (void* self, uint32_t time_received, void* message, int32_t unused))
 WXL_SEAM_RAISES(NetClient, ProcessMessage, MessageReceived)
 
@@ -39,13 +40,14 @@ WXL_SEAM_RAISES(NetClient, Send, MessageSent)
 
 // Takes the connection to the world server up, on the main thread: the event queue drains
 // it from the client's own loop, not from the socket's thread. After raises Connected, once
-// the client has moved itself into the connected state.
+// the client has moved itself into the connected state, and counts a new connection for
+// wxl.net, every mod's send gate closed.
 WXL_SEAM_AFTER(NetClient, HandleConnect, "NetClient::HandleConnect", int32_t, thiscall, (void* self))
 WXL_SEAM_RAISES(NetClient, HandleConnect, Connected)
 
 // Takes it down again, from the same queue. Before raises Disconnected, while the client
 // still believes it is connected, so a handler sees the world as it was rather than as the
-// teardown has already left it.
+// teardown has already left it; then wxl.net forgets the connection.
 WXL_SEAM_BEFORE(NetClient, HandleDisconnect, "NetClient::HandleDisconnect", int32_t, thiscall, (void* self))
 WXL_SEAM_RAISES(NetClient, HandleDisconnect, Disconnected)
 

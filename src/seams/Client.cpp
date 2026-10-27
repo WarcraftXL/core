@@ -32,6 +32,7 @@
 #include "services/DrawService.hpp"
 #include "services/M2Service.hpp"
 #include "services/Hashes.hpp"
+#include "services/NetService.hpp"
 #include "services/RelayService.hpp"
 #include "services/StorageService.hpp"
 
@@ -61,6 +62,7 @@ namespace wxl::seam::Client::Destroy
         wxl::core::services::storage::CloseEverything();
         wxl::core::services::hashes::Stop();
         wxl::core::services::relay::Clear();
+        wxl::core::services::net::Clear();
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::data::Clear();
         wxl::core::services::m2::Clear();

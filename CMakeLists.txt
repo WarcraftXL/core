@@ -246,6 +246,9 @@ set(WXL_CORE_SESSION_SOURCES
 # check the very code the runtime links.
 add_library(wxl-core-imaging STATIC src/imaging/Svg.cpp src/imaging/Image.cpp)
 target_include_directories(wxl-core-imaging PUBLIC src PRIVATE deps/nanosvg deps/stb)
+# wxl.net's zlib streams: stb_image's inflater and stb_image_write's deflater, in one source file
+# the runtime and the harness compile.
+set_source_files_properties(src/net/Zlib.cpp PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/deps/stb")
 
 add_library(wxl-core SHARED
     src/runtime/Core.cpp
@@ -282,6 +285,8 @@ add_library(wxl-core SHARED
     src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
+    src/services/NetService.cpp
+    src/net/Zlib.cpp
     src/services/ImGuiService.cpp
     src/tuning/Animate.cpp
     src/tuning/Drops.cpp
@@ -345,6 +350,8 @@ add_executable(wxl-core-seam-harness
     src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
+    src/services/NetService.cpp
+    src/net/Zlib.cpp
     src/services/ImGuiService.cpp
     src/tuning/Animate.cpp
     src/tuning/Drops.cpp

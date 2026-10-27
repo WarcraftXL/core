@@ -556,6 +556,42 @@ pass]`) and checks nothing: an MCNK naming more is written past the array. As a 
 (`MapArea.AsyncCallback` Before) every MCNK naming more than 4 is set to its first 4
 (`terrain_layers::TileLoading`); the other layers stay in the file for a mod.
 
+### Messages of a mod's own
+
+`wxl.net` (`src/services/NetService.cpp`) lets a mod claim opcode numbers and speak them with a
+server module, one opcode per action, as the game does.
+
+```
+server's message (2 or 3 bytes of size, big-endian; u16 opcode; body -- only size and opcode
+                  encrypted)
+  -> WowConnection::DoMessageReads, NetClient::WCMessageReady (network thread: no range check,
+     five opcodes of the connection's own answered there), queued
+  -> NetClient::HandleData (main thread), a CDataStore over opcode and body
+  -> NetClient.ProcessMessage gate     src/seams/NetClient.cpp: MessageReceived, then
+     net::Receive                      a claimed number: the mod's gate opens, a compressed one is
+                                       inflated (u32 size + zlib, src/net/Zlib.cpp), the handler of
+                                       the plain number runs as its mod; the call is taken
+  -> the client's dispatch             what no mod claimed: m_handlers[0x51F], anything from 0x51F
+                                       on dropped (`cmp esi, 0x51f; jge`, 0x0063200B)
+
+mod's send(op, body)
+  -> NetService Send                   claimed, <= 10000 bytes, authenticated, the gate open (op >
+                                       0x520), under 64 a second
+  -> binding net_send                  x86: CDataStore::CDataStore(data, size) over [u32 op][body],
+                                       ClientServices::Send2; x64: the same in the fork
+  -> NetClient::Send (the Send gate: MessageSent), WowConnection::SendPacket (2 bytes of size,
+     the u32 opcode; the 6 bytes encrypted)
+```
+
+The state follows the connection seams (`HandleConnect` after: connected, a new connection
+number, every gate closed; `HandleDisconnect` before: offline) and the client's own
+`SMSG_AUTH_RESPONSE` (`AUTH_OK`: authenticated). Claims are checked against the claiming mod's
+manifest (`ModHost::ManifestOf`, the loading mod's too) and against every manifest's declarations
+(`ModHost::Opcodes`, made by `host::DeclareOpcodes` in the host's load order, which also takes out
+a mod declaring a number an earlier one declared). wxl.lua claims for its Lua mods: its manifest
+says `"stock": true`, a Lua mod's declared numbers are served by it, and its shims keep each Lua
+mod's numbers and send gate apart (`sdk/lua/src/Shims.cpp`).
+
 ### Shapes in the world
 
 `wxl.draw` (`src/services/DrawService.cpp`) keeps the shapes mods draw, by mod: immediate ones (built

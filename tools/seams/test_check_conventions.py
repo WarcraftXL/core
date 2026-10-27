@@ -1124,6 +1124,12 @@ GROUND_TRUTH = {
     "AnimCall.GetCurrentTorsoAnimId":  ("0x00717260", "thiscall", ["ecx"], 0),
     "AnimCall.SetKeyBoneSequenceSpeed": ("0x00735CC0", "thiscall", ["ecx"], 4),
     "AnimCall.GetBoneSequenceId":      ("0x008267E0", "thiscall", ["ecx"], 1),
+    # wxl.net's calls (calls_x86.def), read by hand: CDataStore::CDataStore(data, size) moves ECX
+    # to EAX (0x004669A6), reads [ebp+8] and [ebp+0xc] (0x004669A8, 0x004669A3) and ends `ret 8`
+    # (0x004669C7); ClientServices::Send2 reads its message at [ebp+8] (0x006B0B5D), hands it to
+    # NetClient::Send with s_currentConnection in ECX, and ends in a bare `ret` (0x006B0B67).
+    "NetCall.StoreOver":               ("0x004669A0", "thiscall", ["ecx"], 2),
+    "NetCall.Send2":                   ("0x006B0B50", "cdecl", [], 1),
     # wxl.cvar's calls (calls_x86.def), read by hand: Lookup reads its name at [ebp+8]
     # (0x00767443) and ends in bare `ret`s (0x00767456); Register reads up to its ninth dword
     # at [ebp+0x28] (0x00768068) and ends in bare `ret`s (0x00768085, 0x007681E0); Set moves ECX
