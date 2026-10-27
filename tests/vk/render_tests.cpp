@@ -25,6 +25,13 @@
 #include <spirv-tools/libspirv.hpp>
 #endif
 
+namespace wxl::vk::test
+{
+    // Client programs of the V3 cases (draw_tests.cpp): the position through c0..c3, the colour times c4.
+    std::vector<uint8_t> WorldVs();
+    std::vector<uint8_t> WorldPs();
+}
+
 namespace
 {
     namespace render = wxl::vk::render;
@@ -536,9 +543,10 @@ namespace
             }
         // Multisampled masks are resolved (edges averaged) on both devices; the reference has one
         // sample, so only the one-sample picture is held to it pixel by pixel.
-        std::printf("  highlight at %u sample(s) against the Direct3D 9 algorithm: worst channel %u, %u channels off by more than 2\n",
-                    samples, worst, off);
-        if (samples == 1)
+        // The scene's samples are chosen at the first frame: the most the device draws, up to those asked.
+        std::printf("  highlight at %u sample(s) (%u asked) against the Direct3D 9 algorithm: worst channel %u, %u channels off by more than 2\n",
+                    s.live.display.Samples(), samples, worst, off);
+        if (s.live.display.Samples() == 1)
         {
             char what[160];
             std::snprintf(what, sizeof what, "the highlight matches the Direct3D 9 algorithm (worst channel %u, %u channels off by more than 2)",
@@ -551,6 +559,123 @@ namespace
         Check(Near(gpu[100 * W + 80], Argb(0, 0, 0), 0), "far from it nothing is drawn");
         highlight.Detach();
         return true;
+    }
+
+    /// The world pass as wxl.highlight's service drives it on the recompiled client: the highlighted
+    /// top models handed over, the renderer keeping each draw while they are, every model batch the
+    /// engine draws (with a client vertex program, as M2 batches are) offered with the renderer's
+    /// record of that draw, then the passes after the world. Another model's batch and the object's
+    /// blended one are not kept; the picture is the Direct3D 9 algorithm's.
+    void HighlightPathCase(uint32_t samples)
+    {
+        Setup s;
+        const uint32_t W = 160, H = 1080;
+        if (!s.Make(W, H, samples)) return;
+        draw::Renderer& engine = s.live.renderer;
+        const std::vector<uint8_t> vs = wxl::vk::test::WorldVs(), ps = wxl::vk::test::WorldPs();
+        const int vp = engine.Program(false, "World:0", vs.data(), vs.size());
+        const int pp = engine.Program(true, "World", ps.data(), ps.size());
+        Check(vp >= static_cast<int>(wxl::vk::pipelines::VertexProgram::Count) && pp >= 0, "the models' client programs are translated");
+        if (vp < 0 || pp < 0) return;
+
+        render::Highlight highlight;
+        highlight.Attach(s.render);
+        const render::Highlight::Style style{0xFF4020u, 6.0f, 24.0f, 0.6f};
+        int object = 0, another = 0; // two top models
+        const render::Highlight::Root roots[1] = {{&object, 0}};
+        if (!s.Begin()) return;
+
+        // The world pass begins: the object's model is highlighted, so the renderer keeps each draw.
+        highlight.World(roots, 1);
+        engine.KeepBatches(highlight.Capturing());
+        const float w = static_cast<float>(W), h = static_cast<float>(H);
+        const float projection[16] = {2.0f / w, 0, 0, -1.0f, 0, -2.0f / h, 0, 1.0f, 0, 0, 1.0f, 0, 0, 0, 0, 1.0f};
+        const float white[4]       = {1, 1, 1, 1};
+        engine.Constants(false, 0, 4, projection);
+        engine.Constants(false, 4, 1, white);
+        engine.Constants(true, 0, 1, white);
+        s.fake.programs[1] = vp;
+        s.fake.programs[0] = pp;
+        s.fake.StateP(wxl::vk::gxfront::kVertexShader, &s.fake);
+        s.fake.StateP(wxl::vk::gxfront::kPixelShader, &s.fake);
+        s.fake.State(wxl::vk::gxfront::kDepthTest, 1);
+        s.fake.State(wxl::vk::gxfront::kDepthWrite, 1);
+        // A model batch as CM2SceneRender::DrawBatch makes it, then M2.DrawBatch with the record of it.
+        auto modelBatch = [&](const void* root, uint32_t blend, float x0, float y0, float x1, float y1, uint32_t color) {
+            Vertex quad[6];
+            rig::Quad(quad, x0, y0, x1, y1, color);
+            Stream(s.live, s.fake, s.pool, quad, 6, s.at);
+            engine.ForgetLastBatch(); // as the device's Draw does first
+            const bool drawn = Record(s.live, s.fake, 6);
+            return highlight.Batch(root, blend, engine.LastBatch()) && drawn;
+        };
+        const bool kept    = modelBatch(&object, 0, 40, 400, 120, 680, Argb(30, 60, 90));
+        const bool other   = modelBatch(&another, 0, 0, 0, 30, 100, Argb(0, 0, 0));
+        const bool blended = modelBatch(&object, 2, 60, 450, 100, 500, Argb(30, 60, 90));
+        Check(kept && !other && !blended, "the object's opaque batch is kept; another model's and its blended one are not");
+        s.fake.State(wxl::vk::gxfront::kDepthTest, 0);
+        s.fake.State(wxl::vk::gxfront::kDepthWrite, 0);
+        s.fake.StateP(wxl::vk::gxfront::kVertexShader, nullptr);
+        s.fake.StateP(wxl::vk::gxfront::kPixelShader, nullptr);
+        s.fake.programs[0] = s.fake.programs[1] = -1;
+
+        // After the world.
+        const char*    why   = nullptr;
+        const uint32_t drawn = highlight.Draw(&style, 1, &why);
+        engine.KeepBatches(false);
+        const render::Highlight::Counts& c = highlight.Pass();
+        char what[200];
+        std::snprintf(what, sizeof what,
+                      "the pass counts 1 top model, 3 model batches, 2 of them the object's, 1 kept, 1 drawn into the masks, composited "
+                      "(got %u, %u, %u, %u, %u, %s%s%s)",
+                      c.roots, c.models, c.seen, c.kept, c.drawn, c.composited ? "composited" : "not composited", why ? ": " : "", why ? why : "");
+        Check(drawn == 1 && c.roots == 1 && c.models == 3 && c.seen == 2 && c.kept == 1 && c.drawn == 1 && c.composited && c.refusal.empty(),
+              what);
+        std::vector<uint32_t> gpu = s.live.End();
+        if (gpu.empty()) return;
+
+        std::vector<bool>     inside(W * H, false);
+        std::vector<uint32_t> scene(W * H, Argb(0, 0, 0));
+        for (uint32_t y = 400; y < 680; ++y)
+            for (uint32_t x = 40; x < 120; ++x)
+            {
+                inside[y * W + x] = true;
+                scene[y * W + x]  = Argb(30, 60, 90);
+            }
+        const std::vector<uint32_t> cpu = ReferenceHighlight(scene, W, H, inside, style);
+        uint32_t worst = 0, off = 0;
+        for (uint32_t i = 0; i < W * H; ++i)
+            for (int shift = 0; shift < 24; shift += 8)
+            {
+                const int d = std::abs(static_cast<int>((gpu[i] >> shift) & 0xFF) - static_cast<int>((cpu[i] >> shift) & 0xFF));
+                worst       = std::max(worst, static_cast<uint32_t>(d));
+                if (d > 2) ++off;
+            }
+        std::printf("  highlight through the service's path at %u sample(s) (%u asked) against the Direct3D 9 algorithm: worst channel %u, %u "
+                    "channels off by more than 2\n",
+                    s.live.display.Samples(), samples, worst, off);
+        if (s.live.display.Samples() == 1)
+        {
+            std::snprintf(what, sizeof what, "through the service's path, the highlight matches the Direct3D 9 algorithm (worst channel %u, %u "
+                                             "channels off by more than 2)", worst, off);
+            Check(worst <= 6 && off <= W * H * 3 / 1000, what);
+        }
+        Check(Near(gpu[540 * W + 80], Argb(30, 60, 90), 0), "over the object nothing is drawn");
+        Check(Red(gpu[540 * W + 37]) > 200 && Green(gpu[540 * W + 37]) < 120, "the outline lies just outside the object, in its colour");
+        Check(Red(gpu[540 * W + 22]) > 5 && Red(gpu[540 * W + 22]) < 200, "the glow fades beyond the outline");
+        Check(Near(gpu[50 * W + 15], Argb(0, 0, 0), 0) && Near(gpu[100 * W + 80], Argb(0, 0, 0), 0),
+              "around the other model and far from the object nothing is drawn");
+
+        // A pass in which the renderer kept no record of the object's draw says why, and draws nothing.
+        if (s.Begin())
+        {
+            highlight.World(roots, 1);
+            Check(!highlight.Batch(&object, 0, nullptr) && highlight.Draw(&style, 1, &why) == 0 && why &&
+                      std::string(why).find("kept no record") != std::string::npos && !highlight.Pass().composited,
+                  "a batch without the renderer's record is refused with its reason, and nothing is drawn");
+            s.live.End();
+        }
+        highlight.Detach();
     }
 
     /// The SDK's example mod wxl.outline, its calls made here on a target half behind a wall: the
@@ -686,6 +811,9 @@ namespace wxl::vk::test
         }
         HighlightCase(1);
         HighlightCase(4);
+        HighlightCase(8);
+        HighlightPathCase(1);
+        HighlightPathCase(8);
         OutlineExampleCase();
         return true;
     }

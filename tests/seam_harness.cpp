@@ -15,6 +15,7 @@
 #include "runtime/Code.hpp"
 #include "runtime/Crash.hpp"
 #include "runtime/Frame.hpp"
+#include "runtime/Listening.hpp"
 #include "gx/Vulkan.hpp"
 #include "runtime/Stages.hpp"
 #include "seams/Gameplay.hpp"
@@ -72,6 +73,8 @@
     #include "hook/Safety.hpp"
     #include "points/PointsX86.hpp"
     #include "seams/RegparmX86.hpp"
+#else
+    #include "gx/vk/render/Render.hpp"
 #endif
 
 #include <algorithm>
@@ -12436,6 +12439,24 @@ namespace
         wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
         const wxl_handle target = wxl::core::objects::HandleOf(&boar);
 
+        // The client's flag of an event: up while a mod listens or while the runtime needs the seam.
+        {
+            namespace listening = wxl::core::listening;
+            const wxl_event event   = WXL_EV_ModelBatchDrawn;
+            const bool      mods    = g_host->Listening(event);
+            listening::ModsListen(event, false);
+            listening::RuntimeWants(event, true);
+            const bool runtimeAlone = wxl_core_listening[event] != 0;
+            listening::ModsListen(event, true);
+            listening::RuntimeWants(event, false);
+            const bool modsAlone = wxl_core_listening[event] != 0;
+            listening::ModsListen(event, false);
+            Check(runtimeAlone && modsAlone && wxl_core_listening[event] == 0,
+                  "the client's flag of an event is up while a mod listens or the runtime needs its seam, down when neither does");
+            listening::ModsListen(event, mods);
+        }
+        const bool modsListen = g_host->Listening(WXL_EV_ModelBatchDrawn);
+
 #if !defined(_M_IX86)
         const wxl_str why = api.unsupported_reason();
         Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("Vulkan") != std::string_view::npos,
@@ -12447,6 +12468,48 @@ namespace
         wxl::seam::WorldFrame::RenderWorld::Before(&world);
         wxl::seam::WorldFrame::RenderWorld::After(&world);
         Check(api.drawn() == 0, "a world pass draws none");
+
+        // The service's path on the Vulkan renderer, here a wxl.render without a device and no
+        // engine renderer: the drawing itself is checked on lavapipe (core/tests/vk/render_tests.cpp).
+        static wxl::vk::render::Render                    vkRender;
+        static wxl::core::services::highlight::VulkanTarget vkTarget{&vkRender, nullptr};
+        wxl::core::services::highlight::UseVulkanTarget(&vkTarget);
+        Check(api.supported() == WXL_TRUE && wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0),
+              "with a Vulkan renderer highlights are supported; nothing is highlighted yet");
+        Check(api.set(target, 0xFFE03020u, 4.0f, 8.0f, 0.5f) == WXL_OK && wxl_core_listening[WXL_EV_ModelBatchDrawn] != 0,
+              "a highlight set, the client calls M2.DrawBatch even with no mod listening to ModelBatchDrawn");
+        namespace hs = wxl::core::services::highlight;
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(!hs::LastPass().resolved && hs::LastPass().refusal.find("M2.DrawBatch") != std::string::npos && api.drawn() == 0,
+              "a world pass in which no model batch reached the runtime says so");
+        int vkModel = 0, other = 0;
+        auto vkBatch = [&](void* root, uint32_t blend) {
+            g_gxDraw                 = wxl_model_batch_args{};
+            g_gxDraw.root_model      = root;
+            g_gxDraw.primitive_type  = 4;
+            g_gxDraw.primitive_count = 40;
+            g_gxDraw.blend_mode      = blend;
+            g_gxDrew                 = true;
+            wxl::seam::M2::DrawBatch::After(&vkModel);
+        };
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        vkBatch(&g_charModel, 0);
+        vkBatch(&other, 0);
+        vkBatch(&g_charModel, 2);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        const hs::PassCounts& pass = hs::LastPass();
+        Check(pass.resolved && pass.entries == 1 && pass.roots == 1 && pass.models == 3 && pass.seen == 2 && pass.kept == 0 &&
+                  pass.drawn == 0 && !pass.composited,
+              "the pass counts the object's model found, the batches drawn, the object's two, and none kept");
+        Check(pass.refusal.find("kept no record") != std::string::npos && api.drawn() == 0,
+              "a batch the renderer kept no record of is refused with its reason, and drawn() says none was drawn");
+        hs::Present(); // the summary's second begins; its line comes a second later
+        hs::Present();
+        Check(api.clear(target) == WXL_OK && wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0),
+              "the last highlight cleared, the client's flag is the mods' again");
+        hs::UseVulkanTarget(nullptr);
+        hs::Clear();
 #else
         namespace hl = wxl::core::gx::d3d9::highlight;
         namespace hd = wxl::core::binding::x86::highlight_draw;
@@ -12492,6 +12555,7 @@ namespace
                   api.set(target, 0xFF0000u, std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f) == WXL_E_INVALID,
               "an object gone is not found; a width below 0 or no number is refused");
         Check(api.set(target, 0xFFE03020u, 40.0f, 8.0f, 0.5f) == WXL_OK, "an object is highlighted");
+        Check(wxl_core_listening[WXL_EV_ModelBatchDrawn] != 0, "and the seam that keeps its batches is wanted, no mod listening or not");
 
         // A world pass: one batch of the object's model and one of another, then the world's end.
         int world = 0, render = 0, other = 0;
@@ -12541,6 +12605,12 @@ namespace
         wxl::seam::WorldFrame::RenderWorld::After(&world);
 
         Check(api.drawn() == 1 && device.draws.size() == 4, "the object's one opaque batch is drawn again, then three passes");
+        {
+            const wxl::core::services::highlight::PassCounts& pass = wxl::core::services::highlight::LastPass();
+            Check(pass.resolved && pass.roots == 1 && pass.models == 3 && pass.seen == 2 && pass.kept == 1 && pass.drawn == 1 &&
+                      pass.composited && pass.refusal.empty(),
+                  "the pass counts the batches drawn, the object's two, the opaque one kept and drawn, and the composite");
+        }
         if (device.draws.size() == 4)
         {
             const RecordingDevice::Drawn& mask = device.draws[0];
@@ -12647,6 +12717,7 @@ namespace
         std::thread([&] { fromThread = api.set(target, 0xFF0000u, 2.0f, 0.0f, 0.0f); }).join();
         Check(fromThread == WXL_E_INVALID, "off the main thread a highlight is refused");
         wxl::core::services::highlight::Clear();
+        Check(wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0), "no highlight left, the client's flag is the mods' again");
         hl::UseDevice(nullptr);
         hl::SetSource(hl::Source{});
 #endif
@@ -12673,11 +12744,7 @@ int main(int argc, char** argv)
     config.services.push_back(wxl::host::PublishedService{
         WXL_SCRIPT_SERVICE, WXL_SCRIPT_SERVICE_VERSION, &wxl::core::services::ScriptApi()});
     g_host              = std::make_unique<wxl::host::ModHost>(std::move(config));
-    g_host->SetListenHandler(
-        [](void*, wxl_event event, bool listening) {
-            if (static_cast<uint32_t>(event) < static_cast<uint32_t>(WXL_EV_COUNT)) wxl_core_listening[event] = listening ? 1 : 0;
-        },
-        nullptr);
+    g_host->SetListenHandler([](void*, wxl_event event, bool listening) { wxl::core::listening::ModsListen(event, listening); }, nullptr);
 
     printf("seam harness: %zu seam(s), %zu raisable event(s), %zu binding row(s) left unbound by the fake\n",
            wxl::core::seams::Table().size(), wxl::core::seams::RaisedEvents().size(),
