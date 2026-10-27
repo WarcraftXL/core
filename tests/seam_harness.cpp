@@ -4981,6 +4981,9 @@ namespace
     {
         namespace tiles = wxl::core::services::terrain_tiles;
         const SplitTwin twin = MakeSplitTwin();
+        // The tile's map object is in the client's files (a missing one is left out: it would end the client).
+        wxl::core::services::model_gate::Clear();
+        g_files.push_back(FakeFile{"w\\a.wmo", std::string("REVM\4\0\0\0\x11\0\0\0", 12)});
 
         // The monolithic tile, with and without the seams: the seams leave it alone.
         SplitFakeArea mono;
@@ -5166,8 +5169,8 @@ namespace
                   gate::Judge(wmo17, 12, true) == gate::Verdict::loadable && gate::Judge(nullptr, 0, false) == gate::Verdict::loadable,
               "an M2 of MD21 or past version 264, a WMO root past 17, cannot be loaded; MD20 264 and WMO 17 can");
         gate::Clear();
+        g_files.back().bytes[8] = 18; // w\a.wmo, now of version 18
         g_files.push_back(FakeFile{"m\\bb.m2", std::string("MD21\0\0\0\0", 8)});
-        g_files.push_back(FakeFile{"w\\a.wmo", std::string("REVM\4\0\0\0\x12\0\0\0", 12)});
         SplitFakeArea gated;
         gated.x = 30, gated.y = 41;
         gated.file  = "World\\Maps\\T\\T_30_41.adt";
@@ -5189,6 +5192,22 @@ namespace
         Check(tiles::Held() == 0, "and nothing kept for it");
         g_files.pop_back();
         g_files.pop_back();
+        gate::Clear();
+        SplitFakeArea missing;
+        missing.x = 30, missing.y = 42;
+        missing.file  = "World\\Maps\\T\\T_30_42.adt";
+        missing.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> missingChunks;
+        SplitLoad(missing, missingChunks, true);
+        bool noWmo = true, m2s = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            size_t models = 0;
+            for (const std::string& p : missingChunks[i].placed) noWmo = noWmo && p.rfind("wmo:", 0) != 0;
+            for (const std::string& p : monoChunks[i].placed) models += p.rfind("m2:", 0) == 0 ? 1 : 0;
+            m2s = m2s && missingChunks[i].placed.size() == models;
+        }
+        Check(noWmo && m2s, "a map object root the client's files do not have is left out (it would end the client), the doodads made");
         gate::Clear();
     }
 

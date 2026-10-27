@@ -66,14 +66,21 @@ namespace wxl::core::services::model_gate
         if (seen != g_seen.end()) return seen->second == Verdict::loadable;
         uint8_t head[12] = {};
         size_t  got      = 0;
+        bool    opened   = false;
         if (void* file = wxl::core::binding::file_open(path.c_str()))
         {
-            got = wxl::core::binding::file_read(file, head, sizeof head);
+            opened = true;
+            got    = wxl::core::binding::file_read(file, head, sizeof head);
             wxl::core::binding::file_close(file);
         }
-        const Verdict verdict = got ? Judge(head, got, mapObject) : Verdict::loadable;
+        // A map object root the client cannot open ends it (CMap::SafeOpen); an M2 it cannot open
+        // it leaves undrawn.
+        const Verdict verdict = !opened && mapObject ? Verdict::missing : got ? Judge(head, got, mapObject) : Verdict::loadable;
         g_seen.emplace(path, verdict);
-        if (verdict == Verdict::chunked)
+        if (verdict == Verdict::missing)
+            WLOG_WARN(kTag, "%s is a map object the client's files do not have (it would end the client): its placements are left out",
+                      path.c_str());
+        else if (verdict == Verdict::chunked)
             WLOG_WARN(kTag, "%s is an M2 in Legion's chunked form (MD21), which this client cannot read: its placements are left out", path.c_str());
         else if (verdict == Verdict::newer && mapObject)
             WLOG_WARN(kTag, "%s is a map object of version %u, past this client's %u: its placements are left out", path.c_str(), U32(head + 8),
