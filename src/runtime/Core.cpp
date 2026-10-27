@@ -27,6 +27,7 @@
 #include "services/RenderService.hpp"
 #include "services/SelectionCircleService.hpp"
 #include "services/CVarService.hpp"
+#include "services/TerrainService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -138,6 +139,8 @@ namespace
         wxl::core::services::selectioncircle::ForgetMod(token);
         // Its console variables are released; they stay, with their values.
         wxl::core::services::cvar::ForgetMod(token);
+        // Its edits of the ground come off; another mod's, or the original, show again.
+        wxl::core::services::terrain::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

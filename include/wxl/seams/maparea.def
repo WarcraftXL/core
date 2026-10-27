@@ -3,6 +3,9 @@
 //
 // The MapArea domain: seams on CMapArea, a loaded terrain tile.
 
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including maparea.def"
+#endif
 #ifndef WXL_SEAM_BEFORE
 #error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including maparea.def"
 #endif
@@ -11,9 +14,11 @@
 // and creates it from the tile's file buffer, then returns it. The one caller is CMapArea::Update,
 // for each chunk of the rectangle coming into view. Before raises TerrainChunkBuild with the
 // map, the tile's index (CMapArea::m_index) and the chunk's indices, before the chunk's data is
-// read. After takes the chunk the function returns and raises nothing.
-WXL_SEAM_BEFORE(MapArea, PrepareChunk, "CMapArea::PrepareChunk", void*, thiscall, (void* self, int32_t chunk_x, int32_t chunk_y))
+// read. After takes the chunk the function returns, built and not drawn yet: wxl.terrain writes
+// the edits mods made to it back into its heights and normals, then raises TerrainChunkLoaded.
+WXL_SEAM(MapArea, PrepareChunk, "CMapArea::PrepareChunk", void*, thiscall, (void* self, int32_t chunk_x, int32_t chunk_y))
 WXL_SEAM_RAISES(MapArea, PrepareChunk, TerrainChunkBuild)
+WXL_SEAM_RAISES(MapArea, PrepareChunk, TerrainChunkLoaded)
 
 // The end of a terrain tile's read. CMapArea::Load (0x007D7150) opens the tile's .adt, sizes a
 // buffer and queues an asynchronous read of the whole file; the client's poll of the read queue

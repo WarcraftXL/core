@@ -143,6 +143,22 @@ typedef struct wxl_core_m2_skeleton
     float*          matrices;
 } wxl_core_m2_skeleton;
 
+/**
+ * @brief A loaded terrain chunk (CMapChunk), as terrain_chunk_view gives it. `heights` and
+ * `normals` point into the tile's file buffer, which lives while the tile is loaded: 145 heights
+ * relative to `base_z` (MCVT) and 145 normals as three signed bytes in 127ths (MCNR), both in
+ * the grid's vertex order (wxl/terrain/grid.hpp). Writable; the client reads both live.
+ */
+typedef struct wxl_core_terrain_chunk
+{
+    int32_t chunk_x;  ///< m_cOffset.x: the chunk's column on the map
+    int32_t chunk_y;  ///< m_cOffset.y: its row
+    float*  heights;  ///< m_height
+    int8_t* normals;  ///< m_normals
+    float   base_z;   ///< m_topLeftCoords.z: what the heights are relative to
+    uint32_t holes;   ///< m_header->m_holes: the 16-bit hole mask
+} wxl_core_terrain_chunk;
+
 /// One string per row of wxl/core/binding.def, "name: ret (params)", in table order. The
 /// client hands its copy over in wxl_core_init and the runtime compares it with its own, so a
 /// client built from a different table is refused by name instead of having its accessors

@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "services/Assets.hpp"
+#include "services/TerrainService.hpp"
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
@@ -31,6 +32,16 @@ namespace wxl::seam::MapArea::PrepareChunk
         args.chunk_x = chunk_x;
         args.chunk_y = chunk_y;
         host->Raise(WXL_EV_TerrainChunkBuild, &args);
+    }
+
+    void WXL_CALL After(void* result, void*, int32_t, int32_t)
+    {
+        // The chunk is built and not drawn yet: the edits it carries go back into it, whether or
+        // not someone listens.
+        wxl_terrain_chunk_state_args args{};
+        if (!wxl::core::services::terrain::ChunkLoaded(result, args)) return;
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (host && host->Listening(WXL_EV_TerrainChunkLoaded)) host->Raise(WXL_EV_TerrainChunkLoaded, &args);
     }
 }
 

@@ -2526,4 +2526,92 @@ namespace wxl::core::binding
         reinterpret_cast<DuelReplyFn>(WXL_SITE("CGDuelInfo::CancelDuel", 0))();
         At<uint64_t>(WXL_STATIC("s_duelArbiter")) = 0;
     }
+    // --- the map's ground (binding/terrain.def) ----------------------------------------------
+
+    wxl_bool terrain_present(void)
+    {
+        if (!IsClient() || !OnMainThread() || map_id() < 0) return WXL_FALSE;
+        if (!*reinterpret_cast<const int32_t*>(WXL_STATIC("CMap::bActive"))) return WXL_FALSE;
+        return *reinterpret_cast<const int32_t*>(WXL_STATIC("CMap::bDungeon")) ? WXL_FALSE : WXL_TRUE;
+    }
+
+    void* terrain_chunk(int32_t chunk_x, int32_t chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || chunk_x < 0 || chunk_y < 0 || chunk_x >= 1024 || chunk_y >= 1024)
+            return nullptr;
+        // CMap::m_areaTable[64 * tile row + tile column], as CMap::GetChunkFacets indexes it.
+        const auto* table = reinterpret_cast<void* const*>(WXL_STATIC("CMap::m_areaTable"));
+        const void* area  = table[64 * (chunk_y >> 4) + (chunk_x >> 4)];
+        if (!area || Read<const void*>(area, WXL_FIELD("CMapArea", "m_asyncObject"))) return nullptr;
+        const std::size_t slot = WXL_FIELD("CMapArea", "m_mapChunks") +
+                                 sizeof(void*) * static_cast<std::size_t>(16 * (chunk_y & 15) + (chunk_x & 15));
+        return Read<void*>(area, slot);
+    }
+
+    wxl_bool terrain_chunk_view(void* chunk, wxl_core_terrain_chunk* out)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk || !out) return WXL_FALSE;
+        const void* header = Read<const void*>(chunk, WXL_FIELD("CMapChunk", "m_header"));
+        out->chunk_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        out->chunk_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        out->heights = Read<float*>(chunk, WXL_FIELD("CMapChunk", "m_height"));
+        out->normals = Read<int8_t*>(chunk, WXL_FIELD("CMapChunk", "m_normals"));
+        out->base_z  = Read<float>(chunk, WXL_FIELD("CMapChunk", "m_topLeftCoords.z"));
+        out->holes   = header ? Read<uint16_t>(header, WXL_FIELD("SMChunk", "m_holes")) : 0u;
+        return out->heights && out->normals ? WXL_TRUE : WXL_FALSE;
+    }
+
+    void terrain_chunk_rebuild(void* chunk, wxl_bool doodads)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk) return;
+        // CMapChunk::CreateBounds: __thiscall, no argument, a bare `ret` (0x007C5220).
+        x86::CallMember<void>(WXL_SITE("CMapChunk::CreateBounds", 0), chunk);
+        char* render = Read<char*>(chunk, WXL_FIELD("CMapChunk", "m_renderChunk"));
+        if (render)
+        {
+            // CMapRenderChunk::AddBatch(chunk1, chunk2, position, flags): __thiscall, `ret 0x10`
+            // (0x007B7AF0); it copies the position before it reads the chunks' boxes.
+            void*    first  = Read<void*>(render, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+            void*    second = Read<void*>(render, WXL_FIELD("CMapRenderChunk", "m_mapChunks[1]"));
+            wxl_vec3 at     = Read<wxl_vec3>(render, WXL_FIELD("CMapRenderChunk", "m_vec1"));
+            const uint32_t flags = Read<uint8_t>(render, WXL_FIELD("CMapRenderChunk", "m_unkFlags"));
+            if (first) x86::CallMember<void>(WXL_SITE("CMapRenderChunk::AddBatch", 0), render, first, second, &at, flags);
+            const void* buffers = Read<const void*>(render, WXL_FIELD("CMapRenderChunk", "m_chunkBuf"));
+            char*       vertex  = buffers ? Read<char*>(buffers, WXL_FIELD("CMapChunkBuf", "m_vertexBuf")) : nullptr;
+            if (vertex) vertex[WXL_FIELD("CGxBuf", "m_hasData")] = 0;
+        }
+        if (doodads)
+        {
+            const std::size_t at   = WXL_FIELD("CMapChunk", "m_detailDoodadInst");
+            void*             inst = Read<void*>(chunk, at);
+            if (inst)
+            {
+                // CDetailDoodad::FreeInst(inst): cdecl, one dword, a bare `ret` (0x007B3960).
+                x86::CallFree<void>(WXL_SITE("CDetailDoodad::FreeInst", 0), inst);
+                void* none = nullptr;
+                std::memcpy(static_cast<char*>(chunk) + at, &none, sizeof none);
+            }
+        }
+    }
+
+    void terrain_forget_collision(void)
+    {
+        if (!IsClient() || !OnMainThread()) return;
+        // Movement.cpp's s_queryBox, a CAaBox (b then t): one that holds no point.
+        float* box = reinterpret_cast<float*>(WXL_STATIC_AT("s_queryBox", 0x00CA1660));
+        for (int i = 0; i < 3; ++i)
+        {
+            box[i]     = 3.4028235e38f;
+            box[3 + i] = -3.4028235e38f;
+        }
+    }
+
+    void unit_fall_local(const void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        const void* movement = Read<const void*>(unit, WXL_FIELD("CGUnit_C", "m_movement"));
+        if (!movement) return;
+        // CMovement_C::OnFallLocal(eventTime): __thiscall, `ret 4` (0x006ECCF0).
+        x86::CallMember<void>(WXL_SITE("CMovement_C::OnFallLocal", 0), movement, os_time_ms());
+    }
 }

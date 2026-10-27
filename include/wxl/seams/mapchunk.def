@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The MapChunk domain: seams on CMapChunk, one chunk of a loaded terrain tile.
+
+#ifndef WXL_SEAM_BEFORE
+#error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including mapchunk.def"
+#endif
+
+// Frees what a chunk holds (its render chunk, its ground clutter, its liquids, its links to
+// doodads, map objects, lights and sounds) before the chunk itself is freed. Its two callers are
+// CMapArea::PurgeChunk (a chunk leaving the view, CMapArea::Update and PurgeChunks) and
+// CMapArea::Purge (its tile unloaded). __thiscall, no argument, a bare `ret` (0x007C35CE). Before raises
+// TerrainChunkUnloaded while the chunk still answers its place.
+WXL_SEAM_BEFORE(MapChunk, Purge, "CMapChunk::Purge", void, thiscall, (void* self))
+WXL_SEAM_RAISES(MapChunk, Purge, TerrainChunkUnloaded)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

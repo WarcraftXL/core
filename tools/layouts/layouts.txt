@@ -988,10 +988,14 @@ type CMapChunk WoW/Source/WorldClient/MapChunk.h CMapChunk
   m_mcrfPtr                               game/ADT:kOffChunkMcrf
   m_liquid                                game/ADT:kOffChunkMclq
   m_soundEmitters                         game/ADT:kOffChunkMcse
+  m_topLeftCoords.z                       -                                            # binding terrain_chunk_view: what the heights are relative to
+  m_detailDoodadInst                      -                                            # binding terrain_chunk_rebuild: the ground clutter
+  m_renderChunk                           -                                            # binding terrain_chunk_rebuild
 
 type SMChunk WoW/Source/WorldClient/MapChunk.h SMChunk
   sizeof                                  -
   m_nLayers                               game/ADT:kOffMcnkNLayers
+  m_holes                                 -                                            # binding terrain_chunk_view: the hole mask
 
 type CMapRenderChunk WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunk
   sizeof                                  -
@@ -1001,6 +1005,14 @@ type CMapRenderChunk WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunk
   m_layers                                game/ADT:kOffChunkLayerRecords
   m_terrainBlendTexture                   game/ADT:kOffChunkNodeAlphaRT
   m_batch                                 game/ADT:kOffChunkDrawBatch
+  m_unkFlags                              -                                            # binding terrain_chunk_rebuild: AddBatch's flags
+  m_mapChunks[1]                          -                                            # binding terrain_chunk_rebuild
+  m_vec1                                  -                                            # binding terrain_chunk_rebuild: AddBatch's position
+  m_chunkBuf                              -                                            # binding terrain_chunk_rebuild: the pooled buffers
+
+type CMapChunkBuf WoW/Source/WorldClient/MapRenderChunk.h CMapChunkBuf
+  sizeof                                  -
+  m_vertexBuf                             -                                            # binding terrain_chunk_rebuild: the vertex buffer refilled
 
 type CMapRenderChunkLayer WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunkLayer
   sizeof                                  game/ADT:kChunkLayerRecordStride

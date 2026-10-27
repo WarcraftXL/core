@@ -11,6 +11,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "gx/Vulkan.hpp"
+#include "services/TerrainService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/RenderService.hpp"
 #include "services/SelectionCircleService.hpp"
@@ -24,6 +25,8 @@ namespace wxl::seam::WorldFrame::RenderWorld
     {
         // The world's draws begin: the Vulkan device counts them as the world's.
         wxl::core::gx::WorldPass(true);
+        // The ground's clutter is freed after the world is drawn only (wxl.terrain).
+        wxl::core::services::terrain::WorldBegin();
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 
@@ -38,6 +41,7 @@ namespace wxl::seam::WorldFrame::RenderWorld
     void WXL_CALL After(void* param)
     {
         wxl::core::gx::WorldPass(false);
+        wxl::core::services::terrain::WorldEnd();
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host || !param) return;
 

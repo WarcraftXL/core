@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 137 types, 852 field offsets, 11 member sizes.
+// 138 types, 861 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -572,7 +572,10 @@ WXL_LAYOUT_FIELD(CMapChunk, "m_aIndex.y", 0x28, "WoW/Source/WorldClient/MapChunk
 WXL_LAYOUT_FIELD(CMapChunk, "m_cOffset.x", 0x34, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_cOffset.y", 0x38, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_bbox", 0x4C, "WoW/Source/WorldClient/MapChunk.h", 62)
+WXL_LAYOUT_FIELD(CMapChunk, "m_topLeftCoords.z", 0x84, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_bbox2", 0x8C, "WoW/Source/WorldClient/MapChunk.h", 62)
+WXL_LAYOUT_FIELD(CMapChunk, "m_detailDoodadInst", 0xA4, "WoW/Source/WorldClient/MapChunk.h", 62)
+WXL_LAYOUT_FIELD(CMapChunk, "m_renderChunk", 0xA8, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_doodadDefLinkList", 0xC4, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_doodadDefLinkList.m_terminator.m_next", 0xCC, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_chunkInfoBeginPtr", 0x10C, "WoW/Source/WorldClient/MapChunk.h", 62)
@@ -588,6 +591,8 @@ WXL_LAYOUT_FIELD(CMapChunk, "m_additionalShadowmap", 0x130, "WoW/Source/WorldCli
 WXL_LAYOUT_FIELD(CMapChunk, "m_mcrfPtr", 0x134, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_liquid", 0x138, "WoW/Source/WorldClient/MapChunk.h", 62)
 WXL_LAYOUT_FIELD(CMapChunk, "m_soundEmitters", 0x13C, "WoW/Source/WorldClient/MapChunk.h", 62)
+WXL_LAYOUT_TYPE(CMapChunkBuf, "CMapChunkBuf", 0x1C, "WoW/Source/WorldClient/MapRenderChunk.h", 28)
+WXL_LAYOUT_FIELD(CMapChunkBuf, "m_vertexBuf", 0x0, "WoW/Source/WorldClient/MapRenderChunk.h", 28)
 WXL_LAYOUT_TYPE(CMapChunkLiquidBuf, "CMapChunkLiquidBuf", 0x28, "WoW/Source/WorldClient/MapChunkLiquid.h", 14)
 WXL_LAYOUT_FIELD(CMapChunkLiquidBuf, "m_vertexBuf", 0x10, "WoW/Source/WorldClient/MapChunkLiquid.h", 14)
 WXL_LAYOUT_FIELD(CMapChunkLiquidBuf, "m_indexBuf", 0x14, "WoW/Source/WorldClient/MapChunkLiquid.h", 14)
@@ -674,11 +679,15 @@ WXL_LAYOUT_FIELD(CMapObjGroup, "m_unkLoadedFlag", 0x198, "WoW/Source/WorldClient
 WXL_LAYOUT_TYPE(CMapObjOccluder, "CMapObjOccluder", 0x24, "WoW/Source/WorldClient/MapObjGroup.h", 126)
 WXL_LAYOUT_FIELD(CMapObjOccluder, "m_start", 0x4, "WoW/Source/WorldClient/MapObjGroup.h", 126)
 WXL_LAYOUT_TYPE(CMapRenderChunk, "CMapRenderChunk", 0xA0, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
+WXL_LAYOUT_FIELD(CMapRenderChunk, "m_unkFlags", 0x8, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_layersCount", 0x9, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_renderFlags", 0xA, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_mapChunks[0]", 0x10, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
+WXL_LAYOUT_FIELD(CMapRenderChunk, "m_mapChunks[1]", 0x14, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
+WXL_LAYOUT_FIELD(CMapRenderChunk, "m_vec1", 0x18, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_layers", 0x34, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_terrainBlendTexture", 0x84, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
+WXL_LAYOUT_FIELD(CMapRenderChunk, "m_chunkBuf", 0x8C, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_FIELD(CMapRenderChunk, "m_batch", 0x90, "WoW/Source/WorldClient/MapRenderChunk.h", 63)
 WXL_LAYOUT_TYPE(CMapRenderChunkLayer, "CMapRenderChunkLayer", 0x14, "WoW/Source/WorldClient/MapRenderChunk.h", 51)
 WXL_LAYOUT_FIELD(CMapRenderChunkLayer, "m_flags", 0x0, "WoW/Source/WorldClient/MapRenderChunk.h", 51)
@@ -944,6 +953,7 @@ WXL_LAYOUT_FIELD(PendingSpellCast, "m_data.m_spellId", 0x20, "WoW/Source/Magic/M
 WXL_LAYOUT_FIELD(PendingSpellCast, "m_data.m_castCount", 0x24, "WoW/Source/Magic/MagicClient/Spell_C.h", 32)
 WXL_LAYOUT_TYPE(SMChunk, "SMChunk", 0x80, "WoW/Source/WorldClient/MapChunk.h", 161)
 WXL_LAYOUT_FIELD(SMChunk, "m_nLayers", 0xC, "WoW/Source/WorldClient/MapChunk.h", 161)
+WXL_LAYOUT_FIELD(SMChunk, "m_holes", 0x3C, "WoW/Source/WorldClient/MapChunk.h", 161)
 WXL_LAYOUT_TYPE(SMDoodadDef, "SMDoodadDef", 0x24, "WoW/Source/WorldClient/Map.h", 66)
 WXL_LAYOUT_FIELD(SMDoodadDef, "m_position.x", 0x8, "WoW/Source/WorldClient/Map.h", 66)
 WXL_LAYOUT_FIELD(SMDoodadDef, "m_position.y", 0xC, "WoW/Source/WorldClient/Map.h", 66)

@@ -97,6 +97,8 @@
 
 #include "wxl/core/binding/m2.def"
 
+#include "wxl/core/binding/terrain.def"
+
 #ifdef WXL_BINDING_FIELD_DEFAULTED
     #undef WXL_BINDING_FIELD
     #undef WXL_BINDING_FIELD_DEFAULTED

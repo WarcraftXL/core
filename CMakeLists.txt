@@ -244,6 +244,7 @@ add_library(wxl-core SHARED
     src/services/SelectionCircleService.cpp
     src/services/TextureService.cpp
     src/services/CVarService.cpp
+    src/services/TerrainService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -300,6 +301,7 @@ add_executable(wxl-core-seam-harness
     src/services/SelectionCircleService.cpp
     src/services/TextureService.cpp
     src/services/CVarService.cpp
+    src/services/TerrainService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}

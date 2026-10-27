@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The Map domain: seams on CMap, the loaded world, where map doodads are placed.
+// The Map domain: seams on CMap, the loaded world, where map doodads are placed and which is
+// unloaded with its ground.
 
 #ifndef WXL_SEAM_AFTER
 #error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including map.def"
+#endif
+#ifndef WXL_SEAM_BEFORE
+#error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including map.def"
 #endif
 
 // A doodad is placed by one of three CMap::CreateDoodadDef overloads, which allocate a
@@ -41,6 +45,14 @@ WXL_SEAM_RAISES(Map, CreateDoodadDefAt, DoodadSpawn)
 // 16-bit value in a dword ([ebp+0x1C]), a bare `ret` (0x007BF11F).
 WXL_SEAM_AFTER(Map, CreateDoodadDefInMapObj, "CMap::CreateDoodadDef@0x007BEF40", void*, cdecl, (uint32_t doodad_ref, void* doodad_def, char* name, uint32_t key, void* mat, uint16_t doodad_set))
 WXL_SEAM_RAISES(Map, CreateDoodadDefInMapObj, DoodadSpawn)
+
+// Unloads the map: its tiles and their chunks, the map objects, the doodads, the low-detail
+// ground. Called by World::UnloadMap (a logout, a teleport to another map, the world left for the
+// glue) and CMap::Destroy. A static with no argument: cdecl, nothing read on the stack, a bare
+// `ret` (0x007C39F9). Before drops every edit wxl.terrain holds of the map's ground and raises
+// TerrainEditsCleared; the chunks' TerrainChunkUnloaded follow as they are freed.
+WXL_SEAM_BEFORE(Map, Unload, "CMap::Unload", void, cdecl, ())
+WXL_SEAM_RAISES(Map, Unload, TerrainEditsCleared)
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

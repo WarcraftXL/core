@@ -92,6 +92,7 @@
 #include "wxl/seams/player.def"
 #include "wxl/seams/gameui.def"
 #include "wxl/seams/maparea.def"
+#include "wxl/seams/mapchunk.def"
 #include "wxl/seams/framescript.def"
 #include "wxl/seams/netclient.def"
 #include "wxl/seams/input.def"
