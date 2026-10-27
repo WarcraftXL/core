@@ -5,6 +5,7 @@
 
 #include "wxl/seams/seams.h"
 
+#include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
 
 #include <cstring>
@@ -158,6 +159,31 @@ namespace wxl::seam::Gx::D3dDraw
     // Before the device's state reaches it: a terrain chunk's scaled layers (wxl.terrain).
     void WXL_CALL Before(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
     void WXL_CALL After(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
+}
+
+namespace wxl::seam::Gx::D3dIShaderCreatePixel
+{
+    // The record's bytecode, a shader provider's answer for the call (wxl.gx).
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3dIShaderCreateVertex
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3d9ExIShaderCreatePixel
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3d9ExIShaderCreateVertex
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
 }
 
 namespace wxl::seam::Gx::D3d9ExDraw

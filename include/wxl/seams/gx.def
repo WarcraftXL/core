@@ -54,6 +54,18 @@ WXL_SEAM_RAISES(Gx, NotifyOnDeviceRestored, SwapchainRestored)
 WXL_SEAM(Gx, D3dDraw, "CGxDeviceD3d::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
 WXL_SEAM(Gx, D3d9ExDraw, "CGxDeviceD3d9Ex::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
 
+// The Direct3D 9 device (and 9Ex, which shares the bodies on the stock client) making a program
+// from its record's bytecode: wxl.gx's shader providers' answer is put in the record for the call
+// and the client's own given back after it. thiscall `(shader)`, `ret 4`.
+WXL_SEAM(Gx, D3dIShaderCreatePixel, "CGxDeviceD3d::IShaderCreatePixel", void, thiscall, (void* self, void* shader))
+WXL_SEAM(Gx, D3dIShaderCreateVertex, "CGxDeviceD3d::IShaderCreateVertex", void, thiscall, (void* self, void* shader))
+// The 9Ex device's own bodies on the recompiled client; the stock client's 9Ex device runs the two
+// above, which take it.
+WXL_SEAM(Gx, D3d9ExIShaderCreatePixel, "CGxDeviceD3d9Ex::IShaderCreatePixel", void, thiscall, (void* self, void* shader))
+WXL_SEAM_X64_ONLY(Gx, D3d9ExIShaderCreatePixel, "the stock client's 9Ex device makes its programs in CGxDeviceD3d::IShaderCreatePixel, which Gx.D3dIShaderCreatePixel takes")
+WXL_SEAM(Gx, D3d9ExIShaderCreateVertex, "CGxDeviceD3d9Ex::IShaderCreateVertex", void, thiscall, (void* self, void* shader))
+WXL_SEAM_X64_ONLY(Gx, D3d9ExIShaderCreateVertex, "the stock client's 9Ex device makes its programs in CGxDeviceD3d::IShaderCreateVertex, which Gx.D3dIShaderCreateVertex takes")
+
 WXL_SEAM_BEFORE(Gx, IShaderLoad, "CGxDevice::IShaderLoad", void, thiscall, (void* self, void* shaders, uint32_t target, const char* path, const char* name, uint32_t permutations))
 WXL_SEAM_RAISES(Gx, IShaderLoad, ShaderLoad)
 

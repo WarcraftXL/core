@@ -56,6 +56,30 @@ WXL_BINDING(gx_texture_ready, void*, (void* texture), (texture), 0)
 // (GxShaderConstantsSet(GxSh_Vertex, ...)): kept by the device and sent at its next draw.
 WXL_BINDING(gx_vertex_constants_set, void, (uint32_t first, const float* rows, uint32_t count), (first, rows, count), (void)0)
 
+// Pixel program constants rows `first` to `first + count - 1`, as the engine sets them
+// (GxShaderConstantsSet(GxSh_Pixel, ...)): kept by the device and sent at its next draw.
+WXL_BINDING(gx_pixel_constants_set, void, (uint32_t first, const float* rows, uint32_t count), (first, rows, count), (void)0)
+
+// The texture (CGxTex*) the engine's state binds on stage `stage` (GxRs_Texture0 + stage, 0 to
+// 15); null for none or without a device.
+WXL_BINDING(gx_texture_stage, void*, (uint32_t stage), (stage), 0)
+
+// Binds `texture` (CGxTex*, or null) on stage `stage` through the engine's state (GxRsSet), sent
+// to the device at its next draw.
+WXL_BINDING(gx_texture_stage_set, void, (uint32_t stage, void* texture), (stage, texture), (void)0)
+
+// Makes `texture` (CGxTex*) repeat in u and v, as the client does for terrain layers
+// (GxTexSetWrap(texture, GxTex_Wrap, GxTex_Wrap)).
+WXL_BINDING(gx_texture_wrap, void, (void* texture), (texture), (void)0)
+
+// A program's record (CGxShader): its name ("Terrain1:6"), its target (EGxShTarget: 0 vertex, 4
+// pixel) and the bytecode the device makes it from (m_code). False for a null record.
+WXL_BINDING(gx_shader_record, wxl_bool, (const void* shader, wxl_core_shader_record* out), (shader, out), WXL_FALSE)
+
+// Sets the bytecode a program's record holds (m_code's data and count); the caller puts the
+// record's own back before anything frees it.
+WXL_BINDING(gx_shader_code_set, void, (void* shader, const void* code, uint32_t size), (shader, code, size), (void)0)
+
 // The matrix at the top of the device's transform stack `xform` (EGxXform: GxXform_Tex0 + i for
 // texture stage i), 16 floats row by row; false without a device.
 WXL_BINDING(gx_xform_get, wxl_bool, (uint32_t xform, float* matrix), (xform, matrix), WXL_FALSE)

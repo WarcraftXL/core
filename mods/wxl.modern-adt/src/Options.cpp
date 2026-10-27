@@ -74,8 +74,18 @@ namespace wxl::modern_adt
                 else
                     problem("an unknown key of [texture_scale] (enabled, source)");
             }
+            else if (Same(section, "height_blend"))
+            {
+                if (Same(key, "enabled"))
+                {
+                    if (value == "0" || value == "1") out.height_blend = value == "1";
+                    else problem("not 0 or 1");
+                }
+                else
+                    problem("an unknown key of [height_blend] (enabled)");
+            }
             else
-                problem("an unknown section (texture_scale)");
+                problem("an unknown section (texture_scale, height_blend)");
         }
         return out;
     }

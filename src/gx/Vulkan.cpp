@@ -25,6 +25,7 @@
 #include "binding/Binding.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
+#include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
 #include "services/DrawService.hpp"
 #include "services/HighlightService.hpp"
@@ -507,7 +508,12 @@ namespace
 
     int32_t WXL_CALL ShaderCreateRow(void* device, void* shader, int32_t vertex, const char* name, const void* code, uint32_t size)
     {
-        return Mine(device) && g_front->ShaderCreate(shader, vertex != 0, name, code, size) ? 1 : 0;
+        if (!Mine(device)) return 0;
+        // A shader provider's answer (wxl.gx) is translated instead of the client's code.
+        std::vector<uint8_t> answer;
+        if (wxl::core::services::shader_code::Answer(name, vertex ? 0u : 1u, code, size, answer))
+            return g_front->ShaderCreate(shader, vertex != 0, name, answer.data(), static_cast<uint32_t>(answer.size())) ? 1 : 0;
+        return g_front->ShaderCreate(shader, vertex != 0, name, code, size) ? 1 : 0;
     }
 
     void WXL_CALL ShaderDestroyRow(void* device, void* shader)

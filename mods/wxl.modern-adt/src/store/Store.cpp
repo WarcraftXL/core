@@ -14,7 +14,10 @@ namespace wxl::modern_adt
         {
             area.file     = file;
             area.size     = size;
-            area.textures = adt::ReadTextures(adt::Reader(file, size), prefer_);
+            const adt::Reader reader(file, size);
+            area.textures = adt::ReadTextures(reader, prefer_);
+            area.names.clear();
+            for (std::string_view name : reader.TextureNames()) area.names.emplace_back(name);
             area.scaled   = 0;
             for (const adt::TextureInfo& t : area.textures) area.scaled += t.scale ? 1u : 0u;
             ++reads_;

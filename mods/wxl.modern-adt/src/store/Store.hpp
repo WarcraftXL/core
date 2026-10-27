@@ -15,6 +15,7 @@
 #include "adt/Reader.hpp"
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -25,6 +26,7 @@ namespace wxl::modern_adt
         const void*                    file = nullptr; ///< the bytes it was read from: another load reads again
         uint32_t                       size = 0;
         std::vector<adt::TextureInfo>  textures;
+        std::vector<std::string>       names;          ///< MTEX's, in order
         uint32_t                       scaled = 0;     ///< textures with a scale other than 0
     };
 

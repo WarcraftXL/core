@@ -15,6 +15,8 @@
 //                 constants c18 + k (scale) and c13 + k (animation offset), or the texture stages'
 //                 matrices -- before the device reads it, and given back after; the same under
 //                 Direct3D 9 and the Vulkan renderer, which both read that state at the draw.
+//                 On the single-pass paths, the layers' numbers go in pixel rows c32 + k and their
+//                 extra textures on samplers 12 + k (abi 0.1.43), given back the same way.
 //
 // Main thread only, as the client draws.
 
@@ -57,6 +59,8 @@ namespace wxl::core::services::terrain_layers
         uint64_t layers_scaled = 0; ///< of those, answered other than 1
         uint64_t chunks_drawn = 0;  ///< chunks drawn with a scaled layer
         uint64_t draws_scaled = 0;  ///< draws whose texture coordinates were scaled
+        uint64_t layers_extra = 0;  ///< layers answered an extra texture
+        uint64_t draws_extra = 0;   ///< single-pass draws that bound an extra texture
         uint32_t chunks_kept = 0;   ///< render chunks holding a scaled layer now
     };
     Counters Count();

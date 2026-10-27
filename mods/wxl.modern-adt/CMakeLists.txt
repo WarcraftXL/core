@@ -12,6 +12,7 @@ endif()
 # Both clients: it reads ADT bytes and answers wxl.terrain, which both runtimes serve alike.
 wxl_add_mod(modern-adt
     SOURCES src/mod.cpp src/Options.cpp src/adt/Reader.cpp src/store/Store.cpp src/features/TextureScale.cpp
+        src/features/HeightBlend.cpp src/shader/Ps3.cpp
     MANIFEST mod.json
     TARGETS win-x86 win-x64)
 

@@ -7,6 +7,9 @@
 //   enabled = 1        ; retail's per-texture scale (MTXP, MTXF) on the maps that carry it
 //   source  = auto     ; auto (MTXP when a file has it, else MTXF), mtxp or mtxf
 //
+//   [height_blend]
+//   enabled = 1        ; retail's height blend (MTXP heightScale and heightOffset, the _h textures)
+//
 // A missing file or key keeps the default; a line not understood is logged and left out.
 
 #pragma once
@@ -23,6 +26,7 @@ namespace wxl::modern_adt
     {
         bool        texture_scale = true;
         adt::Prefer source = adt::Prefer::automatic;
+        bool        height_blend = true;
         std::vector<std::string> problems; ///< lines not understood
     };
 

@@ -278,6 +278,7 @@ add_library(wxl-core SHARED
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/ShaderCode.cpp
     src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
@@ -340,6 +341,7 @@ add_executable(wxl-core-seam-harness
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/ShaderCode.cpp
     src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
@@ -406,6 +408,9 @@ add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cp
     tests/vk/draw_tests.cpp tests/vk/spirv_tests.cpp tests/vk/translate_tests.cpp tests/vk/v4_tests.cpp
     tests/vk/parity_tests.cpp tests/vk/render_tests.cpp tests/vk/v7_tests.cpp tests/vk/shapes_tests.cpp tests/vk/v5_tests.cpp)
 target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
+# wxl.modern-adt's height blend, its rewritten terrain programs drawn on the driver.
+target_sources(wxl-core-vk-tests PRIVATE mods/wxl.modern-adt/src/shader/Ps3.cpp)
+target_include_directories(wxl-core-vk-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt/src")
 include(tests/vk/programs.cmake)
 wxl_vk_add_test_programs(wxl-core-vk-tests)
 target_compile_options(wxl-core-vk-tests PRIVATE /W4 /permissive-)
@@ -424,7 +429,8 @@ add_test(NAME imaging COMMAND wxl-core-imaging-tests)
 # wxl.modern-adt's reading layer, store and features, on ADTs made up byte by byte.
 set(WXL_MODERN_ADT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt")
 add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt_tests.cpp" "${WXL_MODERN_ADT_DIR}/src/Options.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp")
+    "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp"
+    "${WXL_MODERN_ADT_DIR}/src/features/HeightBlend.cpp" "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
 target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
 add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)

@@ -17,6 +17,7 @@
 #include "wxl/events.h"
 #include "wxl/core/camera_facing.hpp"
 #include "wxl/core/gpu.hpp"
+#include "wxl/core/gx_state.h"
 #include "wxl/core/storm.hpp"
 #include "wxl/offsets/layout.hpp"
 #include "wxl/offsets/site.hpp"
@@ -842,6 +843,52 @@ namespace wxl::core::binding
         // GxXformSet(xf, matrix): cdecl, two dwords (0x0057C450): the stack's top, marked dirty.
         if (IsClient() && OnMainThread() && matrix && xform <= 10 && GxDevice())
             x86::CallFree<void>(WXL_SITE("GxXformSet", 0), xform, static_cast<const void*>(matrix));
+    }
+
+    void gx_pixel_constants_set(uint32_t first, const float* rows, uint32_t count)
+    {
+        // GxShaderConstantsSet(target, index, constants, count): cdecl (0x00408210); GxSh_Pixel is 1.
+        if (IsClient() && OnMainThread() && rows && count && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxShaderConstantsSet", 0), uint32_t{1}, first, rows, count);
+    }
+
+    void* gx_texture_stage(uint32_t stage)
+    {
+        const void* device = IsClient() && stage < 16 ? GxDevice() : nullptr;
+        if (!device) return nullptr;
+        const auto* states = Read<const wxl_gx_app_state*>(device, WXL_FIELD("CGxDevice", "m_appRenderStates.m_data"));
+        return states ? states[21 + stage].value.data.p : nullptr; // GxRs_Texture0 is 21
+    }
+
+    void gx_texture_stage_set(uint32_t stage, void* texture)
+    {
+        // GxRsSet(which, void*): cdecl, two dwords (0x00408240), CGxDevice::RsSet on the device.
+        if (IsClient() && OnMainThread() && stage < 16 && GxDevice())
+            x86::CallFree<void>(WXL_SITE_AT("GxRsSet", 0x00408240, 0), uint32_t{21 + stage}, texture);
+    }
+
+    void gx_texture_wrap(void* texture)
+    {
+        // GxTexSetWrap(texture, wrapU, wrapV): cdecl, three dwords (0x00681450); GxTex_Wrap is 1.
+        if (IsClient() && OnMainThread() && texture && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxTexSetWrap", 0), texture, uint32_t{1}, uint32_t{1});
+    }
+
+    wxl_bool gx_shader_record(const void* shader, wxl_core_shader_record* out)
+    {
+        if (!IsClient() || !shader || !out) return WXL_FALSE;
+        out->name   = Read<const char*>(shader, WXL_FIELD("CGxShader", "m_key.m_str"));
+        out->target = Read<int32_t>(shader, WXL_FIELD("CGxShader", "m_target"));
+        out->code   = Read<const void*>(shader, WXL_FIELD("CGxShader", "m_code.m_data"));
+        out->size   = Read<uint32_t>(shader, WXL_FIELD("CGxShader", "m_code.m_count"));
+        return WXL_TRUE;
+    }
+
+    void gx_shader_code_set(void* shader, const void* code, uint32_t size)
+    {
+        if (!IsClient() || !shader) return;
+        *reinterpret_cast<const void**>(static_cast<char*>(shader) + WXL_FIELD("CGxShader", "m_code.m_data")) = code;
+        *reinterpret_cast<uint32_t*>(static_cast<char*>(shader) + WXL_FIELD("CGxShader", "m_code.m_count")) = size;
     }
 
     void* gx_d3d9_device()

@@ -187,6 +187,15 @@ typedef struct wxl_core_area_file
     uint32_t    size;   ///< m_fileSize
 } wxl_core_area_file;
 
+/// A program's record (binding gx_shader_record): CGxShader.
+typedef struct wxl_core_shader_record
+{
+    const char* name;   ///< m_key.m_str: "<program>:<permutation>"
+    int32_t     target; ///< m_target: EGxShTarget, 0 vertex, 4 pixel
+    const void* code;   ///< m_code.m_data
+    uint32_t    size;   ///< m_code.m_count, in bytes
+} wxl_core_shader_record;
+
 /// How the world is being drawn (binding gx_world_view): the engine's matrices, rows a..d of
 /// C44Matrix, which a point taken from `eye` is multiplied by on the left: clip = [p 1] * view *
 /// projection.

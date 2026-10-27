@@ -10,6 +10,10 @@
 #include "gx/Vulkan.hpp"
 #include "gx/vk/gxfront/Front.hpp"
 #include "services/RenderService.hpp"
+#include "services/ShaderCode.hpp"
+
+#include "wxl/host/mod_host.hpp"
+#include "runtime/Core.hpp"
 
 namespace
 {
@@ -28,7 +32,14 @@ namespace
 
     uint32_t WXL_CALL Api(void) { return wxl::core::services::render::Backend(); }
 
-    const wxl_gx_api kApi = {sizeof(wxl_gx_api), &D3d9Device, &InvalidateState, &Api};
+    wxl_result WXL_CALL SetShaderProvider(const wxl_gx_shader_provider* provider)
+    {
+        const wxl::host::ModHost* host = wxl::core::Host();
+        if (host && !host->OnMainThread()) return WXL_E_INVALID;
+        return wxl::core::services::shader_code::SetProvider(host ? host->CurrentMod() : 0u, provider);
+    }
+
+    const wxl_gx_api kApi = {sizeof(wxl_gx_api), &D3d9Device, &InvalidateState, &Api, &SetShaderProvider};
 }
 
 namespace wxl::core::services

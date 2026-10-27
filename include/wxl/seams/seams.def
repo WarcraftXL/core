@@ -53,7 +53,7 @@
 // WXL_SEAM_X64_ONLY rows follow their seam, for one whose body needs what only the recompiled
 // client has: the x86 runtime attaches no detour for it and does not announce its events, so a
 // mod asking wxl_host.raises is told no and a subscription to them is refused; `why` is the line
-// the runtime's log gives. No row is x64 only today.
+// the runtime's log gives. Rows x64 only: Gx.D3d9ExIShaderCreatePixel and Vertex.
 //
 // Include with the four row shapes defined; WXL_SEAM_RAISES, WXL_SEAM_WITNESS and
 // WXL_SEAM_X64_ONLY default to nothing.
