@@ -63,6 +63,8 @@
 #include "wxl/core/points.h"
 #include "wxl/core/gx_vk.h"
 #include "wxl/engine/gx.hpp"
+#include "services/TerrainLayers.hpp"
+#include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
 #include "wxl/core/storm.hpp"
 #include "wxl/objects/map.hpp"
@@ -245,6 +247,64 @@ namespace
         *x = static_cast<const FakeChunk*>(chunk)->cx;
         *y = static_cast<const FakeChunk*>(chunk)->cy;
         return WXL_TRUE;
+    }
+
+    // wxl.terrain's layers: a render chunk of the test's, the client's vertex constants, and what the
+    // runtime sends the device through the engine (constant rows, texture stage matrices).
+    struct FakeRenderChunk
+    {
+        uint32_t layers = 0;
+        uint32_t render_flags = 0;
+        uint32_t flags[4] = {};
+        uint32_t textures[4] = {};
+        char     batch = 0;
+    };
+    float                                           g_terrainConsts[37 * 4];
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_rowsSent;
+    float                                           g_stage[11][16];
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_stagesSet;
+    std::vector<uint8_t>                            g_areaFile(64, 0);
+
+    wxl_bool WXL_CALL FakeRenderChunkRead(const void* chunk, wxl_core_render_chunk* out)
+    {
+        if (!chunk || !out) return WXL_FALSE;
+        const auto* c = static_cast<const FakeRenderChunk*>(chunk);
+        *out              = wxl_core_render_chunk{};
+        out->layers       = c->layers;
+        out->render_flags = c->render_flags;
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            out->layer_flags[i]   = c->flags[i];
+            out->layer_texture[i] = c->textures[i];
+        }
+        out->batch = &c->batch;
+        return WXL_TRUE;
+    }
+    wxl_bool WXL_CALL FakeAreaFile(const void* area, wxl_core_area_file* out)
+    {
+        if (!area || !out) return WXL_FALSE;
+        out->tile_x = 32;
+        out->tile_y = 48;
+        out->data   = g_areaFile.data();
+        out->size   = static_cast<uint32_t>(g_areaFile.size());
+        return WXL_TRUE;
+    }
+    const float* WXL_CALL FakeTerrainConsts() { return g_terrainConsts; }
+    void WXL_CALL FakeVertexConstantsSet(uint32_t first, const float* rows, uint32_t count)
+    {
+        g_rowsSent.push_back({first, std::vector<float>(rows, rows + 4 * count)});
+    }
+    wxl_bool WXL_CALL FakeXformGet(uint32_t xform, float* m)
+    {
+        if (xform > 10 || !m) return WXL_FALSE;
+        std::memcpy(m, g_stage[xform], sizeof g_stage[xform]);
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeXformSet(uint32_t xform, const float* m)
+    {
+        if (xform > 10 || !m) return;
+        std::memcpy(g_stage[xform], m, sizeof g_stage[xform]);
+        g_stagesSet.push_back({xform, std::vector<float>(m, m + 16)});
     }
 
     wxl_bool WXL_CALL FakeTerrainView(void* chunk, wxl_core_terrain_chunk* out)
@@ -2583,6 +2643,12 @@ namespace
         init.terrain_chunk          = &FakeTerrainChunk;
         init.terrain_chunk_view     = &FakeTerrainView;
         init.terrain_chunk_place    = &FakeTerrainPlace;
+        init.terrain_render_chunk   = &FakeRenderChunkRead;
+        init.terrain_area_file      = &FakeAreaFile;
+        init.terrain_vertex_constants = &FakeTerrainConsts;
+        init.gx_vertex_constants_set = &FakeVertexConstantsSet;
+        init.gx_xform_get           = &FakeXformGet;
+        init.gx_xform_set           = &FakeXformSet;
         init.map_area_chunk         = &FakeMapAreaChunk;
         init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
         init.terrain_forget_collision = &FakeForgetCollision;
@@ -3910,6 +3976,177 @@ namespace
     /// wxl.terrain over the fake ground: reads, edits with their copies across edges, normals,
     /// owners and layers, the drawing's rebuilds inside and outside the world pass, a chunk read
     /// again from the disk, the fall of a player standing still, refusals, the map unloading.
+    /// wxl.terrain's layers: a provider's answers kept per render chunk and layer, then drawn through
+    /// each path's own state (the vertex program's rows, the texture stages' matrices) for that draw
+    /// only; a chunk whose layers are all at 1, or a draw of anything else, untouched.
+    void CheckTerrainLayers()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        static std::vector<wxl_terrain_layer> told;
+        told.clear();
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = [](void*, const wxl_terrain_layer* layer, wxl_terrain_layer_look* look) {
+            told.push_back(*layer);
+            if (layer->texture == 7) look->texture_scale = 4.0f;  // layer 1 of the chunk
+            if (layer->texture == 9) look->texture_scale = std::nanf("");
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "terrain layers: a mod sets its layer provider");
+        wxl_terrain_layer_provider none{};
+        none.struct_size = sizeof none;
+        Check(api.set_layer_provider(&none) == WXL_E_INVALID, "terrain layers: a provider without its function is refused");
+
+        // The client's constants: c13 + k offsets (animated layer 1), c18 + k scales, -0.24.
+        for (float& f : g_terrainConsts) f = 0.0f;
+        for (int k = 0; k < 4; ++k)
+        {
+            g_terrainConsts[(18 + k) * 4 + 0] = g_terrainConsts[(18 + k) * 4 + 1] = -0.24f;
+            g_terrainConsts[(13 + k) * 4 + 0] = 0.5f;
+            g_terrainConsts[(13 + k) * 4 + 1] = -0.25f;
+        }
+        FakeRenderChunk chunk;
+        char            area = 0;
+        const uint32_t  mcly[3][4] = {{3, 0x0, 0, 0}, {7, 0x40, 0, 0}, {5, 0x0, 0, 0}};
+        for (int i = 0; i < 3; ++i)
+        {
+            chunk.layers         = static_cast<uint32_t>(i + 1);
+            chunk.textures[i]    = mcly[i][0];
+            chunk.flags[i]       = mcly[i][1];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[i], 0);
+        }
+        Check(told.size() == 3 && told[1].texture == 7 && told[1].layer == 1 && told[1].flags == 0x40 && told[1].tile_x == 32 &&
+                  told[1].file == g_areaFile.data() && told[1].file_size == 64,
+              "terrain layers: the provider is told of each layer as it is made, with its ADT's bytes");
+        Check(layers::Count().chunks_kept == 1 && layers::Count().layers_scaled == 1, "terrain layers: the chunk with a scaled layer is kept");
+
+        auto sent = [&](uint32_t row) -> const std::vector<float>* {
+            for (const auto& r : g_rowsSent)
+                if (r.first == row) return &r.second;
+            return nullptr;
+        };
+        // Single pass, vertex program: c19 and c14 (layer 1) divided by 4, for this draw only.
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const auto* c19 = sent(19);
+        const auto* c14 = sent(14);
+        Check(g_rowsSent.size() == 2 && c19 && std::fabs((*c19)[0] + 0.06f) < 1e-6f && std::fabs((*c19)[1] + 0.06f) < 1e-6f && c14 &&
+                  std::fabs((*c14)[0] - 0.125f) < 1e-6f && (*c14)[2] == 0.0f,
+              "terrain layers: single pass: layer 1's scale (c19) and its animation offset (c14) divided by its texture scale, the others left");
+        g_rowsSent.clear();
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        Check(g_rowsSent.size() == 2 && sent(19) && (*sent(19))[0] == -0.24f && sent(14) && (*sent(14))[0] == 0.5f,
+              "terrain layers: after the draw, the client's own rows go back");
+        g_rowsSent.clear();
+        char other = 0;
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &other, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &other, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        wxl::seam::Gx::D3d9ExDraw::Before(nullptr, &chunk.batch, 1);
+        Check(g_rowsSent.empty(), "terrain layers: a draw of anything else, or after the chunk's function, untouched");
+
+        // A layer a pass, vertex program: the second draw (layer 1) reads c18 and c13.
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::Before(&chunk);
+        int scaledDraws = 0;
+        for (int d = 0; d < 4; ++d)
+        {
+            g_rowsSent.clear();
+            wxl::seam::Gx::D3d9ExDraw::Before(nullptr, &chunk.batch, 1);
+            if (!g_rowsSent.empty())
+            {
+                ++scaledDraws;
+                Check(d == 1 && sent(18) && std::fabs((*sent(18))[0] + 0.06f) < 1e-6f && sent(13) && std::fabs((*sent(13))[0] - 0.125f) < 1e-6f,
+                      "terrain layers: a layer a pass: layer 1's draw reads c18 and c13 divided by its scale");
+            }
+            wxl::seam::Gx::D3d9ExDraw::After(nullptr, &chunk.batch, 1);
+        }
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShaderBigAlpha::After(&chunk);
+        Check(scaledDraws == 1, "terrain layers: only the scaled layer's draw is changed, the shadow's pass past the layers not");
+
+        // Fixed function, single pass: stage 1's matrix, its u and v columns (translation included).
+        for (int x = 0; x < 11; ++x)
+            for (int i = 0; i < 16; ++i) g_stage[x][i] = static_cast<float>(i + 1);
+        g_stagesSet.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        Check(g_stagesSet.size() == 1 && g_stagesSet[0].first == 1 && g_stagesSet[0].second[0] == 0.25f && g_stagesSet[0].second[1] == 0.5f &&
+                  g_stagesSet[0].second[2] == 3.0f && g_stagesSet[0].second[12] == 13.0f / 4.0f && g_stagesSet[0].second[13] == 14.0f / 4.0f,
+              "terrain layers: single pass, fixed function: stage 1's matrix makes u and v four times smaller, its move too");
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        Check(g_stagesSet.size() == 2 && g_stage[1][0] == 1.0f && g_stage[1][13] == 14.0f, "terrain layers: and gets its matrix back after the draw");
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+
+        // Fixed function, a layer a pass: stage 0's matrix on layer 1's draw.
+        for (auto path : {0, 1, 2, 3})
+        {
+            g_stagesSet.clear();
+            switch (path)
+            {
+            case 0: wxl::seam::MapRenderChunk::RenderMultiPassPixelShader::Before(&chunk); break;
+            case 1: wxl::seam::MapRenderChunk::RenderMultiPassPixelShaderBigAlpha::Before(&chunk); break;
+            case 2: wxl::seam::MapRenderChunk::RenderMultiPassAdditive::Before(&chunk); break;
+            default: wxl::seam::MapRenderChunk::RenderMultiPassAlpha::Before(&chunk); break;
+            }
+            for (int d = 0; d < 3; ++d)
+            {
+                wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+                wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+            }
+            wxl::seam::MapRenderChunk::RenderMultiPassAlpha::After(&chunk);
+            Check(g_stagesSet.size() == 2 && g_stagesSet[0].first == 0 && g_stagesSet[0].second[0] == 0.25f && g_stage[0][0] == 1.0f,
+                  "terrain layers: a layer a pass, fixed function: stage 0 on layer 1's draw, given back");
+        }
+
+        // The Vulkan devices' draw_begin and draw_end: the same.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        const size_t begun = g_rowsSent.size();
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(backend->struct_size >= sizeof(wxl_gx_vk_backend) && begun == 2 && g_rowsSent.size() == 4,
+              "terrain layers: the Vulkan device's draw_begin and draw_end scale and give back the same rows");
+
+        // Scale 0 everywhere: a chunk whose layers are all at 1 is not kept, and nothing is sent.
+        FakeRenderChunk plain;
+        const uint32_t  stock[2][4] = {{3, 0, 0, 0}, {5, 0x40, 0, 0}};
+        for (int i = 0; i < 2; ++i)
+        {
+            plain.layers      = static_cast<uint32_t>(i + 1);
+            plain.textures[i] = stock[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&plain, &area, stock[i], 0);
+        }
+        g_rowsSent.clear();
+        g_stagesSet.clear();
+        for (int path = 0; path < 2; ++path)
+        {
+            if (path == 0) wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+            else wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&plain);
+            wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+            wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+            wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&plain);
+        }
+        Check(g_rowsSent.empty() && g_stagesSet.empty() && layers::Count().chunks_kept == 1,
+              "terrain layers: a chunk of stock layers (scale 1) is drawn exactly as the client draws it");
+
+        // An answer out of range is the client's own; the chunk made again forgets its old layers.
+        chunk.layers      = 1;
+        chunk.textures[0] = 9;
+        const uint32_t bad[4] = {9, 0, 0, 0};
+        wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, bad, 0);
+        Check(layers::Count().chunks_kept == 0, "terrain layers: a NaN answer is 1, and a chunk made again keeps nothing of before");
+
+        // The mod goes, its provider with it: layers are no longer asked.
+        const size_t asked = told.size();
+        wxl::core::services::terrain_layers::ForgetMod(0);
+        chunk.layers = 1;
+        wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[1], 0);
+        Check(told.size() == asked, "terrain layers: a mod's provider goes with it");
+        wxl::core::services::terrain_layers::Clear();
+    }
+
     void CheckTerrainService()
     {
         namespace grid = wxl::terrain;
@@ -14956,6 +15193,7 @@ int main(int argc, char** argv)
     CheckConsoleVar();
     CheckCVarService();
     CheckTerrainService();
+    CheckTerrainLayers();
     CheckDraw();
     CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();

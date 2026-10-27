@@ -944,6 +944,9 @@ GROUND_TRUTH = {
     "BLPFile.Source":                  ("0x006AE900", "thiscall", ["ecx"], 1),
     # CGxDevice::IShaderLoad reads ECX (0x0068497E) and [ebp+8..0x14], `ret 0x14` (0x00684A9F).
     "Gx.IShaderLoad":                  ("0x00684970", "thiscall", ["ecx"], 5),
+    # The devices' Draw (vtable slot 42): ecx, batch and count, `ret 0x8`.
+    "Gx.D3dDraw":                      ("0x006A3620", "thiscall", ["ecx"], 2),
+    "Gx.D3d9ExDraw":                   ("0x006A77C0", "thiscall", ["ecx"], 2),
     # SE2::CreateWaveData reads [ebp+8] (0x0087EE83) to the floats at [ebp+0x38], bare `ret`
     # (0x0087F195, 0x0087F376); Sound_LoadScriptSoundFile pushes sixteen, `add esp, 0x40` at
     # 0x0087F808.
@@ -965,6 +968,18 @@ GROUND_TRUTH = {
     "Map.AllocDoodadDef":              ("0x007C01F0", "cdecl", [], 0),
     # CMap::Unload reads no stack and ends in a bare `ret` (0x007C39F9).
     "Map.Unload":                      ("0x007C3830", "cdecl", [], 0),
+    # CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate) reads ecx and ends in `ret 0xc`;
+    # the two single-pass functions are thiscall with no argument (bare `ret`), the six multi-pass
+    # ones cdecl, the render chunk their one stack argument.
+    "MapRenderChunk.CreateLayer":                              ("0x007B9250", "thiscall", ["ecx"], 3),
+    "MapRenderChunk.RenderSinglePassVertexPixelShader":        ("0x007D2D70", "thiscall", ["ecx"], 0),
+    "MapRenderChunk.RenderMultiPassVertexPixelShader":         ("0x007D2520", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassVertexPixelShaderBigAlpha": ("0x007D20A0", "cdecl", [], 1),
+    "MapRenderChunk.RenderSinglePassPixelShader":              ("0x007D28B0", "thiscall", ["ecx"], 0),
+    "MapRenderChunk.RenderMultiPassPixelShader":               ("0x007D1AD0", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassPixelShaderBigAlpha":       ("0x007D13F0", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassAdditive":                  ("0x007D0760", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassAlpha":                     ("0x007D0D70", "cdecl", [], 1),
     "Map.CreateDoodadDef":             ("0x007BECD0", "cdecl", [], 3),
     "Map.CreateDoodadDefAt":           ("0x007BEB40", "cdecl", [], 4),
     "Map.CreateDoodadDefInMapObj":     ("0x007BEF40", "cdecl", [], 6),
@@ -1184,6 +1199,8 @@ GROUND_TRUTH = {
     "GxCall.XformSetView":                   ("0x00689050", "thiscall", ["ecx"], 1),
     "GxCall.QueryCreate":                    ("0x006877C0", "thiscall", ["ecx"], 2),
     "GxCall.ShaderConstantsClear":           ("0x006833A0", "cdecl", [], 0),
+    "GxCall.ShaderConstantsSet":             ("0x00408210", "cdecl", [], 4),
+    "GxCall.XformSet":                       ("0x0057C450", "cdecl", [], 2),
     "GxCall.IRsSync":                        ("0x00685B50", "thiscall", ["ecx"], 1),
     "GxCall.ITexMarkAsUpdated":              ("0x00684900", "stdcall", [], 1),
     "GxCall.ITexWHDStartEnd":                ("0x006A5EF0", "thiscall", ["ecx"], 5),
