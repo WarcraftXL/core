@@ -261,6 +261,9 @@ namespace
         uint32_t flags[4] = {};
         uint32_t textures[4] = {};
         char     batch = 0;
+        const void* map_chunk = nullptr;
+        const void* map_chunk2 = nullptr;
+        uint32_t    pair = 0;
     };
     float                                           g_terrainConsts[37 * 4];
     std::vector<std::pair<uint32_t, std::vector<float>>> g_rowsSent;
@@ -280,7 +283,10 @@ namespace
             out->layer_flags[i]   = c->flags[i];
             out->layer_texture[i] = c->textures[i];
         }
-        out->batch = &c->batch;
+        out->batch      = &c->batch;
+        out->map_chunk  = c->map_chunk;
+        out->map_chunk2 = c->map_chunk2;
+        out->pair       = c->pair;
         return WXL_TRUE;
     }
     wxl_bool WXL_CALL FakeAreaFile(const void* area, wxl_core_area_file* out)
@@ -316,6 +322,43 @@ namespace
         if (stage < 16) g_stageTexture[stage] = texture;
     }
     void WXL_CALL FakeTextureWrap(void*) { ++g_texturesWrapped; }
+
+    // Render states and the device's draws, for a chunk's second draw.
+    int32_t g_renderState[100] = {};
+    struct FakeDraw
+    {
+        const void* batch;
+        int32_t     blending, depthWrite;
+        void*       stage[16];
+        std::vector<float> pixelRows; ///< the last pixel rows sent before it
+        std::vector<std::pair<uint32_t, std::vector<float>>> vertexRows;
+    };
+    std::vector<FakeDraw> g_draws;
+    int32_t WXL_CALL FakeRenderState(uint32_t which) { return which < 100 ? g_renderState[which] : 0; }
+    void WXL_CALL FakeRenderStateSet(uint32_t which, int32_t value)
+    {
+        if (which < 100) g_renderState[which] = value;
+    }
+    void WXL_CALL FakeGxDraw(const void* batch, int32_t)
+    {
+        FakeDraw d{batch, g_renderState[6], g_renderState[15], {}, {}, g_rowsSent};
+        std::memcpy(d.stage, g_stageTexture, sizeof d.stage);
+        if (!g_pixelRowsSent.empty()) d.pixelRows = g_pixelRowsSent.back().second;
+        g_draws.push_back(d);
+        // The device's own draw seams fire for it, as they do on every device.
+        wxl::seam::Gx::D3dDraw::Before(nullptr, batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, batch, 1);
+    }
+    // The map's WDT as the client loaded it.
+    uint32_t g_wdtFlags = 0;
+    int      g_shadersValidated = 0;
+    wxl_bool WXL_CALL FakeMapWdt(wxl_core_wdt* out)
+    {
+        out->path  = "World\\Maps\\Missing\\Missing.wdt";
+        out->flags = &g_wdtFlags;
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeValidateShaders() { ++g_shadersValidated; }
 
     // A program's record (CGxShader), as the D3D9 device makes it.
     struct FakeShader
@@ -2705,6 +2748,11 @@ namespace
         init.gx_texture_stage       = &FakeTextureStage;
         init.gx_texture_stage_set   = &FakeTextureStageSet;
         init.gx_texture_wrap        = &FakeTextureWrap;
+        init.gx_render_state        = &FakeRenderState;
+        init.gx_render_state_set    = &FakeRenderStateSet;
+        init.gx_draw                = &FakeGxDraw;
+        init.map_wdt                = &FakeMapWdt;
+        init.map_validate_shaders   = &FakeValidateShaders;
         init.gx_shader_record       = &FakeShaderRecord;
         init.gx_shader_code_set     = &FakeShaderCodeSet;
         init.map_area_chunk         = &FakeMapAreaChunk;
@@ -4246,7 +4294,7 @@ namespace
         wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
         const bool bound = g_stageTexture[13] == &g_fakeGxTex && !g_stageTexture[14] && g_texturesWrapped == 1;
         const bool rows  = g_pixelRowsSent.size() == 1 && g_pixelRowsSent[0].first == WXL_TERRAIN_LAYER_PARAM_ROW &&
-                          g_pixelRowsSent[0].second.size() == 16 && g_pixelRowsSent[0].second[4] == 6.0f && g_pixelRowsSent[0].second[6] == 1.0f &&
+                          g_pixelRowsSent[0].second.size() == 17 * 4 && g_pixelRowsSent[0].second[4] == 6.0f && g_pixelRowsSent[0].second[6] == 1.0f &&
                           g_pixelRowsSent[0].second[0] == 0.0f && g_pixelRowsSent[0].second[8] == 0.0f && g_pixelRowsSent[0].second[10] == 0.0f;
         wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
         wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
@@ -4283,7 +4331,7 @@ namespace
         wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&plain);
         bool plainZeros = g_pixelRowsSent.size() == 2;
         for (const auto& r : g_pixelRowsSent)
-            for (float f : r.second) plainZeros = plainZeros && f == 0.0f;
+            for (size_t i = 0; i < 9 * 4 && i < r.second.size(); ++i) plainZeros = plainZeros && r.second[i] == 0.0f; // numbers and pass row
         Check(plainZeros && g_rowsSent.empty() && g_stageTexture[12] == nullptr,
               "terrain extras: a stock chunk gets zeros (WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW), nothing else");
         g_pixelRowsSent.clear();
@@ -4308,6 +4356,142 @@ namespace
         layers::MapUnloading();
         Check(g_texturesClosed - closedBefore == 2 && layers::Count().chunks_kept == 0, "terrain extras: the map goes, its extra textures closed");
         g_stageTexture[13] = nullptr;
+        layers::Clear();
+    }
+
+    // abi 0.1.44: a chunk's layers past its four, drawn a second time over the first.
+    void CheckTerrainExtraLayers()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        static int  asked = 0;
+        static bool differ = false;
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.flags       = WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW;
+        provider.fn          = [](void*, const wxl_terrain_layer*, wxl_terrain_layer_look*) {};
+        provider.chunk_fn    = [](void*, const wxl_terrain_chunk* chunk, wxl_terrain_extra_layers* out) {
+            ++asked;
+            if (chunk->layers != 4) return;
+            out->count                   = 2;
+            out->layer[0].texture        = differ && asked % 2 == 0 ? "Tileset\\Rock.blp" : "Tileset\\Moss.blp";
+            out->layer[0].texture_scale  = 2.0f;
+            out->layer[0].extra_texture  = "Tileset\\Moss_h.blp";
+            out->layer[0].params[0]      = 5.0f;
+            out->layer[0].params[1]      = 1.0f;
+            out->layer[0].params[2]      = 1.0f;
+            out->layer[1].texture        = "Tileset\\Sand.blp";
+            out->layer[1].texture_scale  = 1.0f;
+            out->alpha[0]                = 200;
+            out->alpha[1]                = 100;
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "extra layers: a provider with a chunk function is set");
+        static char     mapChunk = 0, neighbour = 0, area = 0;
+        FakeRenderChunk chunk;
+        chunk.map_chunk = &mapChunk;
+        const auto make = [&](FakeRenderChunk& c) {
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                const uint32_t mcly[4] = {20 + i, 0, 0, 0};
+                c.layers      = i + 1;
+                c.textures[i] = 20 + i;
+                wxl::seam::MapRenderChunk::CreateLayer::After(&c, &area, mcly, 0);
+            }
+        };
+        const size_t opened = g_openedTextures.size();
+        make(chunk);
+        bool served = false;
+        for (size_t i = opened; i < g_openedTextures.size(); ++i)
+            served = served || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_64x64_", 0) == 0;
+        Check(asked == 1 && layers::Count().chunks_extra == 1 && served,
+              "extra layers: asked once the chunk's fourth layer is made; their alpha maps served as a 64 x 64 texture and opened");
+
+        for (int& v : g_renderState) v = 0;
+        g_renderState[15] = 1; // depth written
+        static char stock0 = 0;
+        for (void*& t : g_stageTexture) t = nullptr;
+        g_stageTexture[0] = &stock0;
+        for (float& f : g_terrainConsts) f = 0.0f;
+        for (int k = 0; k < 5; ++k) g_terrainConsts[(18 + k) * 4 + 0] = g_terrainConsts[(18 + k) * 4 + 1] = -0.24f;
+        g_pixelRowsSent.clear();
+        g_rowsSent.clear();
+        g_draws.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const std::vector<float> first = g_pixelRowsSent.empty() ? std::vector<float>() : g_pixelRowsSent.back().second;
+        const bool firstBound = g_stageTexture[9] == &g_fakeGxTex && g_stageTexture[10] == &g_fakeGxTex && !g_stageTexture[11];
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(first.size() == 17 * 4 && first[4 * 4] == 5.0f && first[4 * 4 + 2] == 1.0f && first[8 * 4] == 0.0f && first[8 * 4 + 1] == 1.0f &&
+                  firstBound,
+              "extra layers: the first draw has layer 4's numbers in c36, the pass row (0, 1), their alpha maps on 9, layer 4's height on 10");
+        // u = alpha u * x + z: layer 4 at scale 2 is half the alpha maps' ratio of layer 0's.
+        Check(first.size() == 17 * 4 && first[(9 + 4) * 4] * 2.0f == first[9 * 4] && first[9 * 4] != 0.0f,
+              "extra layers: each layer's coordinates from the alpha maps' (c41 + k), at its own scale");
+        const FakeDraw* second = g_draws.size() == 1 ? &g_draws[0] : nullptr;
+        bool scaled = false, still = false;
+        if (second)
+            for (const auto& r : second->vertexRows)
+            {
+                if (r.first == 18 && r.second.size() == 16 && r.second[0] == -0.12f && r.second[4] == -0.24f) scaled = true;
+                if (r.first == 13 && r.second.size() == 16 && r.second[0] == 0.0f) still = true;
+            }
+        Check(second && second->batch == &chunk.batch && second->blending == 2 && second->depthWrite == 0 && second->stage[0] == &g_fakeGxTex &&
+                  second->stage[1] == &g_fakeGxTex && second->pixelRows.size() == 4 && second->pixelRows[0] == 1.0f,
+              "extra layers: one second draw, alpha-blended without depth writes, layers 4 and 5 on stages 0 and 1, pass row (1, 1)");
+        Check(scaled && still, "extra layers: its coordinates 0 and 1 at layers 4 and 5's scales (c18, c19), drawn still (c13 zero)");
+        bool zeros = !g_pixelRowsSent.empty() && g_pixelRowsSent.back().second.size() == 17 * 4;
+        for (float f : g_pixelRowsSent.back().second) zeros = zeros && f == 0.0f;
+        Check(g_renderState[6] == 0 && g_renderState[15] == 1 && g_stageTexture[0] == &stock0 && !g_stageTexture[9] && zeros,
+              "extra layers: after the draws, the states, the stages and the rows are the client's again");
+
+        // The Vulkan devices: draw_end draws the second the same way.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_draws.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(g_draws.size() == 1 && g_draws[0].blending == 2 && g_renderState[6] == 0, "extra layers: the Vulkan device's draw_end draws the second, once");
+
+        // The fixed-function single pass draws the four: no second draw, the pass row (0, 0).
+        g_draws.clear();
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const std::vector<float> fixed = g_pixelRowsSent.empty() ? std::vector<float>() : g_pixelRowsSent.back().second;
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+        Check(g_draws.empty() && fixed.size() == 17 * 4 && fixed[8 * 4 + 1] == 0.0f, "extra layers: the fixed-function single pass draws the client's four");
+
+        // Drawn with its neighbour: both answer the same layers, their maps side by side; else the four.
+        FakeRenderChunk paired;
+        paired.map_chunk  = &mapChunk;
+        paired.map_chunk2 = &neighbour;
+        paired.pair       = 2;
+        const size_t before = g_openedTextures.size();
+        make(paired);
+        bool wide = false;
+        for (size_t i = before; i < g_openedTextures.size(); ++i)
+            wide = wide || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_128x64_", 0) == 0;
+        differ = true;
+        FakeRenderChunk other = paired;
+        make(other);
+        Check(wide && layers::Count().chunks_extra == 2 && layers::Count().chunks_unpaired == 1,
+              "extra layers: a chunk drawn beside its neighbour gets 128 x 64 maps; one whose neighbour answers other layers keeps its four");
+        differ = false;
+
+        const int closed = g_texturesClosed;
+        layers::MapUnloading();
+        Check(g_texturesClosed - closed >= 5 && layers::Count().chunks_kept == 0, "extra layers: the map goes, their textures and maps closed");
+
+        // The map's WDT: height texturing without big alpha read as retail reads it.
+        g_wdtFlags = 0x80;
+        g_shadersValidated = 0;
+        Check(layers::WdtLoaded() == 0x84 && g_wdtFlags == 0x84 && g_shadersValidated == 1 && layers::Wdt().empty(),
+              "the map's WDT: 0x80 without 0x4 is given 0x4 and the programs checked again; a WDT not found is no bytes");
+        g_wdtFlags = 0x4;
+        Check(layers::WdtLoaded() == 0x4 && g_shadersValidated == 1, "the map's WDT: other flags are left as the client read them");
         layers::Clear();
     }
 
@@ -15634,6 +15818,7 @@ int main(int argc, char** argv)
     CheckTerrainLayers();
     CheckTerrainLayerExtras();
     CheckTerrainLayerLimit();
+    CheckTerrainExtraLayers();
     CheckShaderCode();
     CheckDraw();
     CheckInterfaceSignature();

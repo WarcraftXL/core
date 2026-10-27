@@ -10,6 +10,7 @@
 
 #include "Options.hpp"
 #include "adt/Reader.hpp"
+#include "features/ExtraLayers.hpp"
 #include "features/HeightBlend.hpp"
 #include "features/TextureScale.hpp"
 #include "shader/Ps3.hpp"
@@ -214,7 +215,7 @@ namespace
         HeightBlend                blend(store, [&](const std::string& name) {
             asked.push_back(name);
             return name.find("t3_h") == std::string::npos; // t3's _h is missing
-        });
+        }, false);
         wxl_terrain_layer layer{};
         layer.struct_size = sizeof layer;
         layer.chunk_x = 10, layer.chunk_y = 20;
@@ -422,8 +423,8 @@ namespace
             const std::vector<uint32_t> stock = TerrainProgram(layers);
             const bool made = BlendByHeight(stock.data(), stock.size() * 4, out, found, why);
             char       what[160];
-            std::snprintf(what, sizeof what, "%u layers: rewritten, every layer read with its height", layers);
-            Check(made && found.layers == layers && found.heights == layers, what);
+            std::snprintf(what, sizeof what, "%u layers: rewritten, every layer read with its height (four: layers 4 and 5 too)", layers);
+            Check(made && found.layers == layers && found.heights == (layers == 4 ? 6u : layers), what);
             if (!made) continue;
             float worst = 0.0f;
             bool  same  = true, ran = true;
@@ -471,6 +472,283 @@ namespace
         std::vector<uint32_t> busy = TerrainProgram(4);
         busy.insert(busy.begin() + 1, {0x1F | (2u << 24), 0x80000000u | (2u << 27), D(10, 12)});
         Check(!BlendByHeight(busy.data(), busy.size() * 4, out, found, why) && why == "a height sampler is in use", "a program using sampler 12 already: left");
+
+        // Four layers: eight, in two draws blended as the device blends them.
+        const std::vector<uint32_t> four = TerrainProgram(4);
+        Check(BlendByHeight(four.data(), four.size() * 4, out, found, why) && found.extras && found.heights == 6,
+              "a four-layer program is rewritten for eight layers, six with their heights");
+        float worst = 0.0f;
+        bool  same = true, ran = true;
+        for (int trial = 0; trial < 600; ++trial)
+        {
+            float alpha[8] = {}, params[8][4] = {};
+            Vec   t[8];
+            for (int k = 1; k < 8; ++k) alpha[k] = trial % 9 == 0 ? std::round(rnd()) : rnd();
+            const bool extras = trial % 4 != 0, heights = trial % 3 != 0;
+            if (!extras)
+                for (int k = 4; k < 8; ++k) alpha[k] = 0.0f;
+            for (Vec& x : t) x = {rnd(), rnd(), rnd(), rnd()};
+            for (int k = 0; k < 6; ++k)
+                if (heights && (trial + k) % 3 != 0) params[k][0] = 1.0f + 9.0f * rnd(), params[k][1] = trial % 5 ? 1.0f : 0.5f, params[k][2] = 1.0f;
+            // Each layer's coordinates from the alpha maps' (c41 + k), its height a function of where it is read.
+            const Vec ac = {rnd(), rnd(), 0.0f, 1.0f};
+            float     coordRow[8][4];
+            Vec       coord[8];
+            for (int k = 0; k < 8; ++k)
+            {
+                coordRow[k][0] = 1.0f + static_cast<float>(k), coordRow[k][1] = 2.0f - 0.1f * static_cast<float>(k);
+                coordRow[k][2] = 0.1f * static_cast<float>(k), coordRow[k][3] = -0.2f * static_cast<float>(k);
+                coord[k] = {ac[0] * coordRow[k][0] + coordRow[k][2], ac[1] * coordRow[k][1] + coordRow[k][3], 0.0f, 1.0f};
+            }
+            const auto height = [](int layer, const Vec& at) {
+                const float v = std::sin(at[0] * 3.1f + at[1] * 1.7f + static_cast<float>(layer));
+                return v * v;
+            };
+            const auto draw = [&](const std::vector<uint32_t>& program, int pass, Vec& colour) {
+                Machine m;
+                for (int k = 0; k < 4; ++k) m.v[2 + k] = coord[pass * 4 + k];
+                m.v[6] = ac;
+                m.sample = [&](uint32_t s, const Vec& at) -> Vec {
+                    if (s < 4) return t[pass * 4 + s];
+                    if (s == 4) return {alpha[1], alpha[2], alpha[3], 1.0f};
+                    if (s == shader::kExtraAlphaSampler) return {alpha[4], alpha[5], alpha[6], alpha[7]};
+                    if (s == shader::kExtraHeightSampler || s == shader::kExtraHeightSampler + 1)
+                        return {0, 0, 0, height(4 + static_cast<int>(s - shader::kExtraHeightSampler), at)};
+                    if (s >= shader::kHeightSampler && s < shader::kHeightSampler + 4)
+                        return {0, 0, 0, height(static_cast<int>(s - shader::kHeightSampler), at)};
+                    return {};
+                };
+                for (int k = 0; k < 8; ++k) std::memcpy(&m.c[shader::kParamRow + k], params[k], 16);
+                m.c[shader::kPassRow] = {static_cast<float>(pass), extras ? 1.0f : 0.0f, 0.0f, 0.0f};
+                for (int k = 0; k < 8; ++k) std::memcpy(&m.c[shader::kCoordRow + k], coordRow[k], 16);
+                if (!m.Run(program)) return false;
+                colour = m.o;
+                return true;
+            };
+            Vec first{}, second{}, stock{};
+            ran = ran && draw(out, 0, first) && draw(four, 0, stock) && (!extras || draw(out, 1, second));
+            Vec final = first;
+            if (extras)
+                for (int c = 0; c < 3; ++c) final[c] = second[3] * second[c] + (1.0f - second[3]) * first[c];
+            // Worked out apart: the eight layers' weights, each over the ones below, cut and shared out.
+            float wgt[8] = {}, rem = 1.0f, pct[8] = {}, top = 0.0f, sum = 0.0f;
+            for (int k = 7; k >= 1; --k)
+            {
+                wgt[k] = alpha[k] * rem;
+                rem *= 1.0f - alpha[k];
+            }
+            wgt[0]   = rem;
+            bool any = false;
+            for (int k = 0; k < 8; ++k)
+            {
+                any    = any || params[k][2] != 0.0f;
+                pct[k] = wgt[k] * (params[k][2] != 0.0f ? height(k, coord[k]) * params[k][0] + params[k][1] : 1.0f);
+                top    = std::max(top, pct[k]);
+            }
+            for (int k = 0; k < 8; ++k)
+            {
+                if (any) pct[k] *= 1.0f - std::min(1.0f, std::max(0.0f, top - pct[k]));
+                sum += pct[k];
+            }
+            Vec want{};
+            for (int k = 0; k < 8; ++k)
+                for (int c = 0; c < 3; ++c) want[c] += pct[k] / std::max(sum, 1e-6f) * t[k][c];
+            for (int c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(final[c] - want[c]));
+            if (!extras && !heights) same = same && std::memcmp(&first, &stock, sizeof first) == 0;
+        }
+        char what[200];
+        std::snprintf(what, sizeof what, "eight layers in two draws: the blended colour is the eight-layer height blend's, across both draws (worst %.2g over 600 pixels)", worst);
+        Check(ran && worst < 5e-5f, what);
+        Check(ran && same, "a four-layer chunk without heights or extra layers draws bit for bit as the client's program");
+    }
+
+    // --- Layers past four -----------------------------------------------------------------------
+
+    /// MCLY and MCAL of chunk 13 of artifact-acquisitionarmsholyshadow_8_49_tex0.adt (retail): five
+    /// layers, every alpha map run-length coded (flags 0x300), MCAL 512 bytes.
+    const uint8_t kRetailChunk[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+        0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+        0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+        0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+        0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+        0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0, 0x00,
+    };
+
+    void SplitCases()
+    {
+        Adt file;
+        file.Chunk(adt::kMVER, Words({18}));
+        const std::string names = std::string("t\\a.blp") + '\0' + "t\\b.blp" + '\0';
+        file.Chunk(adt::kMTEX, std::vector<uint8_t>(names.begin(), names.end()));
+        Adt mcnk;
+        mcnk.Chunk(adt::kMCLY, std::vector<uint8_t>(kRetailChunk, kRetailChunk + 80));
+        mcnk.Chunk(adt::kMCAL, std::vector<uint8_t>(kRetailChunk + 80, kRetailChunk + sizeof kRetailChunk));
+        file.Chunk(adt::kMCNK, mcnk.bytes);
+        const auto chunks = adt::ReadSplitChunks(adt::Reader(file.bytes.data(), file.bytes.size()));
+        Check(chunks.size() == 1 && chunks[0].layers.size() == 5 && chunks[0].layers[4].texture == 3 && chunks[0].layers[4].offset == 384 &&
+                  chunks[0].mcalSize == 512,
+              "a retail split chunk: five MCLY layers and its MCAL");
+        uint8_t a[4096];
+        uint32_t sum = 0;
+        const bool decoded = adt::DecodeAlpha(chunks[0], 1, a);
+        for (uint8_t v : a) sum += v;
+        Check(decoded && a[0] == 255 && sum / 4096 == 223, "its layer 1's map decoded from runs: 64 x 64, as retail drew it");
+        Check(adt::DecodeAlpha(chunks[0], 4, a) && a[100] == 0 && !adt::DecodeAlpha(chunks[0], 0, a),
+              "layer 4's map decoded; layer 0 has none");
+        adt::SplitChunk raw;
+        std::vector<uint8_t> bytes(4096);
+        for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<uint8_t>(i * 7);
+        raw.layers = {{0, 0, 0}, {1, 0x100, 0}};
+        raw.mcal = bytes.data();
+        raw.mcalSize = 4096;
+        Check(adt::DecodeAlpha(raw, 1, a) && a[4095] == static_cast<uint8_t>(4095 * 7), "an uncompressed map: 4096 bytes as they are");
+        raw.mcalSize = 2048;
+        Check(adt::DecodeAlpha(raw, 1, a) && a[0] == (bytes[0] & 15) * 17 && a[1] == (bytes[0] >> 4) * 17, "a map of four bits: low nibble first, times 17");
+        raw.mcalSize = 100;
+        Check(!adt::DecodeAlpha(raw, 1, a), "a map past MCAL: none");
+    }
+
+    /// A root ADT of names @p root, and its split file whose chunk 0 holds @p split's layers.
+    void ExtraCases()
+    {
+        const auto names = [](std::initializer_list<const char*> list) {
+            std::string out;
+            for (const char* n : list) (out += n) += '\0';
+            return std::vector<uint8_t>(out.begin(), out.end());
+        };
+        Adt root;
+        root.Chunk(adt::kMVER, Words({18}));
+        root.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
+        root.Chunk(adt::kMTEX, names({"T\\a.blp", "T\\b.blp", "T\\c.blp", "T\\d.blp"}));
+        Adt split;
+        split.Chunk(adt::kMVER, Words({18}));
+        split.Chunk(adt::kMTEX, names({"t\\A.blp", "t\\b.blp", "t\\c.blp", "t\\d.blp", "t\\e.blp", "t\\f.blp"}));
+        Adt mtxp;
+        for (uint32_t i = 0; i < 6; ++i)
+        {
+            mtxp.U32(i == 4 ? 0x20u : 0u);
+            mtxp.F32(i == 4 ? 6.0f : 0.0f);
+            mtxp.F32(1.0f);
+            mtxp.U32(0);
+        }
+        split.Chunk(adt::kMTXP, mtxp.bytes);
+        Adt mcnk;
+        Adt mcly;
+        for (uint32_t i = 0; i < 6; ++i)
+        {
+            mcly.U32(i);
+            mcly.U32(i ? 0x100u : 0u);
+            mcly.U32(i ? (i - 1) * 4096u : 0u);
+            mcly.U32(0);
+        }
+        mcnk.Chunk(adt::kMCLY, mcly.bytes);
+        std::vector<uint8_t> mcal(5 * 4096);
+        for (size_t i = 0; i < mcal.size(); ++i) mcal[i] = static_cast<uint8_t>(i / 4096 * 40 + i % 3);
+        mcnk.Chunk(adt::kMCAL, mcal);
+        for (int c = 0; c < 3; ++c) split.Chunk(adt::kMCNK, mcnk.bytes);
+        std::vector<std::string> read;
+        Store       store;
+        HeightBlend blend(store, [](const std::string& n) { return n.find("e_h") != std::string::npos; });
+        // The map's WDT: MPHD flags height texturing and big alpha, as WorldGen writes it.
+        Adt wdt;
+        wdt.Chunk(adt::kMVER, Words({18}));
+        wdt.Chunk(adt::kMPHD, Words({0x84, 0, 0, 0, 0, 0, 0, 0}));
+        ExtraLayers extra(store, &blend, [&](const std::string& name, std::vector<uint8_t>& bytes) {
+            read.push_back(name);
+            if (name != "World\\Maps\\M\\M_32_48_tex0.adt") return false;
+            bytes = split.bytes;
+            return true;
+        });
+        Check(ExtraLayers::SplitName("W\\M_1_2.ADT") == "W\\M_1_2_tex0.adt" && ExtraLayers::SplitName("x.wdt").empty(), "a tile's split texture file is its name with _tex0");
+        extra.TileLoaded("World\\Maps\\M\\M_32_48.adt", 32, 48);
+        wxl_terrain_chunk chunk{};
+        chunk.struct_size = sizeof chunk;
+        chunk.tile_x = 32, chunk.tile_y = 48;
+        chunk.chunk_x = 32 * 16 + 1, chunk.chunk_y = 48 * 16; // chunk 1 of the tile
+        chunk.layers = 4;
+        for (uint32_t k = 0; k < 4; ++k) chunk.texture[k] = k;
+        chunk.file          = root.bytes.data();
+        chunk.file_size     = static_cast<uint32_t>(root.bytes.size());
+        chunk.map_file      = wdt.bytes.data();
+        chunk.map_file_size = static_cast<uint32_t>(wdt.bytes.size());
+        static wxl_terrain_extra_layers out;
+        out = wxl_terrain_extra_layers{};
+        extra.Answer(chunk, out);
+        Check(read.size() == 1 && extra.Files() == 1 && out.count == 2 && std::string(out.layer[0].texture) == "t\\e.blp" &&
+                  out.layer[0].texture_scale == 4.0f && out.layer[1].texture_scale == 1.0f,
+              "a chunk of six layers whose first four are the root's: layers 4 and 5, their textures and scales");
+        Check(out.layer[0].extra_texture && std::string(out.layer[0].extra_texture) == "t\\e_h.blp" && out.layer[0].params[0] == 6.0f &&
+                  !out.layer[1].extra_texture,
+              "layer 4's height as height_blend gives it; layer 5 has none");
+        Check(out.alpha[0] == 3 * 40 + 12288 % 3 && out.alpha[1] == 4 * 40 + 16384 % 3 && out.alpha[4 * 7 + 1] == 4 * 40 + 16391 % 3 &&
+                  out.alpha[3] == 0,
+              "their alpha maps four bytes a texel, layer 4 in the first");
+        chunk.texture[2] = 3;
+        out = wxl_terrain_extra_layers{};
+        extra.Answer(chunk, out);
+        Check(out.count == 0 && extra.Mismatched() == 1, "a chunk whose first four are not the root's: drawn as the client draws it");
+        chunk.texture[2] = 2;
+        chunk.chunk_x    = 32 * 16 + 5;
+        out = wxl_terrain_extra_layers{};
+        extra.Answer(chunk, out);
+        Check(out.count == 0, "a chunk past those the split file holds: none");
+        extra.TileLoaded("World\\Maps\\M\\M_31_48.adt", 31, 48);
+        chunk.tile_x = 31;
+        chunk.chunk_x = 31 * 16;
+        out = wxl_terrain_extra_layers{};
+        extra.Answer(chunk, out);
+        Check(read.size() == 2 && out.count == 0 && extra.Files() == 1, "a tile without its split file: its chunks keep their four");
+    }
+
+    void MapCases()
+    {
+        Adt flagged, plain;
+        for (Adt* a : {&flagged, &plain}) a->Chunk(adt::kMVER, Words({18}));
+        flagged.Chunk(adt::kMPHD, Words({0x84, 0, 0, 0, 0, 0, 0, 0}));
+        plain.Chunk(adt::kMPHD, Words({0x4, 0, 0, 0, 0, 0, 0, 0}));
+        uint32_t flags = 0;
+        Check(adt::MapFlags(adt::Reader(flagged.bytes.data(), flagged.bytes.size()), &flags) && flags == 0x84 &&
+                  !adt::MapFlags(adt::Reader(nullptr, 0), &flags),
+              "a WDT's MPHD flags read; no WDT, none");
+        Store       store;
+        HeightBlend strict(store, [](const std::string&) { return true; }), loose(store, [](const std::string&) { return true; }, false);
+        const auto  size = [](const Adt& a) { return static_cast<uint32_t>(a.bytes.size()); };
+        Check(strict.MapAllows(flagged.bytes.data(), size(flagged)) && !strict.MapAllows(plain.bytes.data(), size(plain)) &&
+                  !strict.MapAllows(nullptr, 0),
+              "the height blend on a map flagged 0x80 only, as retail decides it");
+        Check(loose.MapAllows(plain.bytes.data(), size(plain)) && loose.MapAllows(nullptr, 0), "require_wdt_flag = 0: on every map");
+        // The map's flags decide an uncompressed map's size.
+        adt::SplitChunk chunk;
+        std::vector<uint8_t> bytes(4096 + 2048, 0x31);
+        chunk.layers = {{0, 0, 0}, {1, 0x100, 0}, {2, 0x100, 2048}};
+        chunk.mcal = bytes.data();
+        chunk.mcalSize = static_cast<uint32_t>(bytes.size()) - 1;
+        uint8_t a[4096];
+        Check(adt::DecodeAlpha(chunk, 1, a, 0) && a[1] == 3 * 17 && adt::DecodeAlpha(chunk, 1, a, 1) && a[1] == 0x31 &&
+                  !adt::DecodeAlpha(chunk, 2, a, 1) && adt::DecodeAlpha(chunk, 2, a, 0),
+              "an uncompressed map: 2048 bytes of four bits without 0x4 or 0x80, 4096 with either");
+        Options o = ParseOptions("[height_blend]\nrequire_wdt_flag = false\n");
+        Check(!o.require_wdt_flag && o.problems.empty() && ParseOptions("").require_wdt_flag, "[height_blend] require_wdt_flag, on by default");
     }
 
     void OptionCases()
@@ -491,6 +769,9 @@ int main()
     FeatureCases();
     HeightBlendCases();
     ShaderCases();
+    SplitCases();
+    ExtraCases();
+    MapCases();
     OptionCases();
     std::printf("%d check(s), %d failure(s)\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

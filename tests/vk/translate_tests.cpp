@@ -1109,6 +1109,96 @@ namespace wxl::vk::test
                           ("a chunk without heights draws bit for bit as the client's program: " + k.name).c_str());
             }
         }
+        // Eight layers: a four-layer program drawn twice, the second blended over the first as the
+        // device blends it (source alpha), against the eight-layer blend worked out apart.
+        {
+            Asm v(false, 3, 0);
+            v.Dcl(0, 0, Dst(Reg::Input, 0));
+            v.Dcl(0, 0, Dst(Reg::Output, 0));
+            for (uint32_t k = 0; k <= 4; ++k) v.Dcl(5, k, Dst(Reg::Output, 1 + k));
+            v.Op(O::kMov, {Dst(Reg::Output, 0), Src(Reg::Input, 0)});
+            for (uint32_t k = 0; k <= 4; ++k) v.Op(O::kMov, {Dst(Reg::Output, 1 + k), Src(Reg::Const, 10 + k)});
+            Asm p(true, 3, 0);
+            for (uint32_t k = 0; k <= 4; ++k) p.Dcl(5, k, Dst(Reg::Input, k));
+            for (uint32_t k = 0; k <= 4; ++k) p.DclSampler(2, k);
+            for (uint32_t k = 0; k <= 4; ++k) p.Op(O::kTex, {Dst(Reg::Temp, k), Src(Reg::Input, k), Src(Reg::Sampler, k)});
+            p.Op(O::kLrp, {Dst(Reg::Temp, 11), Src(Reg::Temp, 4, 0x00), Src(Reg::Temp, 1), Src(Reg::Temp, 0)});
+            p.Op(O::kLrp, {Dst(Reg::Temp, 12), Src(Reg::Temp, 4, 0x55), Src(Reg::Temp, 2), Src(Reg::Temp, 11)});
+            p.Op(O::kLrp, {Dst(Reg::Temp, 13), Src(Reg::Temp, 4, 0xAA), Src(Reg::Temp, 3), Src(Reg::Temp, 12)});
+            p.Op(O::kMov, {Dst(Reg::ColorOut, 0), Src(Reg::Temp, 13)});
+            const std::vector<uint8_t> stock = p.Bytes();
+            std::vector<uint32_t>      words;
+            wxl::modern_adt::shader::Found found;
+            std::string                    why;
+            const bool made = BlendByHeight(stock.data(), stock.size(), words, found, why) && found.extras;
+            Check(made, ("the height blend rewrites a four-layer program for eight layers: " + why).c_str());
+            std::vector<uint8_t> eight(words.size() * 4);
+            std::memcpy(eight.data(), words.data(), eight.size());
+            const std::vector<uint8_t> vs = v.Bytes();
+            float worst = 0.0f;
+            bool  ran   = made;
+            for (uint32_t pick = 0; made && pick < 12; ++pick)
+            {
+                uint32_t texel[8];
+                for (uint32_t k = 0; k < 8; ++k) texel[k] = (pick + k * 3 + k / 4) % 4;
+                const uint32_t ta = (pick / 4) % 4; // the alpha maps' texel: a1..a3 its rgb, layers 4..7 its rgba
+                const bool     extras = pick % 3 != 0, heights = pick % 2 == 0;
+                float params[8][4] = {};
+                for (uint32_t k = 0; k < 6; ++k)
+                    if (heights && (pick + k) % 3 != 0) params[k][0] = 2.0f + static_cast<float>(k), params[k][1] = 0.5f, params[k][2] = 1.0f;
+                const auto run = [&](uint32_t pass, float out[4]) {
+                    std::memset(lab.vregs, 0, sizeof lab.vregs);
+                    std::memset(lab.pregs, 0, sizeof lab.pregs);
+                    for (uint32_t k = 0; k < 4; ++k)
+                    {
+                        lab.vregs[(10 + k) * 4 + 0] = centre[texel[pass * 4 + k]][0];
+                        lab.vregs[(10 + k) * 4 + 1] = centre[texel[pass * 4 + k]][1];
+                        lab.vregs[(10 + k) * 4 + 3] = 1.0f;
+                    }
+                    lab.vregs[14 * 4 + 0] = centre[ta][0], lab.vregs[14 * 4 + 1] = centre[ta][1], lab.vregs[14 * 4 + 3] = 1.0f;
+                    std::memcpy(&lab.pregs[32 * 4], params, sizeof params);
+                    lab.pregs[40 * 4 + 0] = static_cast<float>(pass);
+                    lab.pregs[40 * 4 + 1] = extras ? 1.0f : 0.0f;
+                    for (uint32_t k = 0; k < 8; ++k) // u = au + (centre_k - centre_a)
+                    {
+                        lab.pregs[(41 + k) * 4 + 0] = lab.pregs[(41 + k) * 4 + 1] = 1.0f;
+                        lab.pregs[(41 + k) * 4 + 2] = centre[texel[k]][0] - centre[ta][0];
+                        lab.pregs[(41 + k) * 4 + 3] = centre[texel[k]][1] - centre[ta][1];
+                    }
+                    std::string w;
+                    return lab.Run(vs, eight, out, w);
+                };
+                float first[4] = {}, second[4] = {}, final[4];
+                ran = ran && run(0, first) && (!extras || run(1, second));
+                for (int c = 0; c < 3; ++c) final[c] = extras ? second[3] * second[c] + (1.0f - second[3]) * first[c] : first[c];
+                float alpha[8] = {}, wgt[8] = {}, rem = 1.0f, pct[8] = {}, top = 0.0f, sum = 0.0f, want[3] = {};
+                for (int k = 1; k < 4; ++k) alpha[k] = lab.texels[ta].v[k - 1];
+                for (int k = 4; k < 8 && extras; ++k) alpha[k] = lab.texels[ta].v[k - 4];
+                for (int k = 7; k >= 1; --k)
+                {
+                    wgt[k] = alpha[k] * rem;
+                    rem *= 1.0f - alpha[k];
+                }
+                wgt[0] = rem;
+                for (int k = 0; k < 8; ++k)
+                {
+                    pct[k] = wgt[k] * (params[k][2] != 0.0f ? lab.texels[texel[k]].v[3] * params[k][0] + params[k][1] : 1.0f);
+                    top    = std::max(top, pct[k]);
+                }
+                for (int k = 0; k < 8; ++k)
+                {
+                    if (heights) pct[k] *= 1.0f - std::clamp(top - pct[k], 0.0f, 1.0f);
+                    sum += pct[k];
+                }
+                for (int k = 0; k < 8; ++k)
+                    for (int c = 0; c < 3; ++c) want[c] += pct[k] / std::max(sum, 1e-6f) * lab.texels[texel[k]].v[c];
+                for (int c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(final[c] - want[c]));
+                ++drawn;
+            }
+            char what[200];
+            std::snprintf(what, sizeof what, "the Vulkan renderer draws eight layers in two blended draws as the eight-layer height blend (worst %.2g)", worst);
+            Check(ran && worst < 3e-5f, what);
+        }
         std::memset(lab.vregs, 0, sizeof lab.vregs);
         std::memset(lab.pregs, 0, sizeof lab.pregs);
         lab.cube1 = true;

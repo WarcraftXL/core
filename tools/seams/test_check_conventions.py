@@ -974,6 +974,8 @@ GROUND_TRUTH = {
     "Map.AllocDoodadDef":              ("0x007C01F0", "cdecl", [], 0),
     # CMap::Unload reads no stack and ends in a bare `ret` (0x007C39F9).
     "Map.Unload":                      ("0x007C3830", "cdecl", [], 0),
+    # CMap::LoadWdt reads only statics: no argument, a bare `ret`.
+    "Map.LoadWdt":                     ("0x007BF8B0", "cdecl", [], 0),
     # CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate) reads ecx and ends in `ret 0xc`;
     # the two single-pass functions are thiscall with no argument (bare `ret`), the six multi-pass
     # ones cdecl, the render chunk their one stack argument.
@@ -1214,6 +1216,8 @@ GROUND_TRUTH = {
     "GxCall.ShaderConstantsSet":             ("0x00408210", "cdecl", [], 4),
     "GxCall.XformSet":                       ("0x0057C450", "cdecl", [], 2),
     "GxCall.RsSetPointer":                   ("0x00408240", "cdecl", [], 2),
+    "GxCall.RsSetInt":                       ("0x00408BF0", "cdecl", [], 2),
+    "TerrainCall.ValidateShaders":           ("0x007BD8A0", "cdecl", [], 0),
     "GxCall.TexSetWrap":                     ("0x00681450", "cdecl", [], 3),
     "GxCall.IRsSync":                        ("0x00685B50", "thiscall", ["ecx"], 1),
     "GxCall.ITexMarkAsUpdated":              ("0x00684900", "stdcall", [], 1),
