@@ -1133,8 +1133,10 @@ namespace wxl::vk::test
             }
         }
         // Eight layers: a four-layer program drawn twice, the second blended over the first as the
-        // device blends it (source alpha), against the eight-layer blend worked out apart.
+        // device blends it (source alpha), against the eight-layer blend worked out apart; in both mixes.
+        for (uint32_t form = 0; form < 2; ++form)
         {
+            const bool sums = form == 1;
             Asm v(false, 3, 0);
             v.Dcl(0, 0, Dst(Reg::Input, 0));
             v.Dcl(0, 0, Dst(Reg::Output, 0));
@@ -1145,9 +1147,21 @@ namespace wxl::vk::test
             for (uint32_t k = 0; k <= 4; ++k) p.Dcl(5, k, Dst(Reg::Input, k));
             for (uint32_t k = 0; k <= 4; ++k) p.DclSampler(2, k);
             for (uint32_t k = 0; k <= 4; ++k) p.Op(O::kTex, {Dst(Reg::Temp, k), Src(Reg::Input, k), Src(Reg::Sampler, k)});
-            p.Op(O::kLrp, {Dst(Reg::Temp, 11), Src(Reg::Temp, 4, 0x00), Src(Reg::Temp, 1), Src(Reg::Temp, 0)});
-            p.Op(O::kLrp, {Dst(Reg::Temp, 12), Src(Reg::Temp, 4, 0x55), Src(Reg::Temp, 2), Src(Reg::Temp, 11)});
-            p.Op(O::kLrp, {Dst(Reg::Temp, 13), Src(Reg::Temp, 4, 0xAA), Src(Reg::Temp, 3), Src(Reg::Temp, 12)});
+            if (sums)
+            {
+                p.Def(20, 1.0f, 0.0f, 0.0f, 0.0f);
+                p.Op(O::kDp3, {Dst(Reg::Temp, 8, 1, true), Src(Reg::Temp, 4), Src(Reg::Const, 20, 0x00)});
+                p.Op(O::kAdd, {Dst(Reg::Temp, 8, 1), Src(Reg::Temp, 8, 0x00, SrcMod::Neg), Src(Reg::Const, 20, 0x00)});
+                p.Op(O::kMul, {Dst(Reg::Temp, 13), Src(Reg::Temp, 0), Src(Reg::Temp, 8, 0x00)});
+                for (uint32_t k = 1; k < 4; ++k)
+                    p.Op(O::kMad, {Dst(Reg::Temp, 13), Src(Reg::Temp, k), Src(Reg::Temp, 4, (k - 1) * 0x55u), Src(Reg::Temp, 13)});
+            }
+            else
+            {
+                p.Op(O::kLrp, {Dst(Reg::Temp, 11), Src(Reg::Temp, 4, 0x00), Src(Reg::Temp, 1), Src(Reg::Temp, 0)});
+                p.Op(O::kLrp, {Dst(Reg::Temp, 12), Src(Reg::Temp, 4, 0x55), Src(Reg::Temp, 2), Src(Reg::Temp, 11)});
+                p.Op(O::kLrp, {Dst(Reg::Temp, 13), Src(Reg::Temp, 4, 0xAA), Src(Reg::Temp, 3), Src(Reg::Temp, 12)});
+            }
             p.Op(O::kMov, {Dst(Reg::ColorOut, 0), Src(Reg::Temp, 13)});
             const std::vector<uint8_t> stock = p.Bytes();
             std::vector<uint32_t>      words;
@@ -1197,12 +1211,21 @@ namespace wxl::vk::test
                 float alpha[8] = {}, wgt[8] = {}, rem = 1.0f, pct[8] = {}, top = 0.0f, sum = 0.0f, want[3] = {};
                 for (int k = 1; k < 4; ++k) alpha[k] = lab.texels[ta].v[k - 1];
                 for (int k = 4; k < 8 && extras; ++k) alpha[k] = lab.texels[ta].v[k - 4];
-                for (int k = 7; k >= 1; --k)
+                if (sums)
                 {
-                    wgt[k] = alpha[k] * rem;
-                    rem *= 1.0f - alpha[k];
+                    float total = 0.0f;
+                    for (int k = 1; k < 8; ++k) total += wgt[k] = alpha[k];
+                    wgt[0] = 1.0f - std::min(1.0f, total);
                 }
-                wgt[0] = rem;
+                else
+                {
+                    for (int k = 7; k >= 1; --k)
+                    {
+                        wgt[k] = alpha[k] * rem;
+                        rem *= 1.0f - alpha[k];
+                    }
+                    wgt[0] = rem;
+                }
                 for (int k = 0; k < 8; ++k)
                 {
                     pct[k] = wgt[k] * (params[k][2] != 0.0f ? lab.texels[texel[k]].v[3] * params[k][0] + params[k][1] : 1.0f);
@@ -1213,13 +1236,17 @@ namespace wxl::vk::test
                     if (heights) pct[k] *= 1.0f - std::clamp(top - pct[k], 0.0f, 1.0f);
                     sum += pct[k];
                 }
+                // Without heights or extra layers the program is the client's own: its weights as they are
+                // (the lab's alphas may add up past 1, which a map's never do).
                 for (int k = 0; k < 8; ++k)
-                    for (int c = 0; c < 3; ++c) want[c] += pct[k] / std::max(sum, 1e-6f) * lab.texels[texel[k]].v[c];
+                    for (int c = 0; c < 3; ++c)
+                        want[c] += (heights || extras ? pct[k] / std::max(sum, 1e-6f) : wgt[k]) * lab.texels[texel[k]].v[c];
                 for (int c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(final[c] - want[c]));
                 ++drawn;
             }
             char what[200];
-            std::snprintf(what, sizeof what, "the Vulkan renderer draws eight layers in two blended draws as the eight-layer height blend (worst %.2g)", worst);
+            std::snprintf(what, sizeof what, "the Vulkan renderer draws eight layers%s in two blended draws as the eight-layer height blend (worst %.2g)",
+                          sums ? ", summed," : "", worst);
             Check(ran && worst < 3e-5f, what);
         }
         std::memset(lab.vregs, 0, sizeof lab.vregs);
