@@ -10,6 +10,7 @@
 
 #include "Options.hpp"
 #include "adt/Reader.hpp"
+#include "adt/Survey.hpp"
 #include "features/ExtraLayers.hpp"
 #include "features/HeightBlend.hpp"
 #include "features/TextureScale.hpp"
@@ -1019,6 +1020,56 @@ namespace
         Check(out.layer[0].extra_texture && out.layer[0].params[2] == 1.0f, "its height as height_blend gives it on a map flagged 0x80");
     }
 
+    /// A split tile made up: a root of 256 MCNKs with their header, a _tex0 naming two textures with
+    /// one layer of alpha a chunk, an _obj0 placing one doodad referred to by chunk 0.
+    void SurveyCases()
+    {
+        const auto tile = [](bool byId, uint32_t ref) {
+            adt::TileFiles f;
+            Adt root, tex, obj;
+            root.Chunk(adt::kMVER, Words({18}));
+            root.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
+            for (int c = 0; c < 256; ++c) root.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
+            tex.Chunk(adt::kMVER, Words({18}));
+            if (byId) tex.Chunk(adt::Id("MDID"), Words({123456, 654321}));
+            else
+            {
+                const std::string names = std::string("t\\a.blp") + '\0' + "t\\b.blp" + '\0';
+                tex.Chunk(adt::kMTEX, std::vector<uint8_t>(names.begin(), names.end()));
+            }
+            for (int c = 0; c < 256; ++c)
+            {
+                Adt mcnk;
+                mcnk.Chunk(adt::kMCLY, Words({0, 0, 0, 0, 1, 0x100, 0, 0}));
+                mcnk.Chunk(adt::kMCAL, std::vector<uint8_t>(4096, 7));
+                tex.Chunk(adt::kMCNK, mcnk.bytes);
+            }
+            obj.Chunk(adt::kMVER, Words({18}));
+            const std::string m2 = std::string("w\\tree.m2") + '\0';
+            obj.Chunk(adt::Id("MMDX"), std::vector<uint8_t>(m2.begin(), m2.end()));
+            obj.Chunk(adt::Id("MMID"), Words({0}));
+            std::vector<uint8_t> mddf(36, 0);
+            mddf[34] = byId ? 0x40 : 0;
+            obj.Chunk(adt::Id("MDDF"), mddf);
+            Adt refs;
+            refs.Chunk(adt::Id("MCRD"), Words({ref}));
+            obj.Chunk(adt::kMCNK, refs.bytes);
+            f.root = root.bytes;
+            f.tex0 = tex.bytes;
+            f.obj0 = obj.bytes;
+            return f;
+        };
+        adt::SurveyStats stats;
+        Check(adt::SurveyTile("named", tile(false, 0), 0x84, stats) == adt::Era::split && stats.errors == 0 && stats.alphaMaps == 256 &&
+                  stats.doodads == 1,
+              "a split tile by name: root, _tex0 and _obj0 read as one, every alpha map decoded, no error");
+        Check(adt::SurveyTile("ids", tile(true, 0), 0x84, stats) == adt::Era::file_ids && stats.errors == 0 && stats.doodadsById == 1,
+              "a tile by FileDataID (MDID, MDDF flag 0x40)");
+        Check(adt::SurveyTile("broken", tile(false, 3), 0x84, stats) == adt::Era::split && stats.errors == 1 &&
+                  stats.firstErrors.back().find("MCRD names placement 3 of 1") != std::string::npos,
+              "a chunk referring to a placement past MDDF is an error, named");
+    }
+
     void OptionCases()
     {
         Options o = ParseOptions("; comment\n[texture_scale]\nenabled = 0\nsource = MTXF\n");
@@ -1041,6 +1092,7 @@ int main()
     ExtraCases();
     MapCases();
     RootExtraCases();
+    SurveyCases();
     BigAlphaCases();
     EightLayerCases();
     OptionCases();

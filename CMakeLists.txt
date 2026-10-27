@@ -438,7 +438,7 @@ set(WXL_MODERN_ADT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt")
 add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt_tests.cpp" "${WXL_MODERN_ADT_DIR}/src/Options.cpp"
     "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp"
     "${WXL_MODERN_ADT_DIR}/src/features/HeightBlend.cpp" "${WXL_MODERN_ADT_DIR}/src/features/ExtraLayers.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp")
+    "${WXL_MODERN_ADT_DIR}/src/shader/Ps3.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
 # A chunk of a real DawnlightWorld root ADT (WorldGen's, five layers), compiled into the tests.
 file(READ "${WXL_MODERN_ADT_DIR}/tests/data/DawnlightWorld_38_19_chunk_14_4.bin" _root_chunk HEX)
@@ -448,6 +448,12 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WXL_MODERN_ADT
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
 add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)
+# Every tile of a folder of maps surveyed as wxl.modern-adt reads it (the user's own corpus):
+#   wxl-core-modern-adt-corpus <maps folder>
+add_executable(wxl-core-modern-adt-corpus "${WXL_MODERN_ADT_DIR}/tests/corpus_tool.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp"
+    "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp")
+target_include_directories(wxl-core-modern-adt-corpus PRIVATE "${WXL_MODERN_ADT_DIR}/src")
+target_compile_features(wxl-core-modern-adt-corpus PRIVATE cxx_std_20)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 
 install(TARGETS wxl-core RUNTIME DESTINATION "bin/${WXL_CORE_ARCH_DIR}" COMPONENT core)
