@@ -5,6 +5,8 @@
 
 #include "wxl/seams/seams.h"
 
+#include "services/TerrainLayers.hpp"
+
 #include <cstring>
 
 #include "binding/Binding.hpp"
@@ -149,4 +151,17 @@ namespace wxl::seam::Gx::IShaderLoad
         args.permutations = permutations;
         host->Raise(WXL_EV_ShaderLoad, &args);
     }
+}
+
+namespace wxl::seam::Gx::D3dDraw
+{
+    // Before the device's state reaches it: a terrain chunk's scaled layers (wxl.terrain).
+    void WXL_CALL Before(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
+    void WXL_CALL After(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
+}
+
+namespace wxl::seam::Gx::D3d9ExDraw
+{
+    void WXL_CALL Before(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
+    void WXL_CALL After(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
 }

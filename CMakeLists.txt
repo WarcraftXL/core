@@ -281,6 +281,7 @@ add_library(wxl-core SHARED
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -344,6 +345,7 @@ add_executable(wxl-core-seam-harness
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/TerrainLayers.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -425,6 +427,14 @@ add_test(NAME vk COMMAND wxl-core-vk-tests)
 add_executable(wxl-core-imaging-tests tests/imaging_tests.cpp)
 target_link_libraries(wxl-core-imaging-tests PRIVATE wxl-core-imaging)
 add_test(NAME imaging COMMAND wxl-core-imaging-tests)
+
+# wxl.modern-adt's reading layer, store and features, on ADTs made up byte by byte.
+set(WXL_MODERN_ADT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mods/wxl.modern-adt")
+add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt_tests.cpp" "${WXL_MODERN_ADT_DIR}/src/Options.cpp"
+    "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Store.cpp" "${WXL_MODERN_ADT_DIR}/src/features/TextureScale.cpp")
+target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
+target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
+add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 
 install(TARGETS wxl-core RUNTIME DESTINATION "bin/${WXL_CORE_ARCH_DIR}" COMPONENT core)

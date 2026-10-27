@@ -25,6 +25,7 @@
 #include "binding/Binding.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
+#include "services/TerrainLayers.hpp"
 #include "services/DrawService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/RenderService.hpp"
@@ -590,6 +591,9 @@ namespace
         if (Mine(device)) g_front->Renderer().BonePalette(bones, count);
     }
 
+    void WXL_CALL DrawBeginRow(void*, const wxl_gx_batch* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
+    void WXL_CALL DrawEndRow(void*, const wxl_gx_batch* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
+
     const wxl_gx_vk_backend kBackend = {
         sizeof(wxl_gx_vk_backend),
         0,
@@ -634,6 +638,8 @@ namespace
         ReadPixelsRow,
         SampleCountsRow,
         BonePaletteRow,
+        DrawBeginRow,
+        DrawEndRow,
     };
 }
 

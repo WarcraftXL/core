@@ -17,6 +17,7 @@
 // (wxl/terrain/grid.hpp, VertexNormal), so untouched ground keeps the map's normals exactly.
 
 #include "services/TerrainService.hpp"
+#include "services/TerrainLayers.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -778,6 +779,13 @@ namespace
 
 namespace wxl::core::services
 {
+    static wxl_result WXL_CALL TerrainSetLayerProvider(const wxl_terrain_layer_provider* provider)
+    {
+        const wxl::host::ModHost* host = wxl::core::Host();
+        if (host && !host->OnMainThread()) return WXL_E_INVALID;
+        return terrain_layers::SetProvider(host ? host->CurrentMod() : 0u, provider);
+    }
+
     const wxl_terrain_api& TerrainApi()
     {
         static const wxl_terrain_api api = [] {
@@ -793,6 +801,7 @@ namespace wxl::core::services
             table.reset_all   = &TerrainResetAll;
             table.stats       = &TerrainStats;
             table.vertices_in = &TerrainVerticesIn;
+            table.set_layer_provider = &TerrainSetLayerProvider;
             return table;
         }();
         return api;

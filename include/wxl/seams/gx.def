@@ -47,6 +47,13 @@ WXL_SEAM_RAISES(Gx, NotifyOnDeviceRestored, SwapchainRestored)
 // "<path>\\<profile>\\<name>.bls" at the best profile the device takes, falling back to lower
 // ones. Before raises ShaderLoad, only while someone listens. thiscall `(shaders, target, path,
 // name, permutations)`, `ret 0x14`.
+// A draw of the Direct3D 9 (and 9Ex) device, before its state reaches the device and after it
+// drew: wxl.terrain's layers scale a terrain chunk's texture coordinates through the engine's
+// state for that draw, and give it back. The Vulkan device does the same through its backend's
+// draw_begin and draw_end.
+WXL_SEAM(Gx, D3dDraw, "CGxDeviceD3d::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
+WXL_SEAM(Gx, D3d9ExDraw, "CGxDeviceD3d9Ex::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
+
 WXL_SEAM_BEFORE(Gx, IShaderLoad, "CGxDevice::IShaderLoad", void, thiscall, (void* self, void* shaders, uint32_t target, const char* path, const char* name, uint32_t permutations))
 WXL_SEAM_RAISES(Gx, IShaderLoad, ShaderLoad)
 

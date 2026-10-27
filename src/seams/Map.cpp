@@ -9,6 +9,7 @@
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
 #include "services/TerrainService.hpp"
+#include "services/TerrainLayers.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -80,6 +81,7 @@ namespace wxl::seam::Map::Unload
         // The ground goes with the map: the edits of it are dropped before its chunks are freed.
         wxl_terrain_cleared_args args{};
         wxl::core::services::terrain::MapUnloading(args);
+        wxl::core::services::terrain_layers::MapUnloading();
         wxl::host::ModHost* host = wxl::core::Host();
         if (host && host->Listening(WXL_EV_TerrainEditsCleared)) host->Raise(WXL_EV_TerrainEditsCleared, &args);
     }

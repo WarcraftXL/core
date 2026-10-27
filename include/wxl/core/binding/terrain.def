@@ -48,6 +48,20 @@ WXL_BINDING(terrain_forget_collision, void, (void), (), (void)0)
 // plays and lands.
 WXL_BINDING(unit_fall_local, void, (const void* unit), (unit), (void)0)
 
+// A terrain render chunk's layers (CMapRenderChunk): their count, its render flags, each layer's
+// MCLY flags and MTEX index, and the address of its batch, which every draw of its layers hands
+// the device. False for a null chunk or more than 4 layers.
+WXL_BINDING(terrain_render_chunk, wxl_bool, (const void* chunk, wxl_core_render_chunk* out), (chunk, out), WXL_FALSE)
+
+// The ADT an area of the map was read from (CMapArea): its tile and its file's bytes as the client
+// read them (m_fileBuffer, m_fileSize). False for a null area or one without its file.
+WXL_BINDING(terrain_area_file, wxl_bool, (const void* area, wxl_core_area_file* out), (area, out), WXL_FALSE)
+
+// The terrain's vertex program constants as the client fills them before each chunk
+// (CMapRenderChunk::s_vertexShaderConsts): 37 rows of 4 floats, c0 to c36; c13 + k each layer's
+// animation offset, c18 + k its texture scale. Null without a client.
+WXL_BINDING(terrain_vertex_constants, const float*, (void), (), 0)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

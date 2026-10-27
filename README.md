@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.41-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.42-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -92,6 +92,7 @@ build/dist/
     bin/x64/WarcraftXL.dll
     Mods/wxl.glue-unlock/{mod.json,bin/x86/glue-unlock.dll,bin/x64/glue-unlock.dll}
     Mods/wxl.named-archives/{mod.json,bin/x86/named-archives.dll}
+    Mods/wxl.modern-adt/{mod.json,modern-adt.ini,bin/x86/modern-adt.dll,bin/x64/modern-adt.dll}
     Mods/wxl.lua/{mod.json,LICENSE-LuaJIT.txt,bin/x86/wxl-lua.dll,bin/x64/wxl-lua.dll}
 ```
 
@@ -471,7 +472,10 @@ source. Everything else observes.
 | `Gx.IShaderLoad` | `CGxDevice::IShaderLoad(shaders, target, path, name, permutations)`, a shader program loaded by name | `ShaderLoad` before, with the stage, the folder, the name and the permutations |
 | `Sound.CreateWaveData` | `SE2::CreateWaveData(...)`, the sound data a sound plays from, made from a file | `SoundFileLoad` before, with the file, whether it streams and the channel's priority; never while the game's sound is off (`Sound_EnableAllSound` 0), when the client loads no sound |
 | `Map.AllocDoodadDef` | `CMap::AllocDoodadDef()` | nothing itself: after, notes the def it handed out, which tells a placement from a def found in the map's hash |
-| `Map.Unload` | `CMap::Unload()`, the map and its ground unloaded | before: `wxl.terrain` drops every edit, `TerrainEditsCleared` |
+| `Map.Unload` | `CMap::Unload()`, the map and its ground unloaded | before: `wxl.terrain` drops every edit and the layers' texture scales, `TerrainEditsCleared` |
+| `MapRenderChunk.CreateLayer` | `CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate)`, a texture layer appended to a render chunk | nothing itself: after, `wxl.terrain` asks the layer providers for the layer's texture scale and keeps it |
+| `MapRenderChunk.RenderSinglePassVertexPixelShader`, `RenderMultiPassVertexPixelShader`, `RenderMultiPassVertexPixelShaderBigAlpha`, `RenderSinglePassPixelShader`, `RenderMultiPassPixelShader`, `RenderMultiPassPixelShaderBigAlpha`, `RenderMultiPassAdditive`, `RenderMultiPassAlpha` | the eight functions that draw a chunk's layers, by vertex program or texture-stage matrix, in one draw or a layer a draw | nothing itself: before and after, which chunk is drawn on which path, for `Gx.D3dDraw` |
+| `Gx.D3dDraw`, `Gx.D3d9ExDraw` | `CGxDeviceD3d::Draw(batch, count)`, `CGxDeviceD3d9Ex::Draw` (vtable slot 42); the Vulkan renderer's `draw_begin` and `draw_end` stand for them | nothing itself: before, a draw of a chunk with a scaled layer gets its texture coordinates scaled through the vertex constants or the stage matrices; after, the client's own come back |
 | `Map.CreateDoodadDef`, `Map.CreateDoodadDefAt`, `Map.CreateDoodadDefInMapObj` | the three `CMap::CreateDoodadDef` overloads: a tile's doodad, one the game places at a position, one of a map object's doodad set | `DoodadSpawn` after, for a def the call allocated, with the model's path and the position |
 | `ObjectMgr.FillInPartialObjectData` | `FillInPartialObjectData(CGObject_C*, WOWGUID, CDataStore*, bool, bool)`, where an update block's fields are written | nothing itself: after, notes a tracked object, once per packet |
 | `ObjectMgr.Packet_SMSG_UPDATE_OBJECT` | `Packet_SMSG_UPDATE_OBJECT(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the compressed form's too | `ObjectUpdate` after, once per object the packet's field writes noted and still tracked, in the packet's order |
@@ -514,12 +518,14 @@ the ABI and is appended, never renamed or dropped.
 
 ## 🧩 The mods it ships
 
-Two mods that do what a patcher used to do, so the patcher only has to bootstrap.
+Two mods that do what a patcher used to do, so the patcher only has to bootstrap, and one that reads
+what newer ADT files carry.
 
 | Mod | Clients | What it does |
 |---|---|---|
 | `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
 | `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
+| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]` in `modern-adt.ini`); requires `wxl.terrain` |
 
 `wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
 logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it
