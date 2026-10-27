@@ -6,6 +6,7 @@
 #include "wxl/seams/seams.h"
 
 #include "runtime/Core.hpp"
+#include "services/DrawService.hpp"
 #include "services/RenderService.hpp"
 
 #include "wxl/host/mod_host.hpp"
@@ -29,5 +30,11 @@ namespace wxl::seam::WorldScene::RenderDetailDoodads
 
 namespace wxl::seam::WorldScene::RenderLiquidPass
 {
-    void WXL_CALL After() { Raise(WXL_RENDER_POINT_AFTER_LIQUIDS); }
+    void WXL_CALL After()
+    {
+        // The mods' shapes, over the opaque world and its liquids, under its translucent models,
+        // particles and spell effects.
+        wxl::core::services::draw::Render();
+        Raise(WXL_RENDER_POINT_AFTER_LIQUIDS);
+    }
 }

@@ -39,6 +39,13 @@ WXL_BINDING(gx_invalidate_state, void, (void), (), (void)0)
 // nothing for it (no context, a lost device).
 WXL_BINDING(gx_model_draw, wxl_bool, (const void* render, wxl_model_batch_args* out), (render, out), WXL_FALSE)
 
+// How the world is being drawn, for wxl.draw: the device's native projection (m_projNative, D3D's,
+// z 0 to 1), the top of its view stack, its viewport (m_viewport, 0 to 1 of the window) and the
+// window's size (m_curWindowRect), and CWorldScene::s_activeWorldView, the point the world's draws
+// are made from. Read between two draws of the world, it is what they are drawn with. False with
+// no device.
+WXL_BINDING(gx_world_view, wxl_bool, (wxl_core_world_view* out), (out), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

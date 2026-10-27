@@ -159,6 +159,18 @@ typedef struct wxl_core_terrain_chunk
     uint32_t holes;   ///< m_header->m_holes: the 16-bit hole mask
 } wxl_core_terrain_chunk;
 
+/// How the world is being drawn (binding gx_world_view): the engine's matrices, rows a..d of
+/// C44Matrix, which a point taken from `eye` is multiplied by on the left: clip = [p 1] * view *
+/// projection.
+typedef struct wxl_core_world_view
+{
+    float    projection[16]; ///< CGxDevice::m_projNative
+    float    view[16];       ///< m_xforms[GxXform_View] at its level
+    float    viewport[6];    ///< m_viewport: x min, x max, y min, y max (0 to 1 of the window, y up), z min, z max
+    float    window[2];      ///< m_curWindowRect's maxX and maxY: the window's size
+    wxl_vec3 eye;            ///< CWorldScene::s_activeWorldView
+} wxl_core_world_view;
+
 /// One string per row of wxl/core/binding.def, "name: ret (params)", in table order. The
 /// client hands its copy over in wxl_core_init and the runtime compares it with its own, so a
 /// client built from a different table is refused by name instead of having its accessors

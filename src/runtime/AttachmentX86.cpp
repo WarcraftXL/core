@@ -31,6 +31,7 @@
 #include "services/TextureService.hpp"
 #include "services/CVarService.hpp"
 #include "services/TerrainService.hpp"
+#include "services/DrawService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/EngineService.hpp"
@@ -101,6 +102,7 @@ namespace wxl::core::attachment
             { WXL_TEXTURE_SERVICE, WXL_TEXTURE_SERVICE_VERSION, &services::TextureApi() },
             { WXL_CVAR_SERVICE, WXL_CVAR_SERVICE_VERSION, &services::CVarApi() },
             { WXL_TERRAIN_SERVICE, WXL_TERRAIN_SERVICE_VERSION, &services::TerrainApi() },
+            { WXL_DRAW_SERVICE, WXL_DRAW_SERVICE_VERSION, &services::DrawApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif

@@ -24,6 +24,7 @@
 #include "binding/Binding.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
+#include "services/DrawService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/RenderService.hpp"
 
@@ -254,6 +255,7 @@ namespace
         // What the mods and the highlights hold of the renderer goes with it.
         wxl::core::services::render::DeviceGone();
         wxl::core::services::highlight::DeviceGone();
+        wxl::core::services::draw::DeviceGone();
         delete g_front;
         g_front   = nullptr;
         g_renders = false;

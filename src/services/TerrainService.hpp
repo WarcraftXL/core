@@ -38,6 +38,17 @@ namespace wxl::core::services
         /// reshaped meanwhile is freed, to grow again on the new ground.
         void WorldEnd();
 
+        /// Whether the map has terrain (loaded, and not a map made only of map objects).
+        bool Present();
+
+        /// A loaded chunk's 145 absolute heights, as the client walks on them now, and its holes;
+        /// false when it is not loaded.
+        bool ChunkGround(int32_t chunk_x, int32_t chunk_y, float heights[145], uint16_t& holes);
+
+        /// Grows each time the ground may have changed: an edit or a reset written, a chunk loaded
+        /// or freed, the map unloaded. What is laid on the ground is laid again when it moved.
+        uint64_t Generation();
+
         /// A mod's edits are taken off: disabled or unloaded.
         void ForgetMod(uint32_t mod);
 

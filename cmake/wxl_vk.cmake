@@ -129,10 +129,14 @@ wxl_vk_glsl(wxl-vk-render-programs "${WXL_VK_RENDER_SPIRV_DIR}"
     fullscreen_vert=fullscreen.vert
     highlight_mask_frag=highlight_mask.frag
     highlight_blur_frag=highlight_blur.frag
-    highlight_composite_frag=highlight_composite.frag)
+    highlight_composite_frag=highlight_composite.frag
+    draw_vert=draw.vert
+    draw_frag=draw.frag)
 add_library(wxl-vk-render STATIC
     "${WXL_VK_ROOT}/src/gx/vk/render/Render.cpp"
-    "${WXL_VK_ROOT}/src/gx/vk/render/Highlight.cpp")
+    "${WXL_VK_ROOT}/src/gx/vk/render/Highlight.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/render/Shapes.cpp"
+    "${WXL_VK_ROOT}/src/gx/shapes/Geometry.cpp")
 target_include_directories(wxl-vk-render PRIVATE "${WXL_VK_RENDER_SPIRV_DIR}")
 target_link_libraries(wxl-vk-render PUBLIC wxl-vk-draw)
 add_dependencies(wxl-vk-render wxl-vk-render-programs)

@@ -84,6 +84,7 @@ namespace
     bool     g_inWorld = false;
     std::vector<uint32_t> g_deferredClutter; ///< chunks reshaped while the world was drawn
     wxl_terrain_stats     g_stats{};
+    uint64_t              g_generation = 1; ///< grows each time the ground may have changed (wxl.draw drapes on it)
 
     uint32_t Key(int32_t cx, int32_t cy) { return static_cast<uint32_t>(cy) * grid::kChunksPerSide + static_cast<uint32_t>(cx); }
     int32_t  KeyX(uint32_t key) { return static_cast<int32_t>(key % grid::kChunksPerSide); }
@@ -224,6 +225,7 @@ namespace
                 const float target = (edit ? edit->height : chunk->original[i]) - at->view.base_z;
                 if (at->view.heights[i] == target) continue;
                 at->view.heights[i] = target;
+                ++g_generation;
                 heights.insert(key);
                 ++written;
                 Target(KeyX(key), KeyY(key), i);
@@ -717,6 +719,7 @@ namespace wxl::core::services
             const uint32_t key    = Key(view.chunk_x, view.chunk_y);
             Chunk*         state  = Find(key);
             const bool     edited = state && state->edited;
+            ++g_generation;
             if (EditsNear(view.chunk_x, view.chunk_y))
             {
                 // Its own heights as the edits say, then the normals of its vertices and of its
@@ -740,6 +743,7 @@ namespace wxl::core::services
             wxl_core_terrain_chunk view{};
             if (!chunk || binding::terrain_chunk_view(chunk, &view) != WXL_TRUE) return false;
             const Chunk* state = Find(Key(view.chunk_x, view.chunk_y));
+            ++g_generation;
             args.map_id  = static_cast<uint32_t>(binding::map_id());
             args.chunk_x = view.chunk_x;
             args.chunk_y = view.chunk_y;
@@ -757,11 +761,25 @@ namespace wxl::core::services
             }
             g_chunks.clear();
             g_deferredClutter.clear();
+            ++g_generation;
             CountStats();
             if (edited) WLOG_INFO(kTag, "the map is unloaded: the edits of %u chunks are dropped", edited);
             args.map_id = static_cast<uint32_t>(binding::map_id());
             args.chunks = edited;
         }
+
+        bool Present() { return binding::terrain_present() == WXL_TRUE; }
+
+        bool ChunkGround(int32_t chunk_x, int32_t chunk_y, float heights[145], uint16_t& holes)
+        {
+            Live live;
+            if (!LiveOf(chunk_x, chunk_y, live)) return false;
+            for (uint32_t i = 0; i < kVertices; ++i) heights[i] = live.view.heights[i] + live.view.base_z;
+            holes = static_cast<uint16_t>(live.view.holes);
+            return true;
+        }
+
+        uint64_t Generation() { return g_generation; }
 
         void WorldBegin() { g_inWorld = true; }
 

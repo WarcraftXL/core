@@ -688,6 +688,24 @@ namespace wxl::core::binding
         return device ? static_cast<int32_t>(Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"))) : -1;
     }
 
+    wxl_bool gx_world_view(wxl_core_world_view* out)
+    {
+        const void* device = IsClient() ? GxDevice() : nullptr;
+        if (!device || !out) return WXL_FALSE;
+        constexpr std::size_t kViewStack = 10; // GxXform_View
+        const char*           bytes      = static_cast<const char*>(device);
+        const std::size_t     stack      = WXL_FIELD("CGxDevice", "m_xforms") + kViewStack * WXL_TYPE_SIZE("CGxMatrixStack");
+        uint32_t              level      = Read<uint32_t>(device, stack + WXL_FIELD("CGxMatrixStack", "m_level"));
+        if (level > 3) level = 3;
+        std::memcpy(out->projection, bytes + WXL_FIELD("CGxDevice", "m_projNative"), sizeof out->projection);
+        std::memcpy(out->view, bytes + stack + WXL_FIELD("CGxMatrixStack", "m_mtx") + level * sizeof out->view, sizeof out->view);
+        std::memcpy(out->viewport, bytes + WXL_FIELD("CGxDevice", "m_viewport.m_x.m_l"), sizeof out->viewport);
+        out->window[0] = Read<float>(device, WXL_FIELD("CGxDevice", "m_curWindowRect.maxX"));
+        out->window[1] = Read<float>(device, WXL_FIELD("CGxDevice", "m_curWindowRect.maxY"));
+        out->eye       = *reinterpret_cast<const wxl_vec3*>(WXL_STATIC("CWorldScene::s_activeWorldView"));
+        return WXL_TRUE;
+    }
+
     void* gx_d3d9_device()
     {
         // Under Vulkan the device keeps D3D9's EGxApi (so the engine takes D3D9's paths), but no

@@ -177,18 +177,26 @@ set(WXL_CORE_GX_SOURCES
 # system's d3dcompiler_47 (Wine's when built from Linux: the tool then runs under
 # CMAKE_CROSSCOMPILING_EMULATOR), and held to what shaders.txt allows each one to read. The bytecode
 # lands in generated/d3d9_shaders.inc, the disassembly beside it. The recompiled client draws
-# highlights through its own renderer, so x64 builds none of this.
+# highlights through its own renderer, so x64 builds none of this; wxl.draw's programs, below, are
+# built on both.
 set(WXL_CORE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-if(WXL_CORE_X86)
-    if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
-        message(FATAL_ERROR "The x86 runtime compiles its Direct3D 9 programs with a Windows tool when it is built: "
-            "building it from another system needs CMAKE_CROSSCOMPILING_EMULATOR (Wine), e.g. "
-            "export CMAKE_CROSSCOMPILING_EMULATOR=$HOME/scratch/build/tools/wine-run.sh")
-    endif()
+set(WXL_D3D9_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/gx/d3d9/shaders")
+# The tool runs where the build runs Windows programs: on Windows, or through the emulator.
+set(WXL_D3D9_TOOL_RUNS ON)
+if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
+    set(WXL_D3D9_TOOL_RUNS OFF)
+endif()
+if(WXL_CORE_X86 AND NOT WXL_D3D9_TOOL_RUNS)
+    message(FATAL_ERROR "The x86 runtime compiles its Direct3D 9 programs with a Windows tool when it is built: "
+        "building it from another system needs CMAKE_CROSSCOMPILING_EMULATOR (Wine), e.g. "
+        "export CMAKE_CROSSCOMPILING_EMULATOR=$HOME/scratch/build/tools/wine-run.sh")
+endif()
+if(WXL_D3D9_TOOL_RUNS)
     add_executable(wxl-core-d3d9-shaders tools/shaders/compile_d3d9.cpp)
     target_compile_options(wxl-core-d3d9-shaders PRIVATE /W4 /permissive-)
     target_compile_definitions(wxl-core-d3d9-shaders PRIVATE ${WXL_CORE_DEFS})
-    set(WXL_D3D9_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/gx/d3d9/shaders")
+endif()
+if(WXL_CORE_X86)
     set(WXL_D3D9_SHADERS "${WXL_CORE_GENERATED_DIR}/d3d9_shaders.inc")
     add_custom_command(OUTPUT "${WXL_D3D9_SHADERS}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${WXL_CORE_GENERATED_DIR}"
@@ -200,6 +208,27 @@ if(WXL_CORE_X86)
     # The stock client's device drawn by the Vulkan renderer: the slots of include/wxl/gx/slots.def.
     list(APPEND WXL_CORE_GX_SOURCES src/gx/x86/Adapter.cpp)
 endif()
+
+# --- wxl.draw's Direct3D 9 programs (src/gx/d3d9/Shapes.cpp, both architectures) ----------------
+# The stock client and the recompiled one on Direct3D 9 draw shapes with them. Compiled as
+# wxl.highlight's are where the tool runs; an x64 tree cross-built without the emulator takes the
+# copy kept in src/gx/d3d9/shaders/generated/, which a build that ran the tool compares with its own.
+set(WXL_D3D9_DRAW_SHADERS "${WXL_CORE_GENERATED_DIR}/d3d9_draw_shaders.inc")
+set(WXL_D3D9_DRAW_KEPT "${WXL_D3D9_SHADER_DIR}/generated/d3d9_draw_shaders.inc")
+if(WXL_D3D9_TOOL_RUNS)
+    add_custom_command(OUTPUT "${WXL_D3D9_DRAW_SHADERS}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${WXL_CORE_GENERATED_DIR}"
+        COMMAND wxl-core-d3d9-shaders "${WXL_D3D9_SHADER_DIR}/draw.txt" "${WXL_D3D9_DRAW_SHADERS}"
+        COMMAND "${CMAKE_COMMAND}" "-DMADE=${WXL_D3D9_DRAW_SHADERS}" "-DKEPT=${WXL_D3D9_DRAW_KEPT}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/compare_kept.cmake"
+        DEPENDS wxl-core-d3d9-shaders "${WXL_D3D9_SHADER_DIR}/draw.txt" "${WXL_D3D9_SHADER_DIR}/draw.hlsl"
+        COMMENT "Compiling wxl.draw's Direct3D 9 programs"
+        VERBATIM)
+else()
+    message(STATUS "wxl.draw's Direct3D 9 programs: the kept copy (no CMAKE_CROSSCOMPILING_EMULATOR to run the compiler)")
+    configure_file("${WXL_D3D9_DRAW_KEPT}" "${WXL_D3D9_DRAW_SHADERS}" COPYONLY)
+endif()
+list(APPEND WXL_CORE_GX_SOURCES src/gx/d3d9/Shapes.cpp "${WXL_D3D9_DRAW_SHADERS}")
 
 # The launch's log (its settings file, its header and its end, the crash report, the client's fatal
 # errors) and the code the client accepts.
@@ -248,6 +277,7 @@ add_library(wxl-core SHARED
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/DrawService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -305,6 +335,7 @@ add_executable(wxl-core-seam-harness
     src/services/TextureService.cpp
     src/services/CVarService.cpp
     src/services/TerrainService.cpp
+    src/services/DrawService.cpp
     src/services/ImGuiService.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
@@ -364,7 +395,7 @@ endif()
 # refused, VMA, the timeline, a clear read back. Skipped (77) on a machine without a Vulkan 1.3 device.
 add_executable(wxl-core-vk-tests tests/vk/vk_tests.cpp tests/vk/present_tests.cpp tests/vk/capture_tests.cpp
     tests/vk/draw_tests.cpp tests/vk/spirv_tests.cpp tests/vk/translate_tests.cpp tests/vk/v4_tests.cpp
-    tests/vk/parity_tests.cpp tests/vk/render_tests.cpp tests/vk/v7_tests.cpp)
+    tests/vk/parity_tests.cpp tests/vk/render_tests.cpp tests/vk/v7_tests.cpp tests/vk/shapes_tests.cpp)
 target_link_libraries(wxl-core-vk-tests PRIVATE wxl-vk)
 include(tests/vk/programs.cmake)
 wxl_vk_add_test_programs(wxl-core-vk-tests)

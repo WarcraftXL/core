@@ -14,6 +14,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/FootprintService.hpp"
+#include "services/DrawService.hpp"
 #include "services/HighlightService.hpp"
 #include "services/ImGuiService.hpp"
 #include "services/RenderService.hpp"
@@ -50,6 +51,9 @@ namespace wxl::seam::Gx::ScenePresent
 
         // What the highlights' last world pass did, about once a second while some are set.
         wxl::core::services::highlight::Present();
+
+        // Immediate shapes of a frame without a world go; shapes left out are said once a second.
+        wxl::core::services::draw::Present();
 
         // Only the frame Scrn.OnPaint opened ends here. The loading screen presents frames of
         // its own, and a paint with nothing to draw into presents anyway; neither opened one.

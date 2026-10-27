@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.35-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.36-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -260,6 +260,7 @@ What a mod can reach **today**, by build:
 | `wxl.texture` (SVG and PNG made into textures) | yes: an SVG rasterized (nanosvg) or a PNG decoded (stb_image) at the size asked, its groups restyled, written as an uncompressed BLP2 with its mips and served under `Interface\WXL\...` by a provider of the runtime's own, which every loader reads through the client's file stack; `WxlTexture` in both script contexts of the interface | the same |
 | `wxl.cvar` (console variables) | yes: made with the client's own `CVar::Register`, their flags written as the client's bits, a callback of the runtime's (`OsValidateFunctionPointer` lets it through) holding ranges and read-only variables; registrations made before `CVar::Initialize` reads Config.wtf are made at its start, the account's and the character's made again after `CVar::DeleteAccountCVars` and `DeleteCharacterCVars`; `WxlRegisterCVar` in both script contexts of the interface | the same, the calls in the fork |
 | `wxl.terrain` (the ground) | yes: the chunks' own heights and normals written in place, then `CMapChunk::CreateBounds`, `CMapRenderChunk::AddBatch`, the chunk's vertex buffer marked empty, `CDetailDoodad::FreeInst`, the movement's cached facets forgotten (`s_queryBox`), `CMovement_C::OnFallLocal` for a player standing on lowered ground | the same, the calls in the fork |
+| `wxl.draw` (shapes in the world) | yes: shapes built into geometry in world coordinates (`src/gx/shapes/`; ground shapes cut along the terrain's own triangles and laid on their heights), drawn after the liquids through the game's D3D9 device with programs compiled at build time (`src/gx/d3d9/Shapes.cpp`), or through the Vulkan renderer when it draws (`src/gx/vk/render/Shapes.cpp`); `WxlDraw` in both script contexts of the interface | the same; on either device, chosen when it draws |
 | `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
@@ -383,7 +384,7 @@ source. Everything else observes.
 | `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
 | `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world. Before, `wxl.highlight` starts keeping its objects' batches; after, before `WorldRenderEnd`, it draws them, then `RenderPoint` (`after_world`) |
 | `WorldScene.RenderDetailDoodads` | `CWorldScene::RenderDetailDoodads()`, the ground clutter after the opaque models | `RenderPoint` (`after_opaque_world`) after, inside a frame, while a mod listens |
-| `WorldScene.RenderLiquidPass` | `CWorldScene::RenderLiquidPass()`, the liquids | `RenderPoint` (`after_liquids`) after, inside a frame, while a mod listens |
+| `WorldScene.RenderLiquidPass` | `CWorldScene::RenderLiquidPass()`, the liquids | after: `wxl.draw`'s shapes go onto the world; `RenderPoint` (`after_liquids`), inside a frame, while a mod listens |
 | `WorldFrame.PerformDefaultAction` (gated) | `CGWorldFrame::PerformDefaultAction(MOUSEBUTTON button)` | `WorldClickRequest` with what the click met (a name plate, a model, the ground, a map object, nothing) and whether a spell waits for its target; a mod that refuses it keeps the game from acting on the click |
 | `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it. Dear ImGui's and `wxl.highlight`'s device objects go first |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |

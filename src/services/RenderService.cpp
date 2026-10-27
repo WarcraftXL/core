@@ -283,7 +283,8 @@ namespace
         for (uint32_t i = 0; i < WXL_RENDER_MAX_COLORS; ++i)
         {
             spec.color_formats[i] = desc->color_formats[i];
-            spec.blend[i]         = desc->blend[i];
+            // A mod names the contract's modes; the runtime's own beyond them stay its own.
+            spec.blend[i] = desc->blend[i] <= vkr::kBlendMultiply ? desc->blend[i] : vkr::kBlendNone;
         }
         spec.depth_format = desc->depth_format;
         spec.samples      = desc->samples;

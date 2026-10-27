@@ -28,6 +28,7 @@
 #include "services/SelectionCircleService.hpp"
 #include "services/CVarService.hpp"
 #include "services/TerrainService.hpp"
+#include "services/DrawService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
@@ -141,6 +142,8 @@ namespace
         wxl::core::services::cvar::ForgetMod(token);
         // Its edits of the ground come off; another mod's, or the original, show again.
         wxl::core::services::terrain::ForgetMod(token);
+        // Its shapes go.
+        wxl::core::services::draw::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

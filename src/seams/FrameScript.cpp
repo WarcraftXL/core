@@ -13,6 +13,7 @@
 #include "seams/Gameplay.hpp"
 #include "services/CVarService.hpp"
 #include "services/ScriptService.hpp"
+#include "services/DrawService.hpp"
 #include "services/TextureService.hpp"
 
 #include "wxl/events.h"
@@ -157,6 +158,8 @@ namespace wxl::seam::FrameScript::CreateEvents
             wxl::core::services::script::OnContextReady(g_context, state);
             // WxlTexture, for the interface the context is coming up for.
             wxl::core::services::texture::OnScriptReady();
+            // WxlDraw: shapes in the world for the interface's add-ons, a frame at a time.
+            wxl::core::services::draw::OnScriptReady();
             wxl::core::services::cvar::OnContextReady();
         }
         wxl::core::services::script::OnClientEventsInstalled(names, count);
