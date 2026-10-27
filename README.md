@@ -463,7 +463,7 @@ source. Everything else observes.
 | `M2Shared.LoadSucceededCallback` | `CM2Shared::LoadSucceededCallback(void* param)`, the end of a model file's read, before `FinishLoading` parses it | `ModelLoad` before, with the path and the bytes; bytes a handler answers are copied into a buffer of the client's allocator and parsed instead |
 | `MapObj.Load` | `CMapObj::Load()`, which walks a map object's root once it is read | `MapObjectLoad` before, with the path and the root's bytes |
 | `MapObj.CreateGroup` | `CMapObjGroup::Create()`, which walks a map object's group once its file is read | `MapObjectGroupLoad` before, with the root's name, the group's number and its bytes |
-| `MapArea.AsyncCallback` | `CMapArea::AsyncCallback(void* param)`, the end of a terrain tile's read, before its chunks are walked | `TerrainTileLoad` before, with the tile's name, its place on the grid and its bytes |
+| `MapArea.AsyncCallback` | `CMapArea::AsyncCallback(void* param)`, the end of a terrain tile's read, before its chunks are walked | `TerrainTileLoad` before, with the tile's name, its place on the grid and its bytes; first, an MCNK naming more than the client's 4 texture layers is cut to 4 |
 | `M2Shared.FinishLoadingSkinProfile` | `CM2Shared::FinishLoadingSkinProfile(uint32_t size)`, the end of a skin profile's read, before it is parsed | `SkinProfileLoad` before, with the model's path and the skin's bytes |
 | `Texture.AsyncTextureSuccessCallback` | `AsyncTextureSuccessCallback(CTexture*)`, the end of a texture file's read | nothing itself: notes the texture's name for `BLPFile.Source` |
 | `BLPFile.Open` | `CBLPFile::Open(name, flags)`, a texture file read whole by name | nothing itself: notes the name for `BLPFile.Source` |

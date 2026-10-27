@@ -550,6 +550,12 @@ back, so the engine never frees the answer. The Vulkan renderer's backend row `s
 on both devices and both clients. `wxl.modern-adt` rewrites the client's own terrain programs with
 it (its `shader/Ps3.cpp`: the height blend inserted after the alpha maps' read).
 
+The client holds 4 texture layers a chunk (`CMapRenderChunk::m_layers[4]`, one alpha map texture of
+three alphas and the shadow, programs for 1 to 4 layers, `sortTable.m_renderChunkList[4 * layers +
+pass]`) and checks nothing: an MCNK naming more is written past the array. As a tile's bytes arrive
+(`MapArea.AsyncCallback` Before) every MCNK naming more than 4 is set to its first 4
+(`terrain_layers::TileLoading`); the other layers stay in the file for a mod.
+
 ### Shapes in the world
 
 `wxl.draw` (`src/services/DrawService.cpp`) keeps the shapes mods draw, by mod: immediate ones (built
