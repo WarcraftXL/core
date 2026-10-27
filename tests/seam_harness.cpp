@@ -68,6 +68,7 @@
 #include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
 #include "services/TerrainTiles.hpp"
+#include "services/ModelGate.hpp"
 #include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
 #include "wxl/core/storm.hpp"
@@ -2643,6 +2644,21 @@ namespace
         return WXL_TRUE;
     }
 
+    wxl_bool WXL_CALL FakeAreaPlacements(const void* area, wxl_core_area_split* out)
+    {
+        const SplitFakeArea& a = *static_cast<const SplitFakeArea*>(area);
+        *out                 = wxl_core_area_split{};
+        out->doodad_defs     = a.doodadDef;
+        out->map_obj_defs    = a.mapObjDef;
+        out->doodad_count    = static_cast<uint32_t>(a.doodadCount);
+        out->map_obj_count   = static_cast<uint32_t>(a.mapObjCount);
+        out->model_names     = a.m2Names;
+        out->map_obj_names   = a.wmoNames;
+        out->model_offsets   = a.modelOffsets;
+        out->map_obj_offsets = a.wmoOffsets;
+        return WXL_TRUE;
+    }
+
     wxl_bool WXL_CALL FakeChunkParts(const void* chunk, wxl_core_map_chunk* out)
     {
         const SplitFakeChunk& c = *static_cast<const SplitFakeChunk*>(chunk);
@@ -2927,6 +2943,7 @@ namespace
         init.gx_shader_code_set     = &FakeShaderCodeSet;
         init.map_area_chunk         = &FakeMapAreaChunk;
         init.map_area_split_set     = &FakeAreaSplitSet;
+        init.map_area_placements    = &FakeAreaPlacements;
         init.map_chunk_parts        = &FakeChunkParts;
         init.map_chunk_split_set    = &FakeChunkSplitSet;
         init.map_chunk_create_refs  = &FakeChunkCreateRefs;
@@ -5055,6 +5072,41 @@ namespace
         wxl::seam::Map::FreeArea::Before(&bare);
         Check(tiles::Held() == 0, "Map.FreeArea lets go of a split tile's files and index");
         g_splitFiles = nullptr;
+
+        // Models the client cannot load: their placements are left out, on any tile.
+        namespace gate = wxl::core::services::model_gate;
+        const uint8_t md21[8] = {'M', 'D', '2', '1', 0, 0, 0, 0}, md20new[8] = {'M', 'D', '2', '0', 0x10, 1, 0, 0},
+                      md20[8] = {'M', 'D', '2', '0', 8, 1, 0, 0}, wmo18[12] = {'R', 'E', 'V', 'M', 4, 0, 0, 0, 18, 0, 0, 0},
+                      wmo17[12] = {'R', 'E', 'V', 'M', 4, 0, 0, 0, 17, 0, 0, 0};
+        Check(gate::Judge(md21, 8, false) == gate::Verdict::chunked && gate::Judge(md20new, 8, false) == gate::Verdict::newer &&
+                  gate::Judge(md20, 8, false) == gate::Verdict::loadable && gate::Judge(wmo18, 12, true) == gate::Verdict::newer &&
+                  gate::Judge(wmo17, 12, true) == gate::Verdict::loadable && gate::Judge(nullptr, 0, false) == gate::Verdict::loadable,
+              "an M2 of MD21 or past version 264, a WMO root past 17, cannot be loaded; MD20 264 and WMO 17 can");
+        gate::Clear();
+        g_files.push_back(FakeFile{"m\\bb.m2", std::string("MD21\0\0\0\0", 8)});
+        g_files.push_back(FakeFile{"w\\a.wmo", std::string("REVM\4\0\0\0\x12\0\0\0", 12)});
+        SplitFakeArea gated;
+        gated.x = 30, gated.y = 41;
+        gated.file  = "World\\Maps\\T\\T_30_41.adt";
+        gated.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> gatedChunks;
+        SplitLoad(gated, gatedChunks, true);
+        bool keptOthers = true;
+        size_t left = 0;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            std::vector<std::string> expect;
+            for (const std::string& p : monoChunks[i].placed)
+                if (p.rfind("m2:m\\a.m2", 0) == 0) expect.push_back(p);
+            left += monoChunks[i].placed.size() - expect.size();
+            keptOthers = keptOthers && gatedChunks[i].placed == expect;
+        }
+        Check(keptOthers && left > 0 && gate::LeftOut() == left,
+              "a tile in one file: placements of an MD21 M2 and of a WMO past 17 left out, the others made in the client's order");
+        Check(tiles::Held() == 0, "and nothing kept for it");
+        g_files.pop_back();
+        g_files.pop_back();
+        gate::Clear();
     }
 
     void CheckTerrainLayerLimit()

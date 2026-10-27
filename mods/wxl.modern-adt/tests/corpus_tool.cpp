@@ -52,7 +52,9 @@ int main(int argc, char** argv)
     const std::regex root(R"((.+)_(\d+)_(\d+)\.adt)", std::regex::icase);
     uint32_t         maps = 0, mapsWithMaid = 0, mapsHeight = 0;
     // The native load's own reading of each split set.
-    uint64_t nativeTiles = 0, nativeErrors = 0, nativeChunks = 0, layersKept = 0, layersCut = 0, refsKept = 0, refsLeftOut = 0, noMtex = 0;
+    // [0] split by name, [1] by FileDataID.
+    uint64_t nativeTiles[2] = {}, nativeErrors = 0, nativeChunks[2] = {}, layersKept[2] = {}, layersCut[2] = {}, refsKept[2] = {},
+             refsLeftOut[2] = {}, noMtex[2] = {}, moreThanFour[2] = {};
     std::vector<std::string>        nativeFirst;
     std::map<std::string, uint32_t> byName; ///< maps split by name: tiles
     namespace st = wxl::core::services::split_tile;
@@ -82,7 +84,8 @@ int main(int argc, char** argv)
             const adt::Era era = adt::SurveyTile(mapName + "/" + name, files, flags, stats);
             if (!TileSet::IsSplitRoot(files.root.data(), static_cast<uint32_t>(files.root.size()))) continue;
             if (era == adt::Era::split) ++byName[mapName];
-            ++nativeTiles;
+            const int e = era == adt::Era::split ? 0 : 1;
+            ++nativeTiles[e];
             st::Tile    tile;
             std::string why;
             if (!st::Index(files.root.data(), static_cast<uint32_t>(files.root.size()), files.tex0.empty() ? nullptr : files.tex0.data(),
@@ -94,19 +97,20 @@ int main(int argc, char** argv)
                 if (nativeFirst.size() < 20) nativeFirst.push_back(mapName + "/" + name + ": " + why);
                 continue;
             }
-            if (!tile.textures) ++noMtex;
+            if (!tile.textures) ++noMtex[e];
             for (uint32_t c = 0; c < 256; ++c)
             {
-                ++nativeChunks;
+                ++nativeChunks[e];
                 const uint32_t kept = st::UsableLayers(tile, c), named = tile.parts[c].mcly.size / 16;
-                layersKept += kept;
-                layersCut += named - kept;
+                layersKept[e] += kept;
+                layersCut[e] += named - kept;
+                moreThanFour[e] += named > 4 ? 1u : 0u;
                 std::vector<uint32_t> d, w;
                 const uint32_t nd = tile.parts[c].mcrd.size / 4, nw = tile.parts[c].mcrw.size / 4;
                 const uint32_t kd = st::UsableDoodadRefs(tile, c, d) ? nd : static_cast<uint32_t>(d.size());
                 const uint32_t kw = st::UsableMapObjRefs(tile, c, w) ? nw : static_cast<uint32_t>(w.size());
-                refsKept += kd + kw;
-                refsLeftOut += (nd - kd) + (nw - kw);
+                refsKept[e] += kd + kw;
+                refsLeftOut[e] += (nd - kd) + (nw - kw);
             }
         }
     }
@@ -128,12 +132,15 @@ int main(int argc, char** argv)
     for (const auto& u : stats.unknown) std::printf(" %s %llu", u.first.c_str(), static_cast<unsigned long long>(u.second));
     std::printf("\n%llu error(s)\n", static_cast<unsigned long long>(stats.errors));
     for (const std::string& e : stats.firstErrors) std::printf("  %s\n", e.c_str());
-    std::printf("native load: %llu root(s) without MCIN indexed, %llu error(s), %llu chunks; layers kept %llu, past 4 or not drawable %llu; "
-                "references kept %llu, left out %llu; %llu tile(s) without MTEX (textures by FileDataID)\n",
-                static_cast<unsigned long long>(nativeTiles), static_cast<unsigned long long>(nativeErrors),
-                static_cast<unsigned long long>(nativeChunks), static_cast<unsigned long long>(layersKept),
-                static_cast<unsigned long long>(layersCut), static_cast<unsigned long long>(refsKept),
-                static_cast<unsigned long long>(refsLeftOut), static_cast<unsigned long long>(noMtex));
+    for (int e = 0; e < 2; ++e)
+        std::printf("native load, %s: %llu root(s) without MCIN indexed, %llu chunks (%llu naming more than 4 layers); layers kept %llu, "
+                    "past 4 or not drawable %llu; references kept %llu, left out %llu; %llu tile(s) without MTEX\n",
+                    e ? "by FileDataID" : "split by name", static_cast<unsigned long long>(nativeTiles[e]),
+                    static_cast<unsigned long long>(nativeChunks[e]), static_cast<unsigned long long>(moreThanFour[e]),
+                    static_cast<unsigned long long>(layersKept[e]), static_cast<unsigned long long>(layersCut[e]),
+                    static_cast<unsigned long long>(refsKept[e]), static_cast<unsigned long long>(refsLeftOut[e]),
+                    static_cast<unsigned long long>(noMtex[e]));
+    std::printf("native load: %llu error(s)\n", static_cast<unsigned long long>(nativeErrors));
     for (const std::string& e : nativeFirst) std::printf("  %s\n", e.c_str());
     std::vector<std::pair<uint32_t, std::string>> small;
     for (const auto& m : byName) small.emplace_back(m.second, m.first);
