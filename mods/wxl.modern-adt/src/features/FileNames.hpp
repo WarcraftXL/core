@@ -29,11 +29,14 @@ namespace wxl::modern_adt
         using ReadFn = std::function<bool(const std::string&, std::vector<uint8_t>&)>;
         /// Writes a file of the disk; false when it could not.
         using WriteFn = std::function<bool(const std::string&, const std::vector<uint8_t>&)>;
+        /// Told what each listfile looked for gave: found (its rows, indexed now or from the cache)
+        /// or not found; once per file.
+        using LogFn = std::function<void(const std::string&)>;
 
         /// @p archives reads the client's archives (a map's listfile), @p disk and @p write the
         /// disk (the mod's listfile, the cache); @p folder the mod's folder.
-        FileNames(std::string folder, ReadFn archives, ReadFn disk, WriteFn write)
-            : folder_(std::move(folder)), archives_(std::move(archives)), disk_(std::move(disk)), write_(std::move(write))
+        FileNames(std::string folder, ReadFn archives, ReadFn disk, WriteFn write, LogFn log = nullptr)
+            : folder_(std::move(folder)), archives_(std::move(archives)), disk_(std::move(disk)), write_(std::move(write)), log_(std::move(log))
         {
         }
 
@@ -56,6 +59,7 @@ namespace wxl::modern_adt
         std::string                                      folder_;
         ReadFn                                           archives_, disk_;
         WriteFn                                          write_;
+        LogFn                                            log_;
         std::string                                      map_; ///< "World\\Maps\\<map>"
         std::map<std::string, std::unique_ptr<Listfile>> loaded_; ///< by CSV path; null: none there
         uint64_t                                         named_ = 0, unknown_ = 0, indexed_ = 0;

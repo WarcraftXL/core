@@ -59,16 +59,23 @@ namespace
         return g_storage && g_storage->exists && g_storage->exists(wxl::Str(path)) == WXL_TRUE;
     }
 
-    bool ReadFile(const std::string& path, std::vector<uint8_t>& bytes)
+    /// A file of the client's archives, up to @p most bytes.
+    bool ReadUpTo(const std::string& path, std::vector<uint8_t>& bytes, uint64_t most)
     {
         uint64_t size = 0;
         if (!g_storage || !g_storage->size || !g_storage->read || g_storage->size(wxl::Str(path), &size) != WXL_OK || !size ||
-            size > (64u << 20))
+            size > most)
             return false;
         bytes.resize(static_cast<size_t>(size));
         uint64_t read = 0;
         return g_storage->read(wxl::Str(path), bytes.data(), size, &read) == WXL_OK && read == size;
     }
+
+    /// A tile's file: 64 MB at most.
+    bool ReadFile(const std::string& path, std::vector<uint8_t>& bytes) { return ReadUpTo(path, bytes, 64ull << 20); }
+
+    /// A listfile: the community's is over 100 MB (2.3 million rows); 1 GB at most.
+    bool ReadListfile(const std::string& path, std::vector<uint8_t>& bytes) { return ReadUpTo(path, bytes, 1ull << 30); }
 
     bool ReadDisk(const std::string& path, std::vector<uint8_t>& bytes)
     {
@@ -105,7 +112,9 @@ namespace
         {
             options_ = ReadOptions();
             for (const std::string& line : options_.problems) wxl::Log(WXL_LOG_WARN, kTag, line.c_str());
-            names_ = std::make_unique<wxl::modern_adt::FileNames>(ModFolder(), &ReadFile, &ReadDisk, &WriteDisk);
+            names_ = std::make_unique<wxl::modern_adt::FileNames>(ModFolder(), &ReadListfile, &ReadDisk, &WriteDisk, [](const std::string& line) {
+                wxl::Log(WXL_LOG_INFO, kTag, ("listfile " + line).c_str());
+            });
             tiles_ = std::make_unique<wxl::modern_adt::TileSet>(&ReadFile, [this](uint32_t id, std::string& out) { return names_->Name(id, out); });
             store_ = std::make_unique<wxl::modern_adt::Store>(options_.source, tiles_.get());
             scale_ = std::make_unique<wxl::modern_adt::TextureScale>(*store_);
@@ -279,11 +288,6 @@ namespace
             std::string name;
             if (!out || !capacity || !self->names_->Name(file_id, name) || name.size() >= capacity) return WXL_FALSE;
             std::memcpy(out, name.c_str(), name.size() + 1);
-            if (!self->names_->Said().empty() && self->names_->Said() != self->said_)
-            {
-                self->said_ = self->names_->Said();
-                wxl::Log(WXL_LOG_INFO, kTag, ("listfile " + self->said_).c_str());
-            }
             return WXL_TRUE;
         }
 
@@ -320,7 +324,6 @@ namespace
         std::unique_ptr<wxl::modern_adt::ExtraLayers>  extra_;
         std::unique_ptr<wxl::modern_adt::SplitTiles>   split_;
         wxl::Subscription                              tileEvents_;
-        std::string                                    said_; ///< the listfile line logged last
         bool                                           blending_ = false;
         bool                                           layering_ = false;
         std::vector<uint32_t>                          program_; ///< the last program answered, read by the runtime before the call returns
