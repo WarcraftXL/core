@@ -449,6 +449,46 @@ variable that is not the service's own. Nothing is cached by pointer: every call
 The interface's `WxlRegisterCVar` is a function `wxl.script` registers at each context, owned by
 no mod. Main thread only.
 
+### The ground
+
+`wxl.terrain` (`src/services/TerrainService.cpp`, the grid's arithmetic in the SDK's
+`wxl/terrain/grid.hpp`) reads and reshapes the map's ground. A loaded chunk (`CMapChunk`) points
+into its tile's file buffer for its 145 heights (MCVT, relative to `m_topLeftCoords.z`) and normals
+(MCNR, three signed bytes), and every reader takes them live: the drawing fills its vertex buffers
+from them (`CMapRenderChunk::RenderPrepBufs`, when the buffer's `m_hasData` is 0), the collision
+facets of the movement and the camera (`CMap::GetFacets` -> `GetChunkFacets` ->
+`CMapChunk::Intersect(rect, box, facets)`), the ray tests of the camera, the clicks and
+`World::Intersect` (`CMap::VectorIntersectSubChunkList` -> `CMapChunk::Intersect(subX, subY, ray)`)
+and the height query (`CMap::GetHeightTerrain`). The stock client is the same code. An edit
+writes the heights and the normals there (binding `terrain_chunk_view`), then has the client make
+again what it derived from them (`terrain_chunk_rebuild`: `CMapChunk::CreateBounds`, the render
+chunk's bounds by `CMapRenderChunk::AddBatch` over the same chunks, its pooled vertex buffer marked
+empty, so the device's own lock and unlock fill it on D3D9 and the Vulkan renderer alike, and the
+ground clutter freed with `CDetailDoodad::FreeInst`, grown again by `CMapChunk::RenderPrep`). The
+clutter is freed outside the world's drawing only (between `WorldFrame.RenderWorld`'s Before and
+After it waits for the After): the frame being drawn may hold it in its sort list. The movement
+keeps copies of the ground's triangles in `s_queryBox`/`s_moveFacets` (Movement.cpp) and reuses
+them while a move stays inside the box (`CMovement_C::ValidateTestVsFacetQuery`): every edit empties
+the box (`terrain_forget_collision`). A unit standing still runs no collision at all, so a player
+standing on terrain that went down is made to fall as the client does when its transport goes
+(`CMovement_C::OnFallLocal`).
+
+Edits are kept by chunk (column and row on the map) and vertex, each with its owner (the mod's
+token and a layer it names; wxl.lua gives each Lua mod one) and a serial: the newest shows. An
+outer vertex on a chunk's edge is written in every chunk holding it (up to four). A chunk's
+original heights and normals are taken the first time the service writes into it and kept until
+the map unloads: a reset writes them back, and a chunk the client builds again
+(`MapArea.PrepareChunk` After: from the same buffer, which still holds the edits, or from the disk
+after its tile was freed) gets its edits again, with the normals of its vertices and of its
+neighbours' edges, before `TerrainChunkLoaded`. A vertex's normal is the file's while no vertex
+sharing a triangle with it is edited, and otherwise the area-weighted sum of its triangles' normals
+over whatever chunks are loaded. `vertices_in` walks the map's global grid inside a circle
+(`wxl::terrain::ForVerticesInCircle`), naming an edge vertex once, in the chunk whose cells it
+starts, and reading its heights from any loaded chunk holding it. `MapChunk.Purge` raises `TerrainChunkUnloaded`; `Map.Unload`
+drops every edit and raises `TerrainEditsCleared`. Main thread only. No new call into Wow.exe for
+the reads; the x86 binding calls `CreateBounds`, `AddBatch`, `FreeInst` and `OnFallLocal`
+(`calls_x86.def`) and writes `s_queryBox` at its address.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
@@ -699,7 +739,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its edits of the ground, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.
