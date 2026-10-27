@@ -56,6 +56,9 @@ namespace wxl::core::services::terrain_tiles
         uint64_t unprovided = 0;    ///< split tiles no provider answered
         uint64_t named = 0;         ///< FileDataIDs given a name (textures, placements)
         uint64_t unnamed = 0;       ///< FileDataIDs no provider named
+        uint64_t liquidFormats = 0; ///< MH2O instances given a vertex format this client reads
+        uint64_t liquidTypes = 0;   ///< MH2O instances given a liquid type this client has
+        uint64_t liquidsDropped = 0; ///< MH2O chunks out of bounds, left dry
     };
     const Counters& Count();
     /// Areas held now.

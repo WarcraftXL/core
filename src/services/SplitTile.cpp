@@ -5,6 +5,7 @@
 
 #include "services/SplitTile.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace wxl::core::services::split_tile
@@ -236,10 +237,136 @@ namespace wxl::core::services::split_tile
             const uint8_t* layer = p.mcly.data + 16 * k;
             if (U32(layer) >= tile.textures || (U32(layer) < tile.missing.size() && tile.missing[U32(layer)])) break;
             // An alpha map (0x100) must start inside MCAL; how much it reads the client decides by its
-            // own flags, as for any file.
+            // own flags (the runtime's copy of _tex0 is padded past its end, so a map cut short reads zeros).
             if ((U32(layer + 4) & 0x100) && U32(layer + 8) >= p.mcal.size) break;
         }
         return k;
+    }
+
+    bool NeedsPlaceholder(const Tile& tile)
+    {
+        for (uint32_t i = 0; i < 256; ++i)
+            if (!UsableLayers(tile, i)) return true;
+        return false;
+    }
+
+    ChunkLayers PlanLayers(const Tile& tile, uint32_t chunk, uint32_t placeholder)
+    {
+        ChunkLayers out;
+        if (chunk >= 256) return out;
+        const ChunkParts& p     = tile.parts[chunk];
+        const uint32_t    usable = UsableLayers(tile, chunk);
+        if (usable && p.mcly.size / 16 >= 4)
+        {
+            out.count = usable;
+            return out; // the file's MCLY: four entries the client can read
+        }
+        out.own = true;
+        if (usable)
+        {
+            std::memcpy(out.table, p.mcly.data, 16 * usable);
+            out.count = usable;
+        }
+        else
+        {
+            std::memcpy(out.table, &placeholder, 4);
+            out.count = 1;
+        }
+        for (uint32_t k = out.count; k < 4; ++k)
+        {
+            std::memcpy(out.table + 16 * k, out.table, 4); // the first's texture; no flags, alpha or effect
+        }
+        return out;
+    }
+
+    LiquidFixes FixLiquids(uint8_t* root, uint32_t size, const std::vector<uint8_t>& known)
+    {
+        LiquidFixes fixes;
+        if (!IsSplitRoot(root, size)) return fixes;
+        const uint32_t mhdr = 8 + U32(root + 4) + 8;
+        const uint32_t slot = U32(root + mhdr + 0x28);
+        if (!slot || static_cast<uint64_t>(mhdr) + slot + 8 > size) return fixes;
+        uint8_t*       chunk = root + mhdr + slot;
+        if (U32(chunk) != Id("MH2O")) return fixes;
+        const uint32_t len = std::min<uint32_t>(U32(chunk + 4), size - (mhdr + slot + 8));
+        uint8_t*       data = chunk + 8;
+        if (len < 256 * 12) return fixes;
+
+        // Every offset MH2O holds, to bound each instance's vertex data by the next one.
+        std::vector<uint32_t> offsets{len};
+        for (uint32_t c = 0; c < 256; ++c)
+        {
+            const uint32_t oi = U32(data + 12 * c), n = U32(data + 12 * c + 4), oa = U32(data + 12 * c + 8);
+            if (oa) offsets.push_back(oa);
+            if (!oi || static_cast<uint64_t>(oi) + 24ull * n > len) continue;
+            offsets.push_back(oi);
+            for (uint32_t k = 0; k < n; ++k)
+            {
+                const uint8_t* ins = data + oi + 24 * k;
+                if (U32(ins + 16)) offsets.push_back(U32(ins + 16));
+                if (U32(ins + 20)) offsets.push_back(U32(ins + 20));
+            }
+        }
+        std::sort(offsets.begin(), offsets.end());
+
+        for (uint32_t c = 0; c < 256; ++c)
+        {
+            uint8_t*       head = data + 12 * c;
+            const uint32_t oi = U32(head), n = U32(head + 4), oa = U32(head + 8);
+            if (!n) continue;
+            bool ok = oi && static_cast<uint64_t>(oi) + 24ull * n <= len && (!oa || static_cast<uint64_t>(oa) + 16 <= len);
+            for (uint32_t k = 0; ok && k < n; ++k)
+            {
+                uint8_t*       ins = data + oi + 24 * k;
+                const uint32_t x = ins[12], y = ins[13], w = ins[14], h = ins[15];
+                const uint32_t bitmap = U32(ins + 16), vertex = U32(ins + 20);
+                if (!w || !h || x + w > 8 || y + h > 8 || (bitmap && static_cast<uint64_t>(bitmap) + (w * h + 7) / 8 > len))
+                {
+                    ok = false;
+                    break;
+                }
+                ++fixes.instances;
+                const uint32_t vertices = (w + 1) * (h + 1);
+                uint16_t       format   = U16(ins + 2);
+                const uint16_t before   = format;
+                uint32_t       gap      = 0;
+                if (vertex)
+                {
+                    const auto next = std::upper_bound(offsets.begin(), offsets.end(), vertex);
+                    gap = (next == offsets.end() ? len : *next) - vertex;
+                }
+                if (format > 3)
+                    format = !vertex ? 2 : gap >= 8 * vertices ? 1 : gap >= 5 * vertices ? 0 : gap >= vertices ? 2 : 2;
+                if (format == 3) format = 1;
+                // The vertex data the format reads must lie in MH2O; else none (flat, at the instance's heights).
+                const uint32_t need = format == 0 ? 5 * vertices : format == 1 ? 8 * vertices : vertices;
+                if (vertex && static_cast<uint64_t>(vertex) + need > len)
+                {
+                    const uint32_t none = 0;
+                    std::memcpy(ins + 20, &none, 4);
+                    format = 2;
+                }
+                if (format != before)
+                {
+                    std::memcpy(ins + 2, &format, 2);
+                    ++fixes.formats;
+                }
+                const uint16_t type = U16(ins);
+                if (type >= known.size() || !known[type])
+                {
+                    const uint16_t safe = format == 2 ? 2 : 1;
+                    std::memcpy(ins, &safe, 2);
+                    ++fixes.types;
+                }
+            }
+            if (!ok)
+            {
+                const uint32_t none = 0;
+                std::memcpy(head + 4, &none, 4);
+                ++fixes.dropped;
+            }
+        }
+        return fixes;
     }
 
     bool UsableDoodadRefs(const Tile& tile, uint32_t chunk, std::vector<uint32_t>& kept)

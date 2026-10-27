@@ -96,6 +96,44 @@ namespace wxl::core::services::split_tile
     /// has: @p defs's entry @p index gets nameId @p nameId and loses the flag, as a placement by name.
     void NameByIndex(Span defs, uint32_t defSize, uint32_t index, uint32_t nameId);
 
+    /// The texture a chunk is given when none of its layers can be drawn: one every 3.3.5a client
+    /// has (a plain dirt), so the chunk keeps a layer the client can draw and query.
+    constexpr const char* kPlaceholderTexture = "Tileset\\Elwynn\\ElwynnDirtBase.blp";
+
+    /// What the client is given for a chunk's layers (CMapChunk::m_layers, nLayers). The client
+    /// assumes at least one layer it can draw and four entries it can read: CMap::QueryGroundTypeTerrain
+    /// reads m_layers[k] for the k (0 to 3) the chunk's low-quality map (MCNK +0x40) names, whatever
+    /// nLayers says. So: the layers it can draw (UsableLayers), at least one (the placeholder
+    /// texture when none can), and four readable entries: the file's MCLY when it holds four, else a
+    /// table of the runtime's: the drawable entries, then copies of the first with no alpha map and
+    /// no ground effect.
+    struct ChunkLayers
+    {
+        uint32_t count = 0;       ///< nLayers: 1 to 4
+        bool     own = false;     ///< the client reads `table`, not MCLY
+        uint8_t  table[4 * 16] = {};
+    };
+    /// @p placeholder: the index the tile's texture list gives kPlaceholderTexture (needed only when
+    /// NeedsPlaceholder).
+    ChunkLayers PlanLayers(const Tile& tile, uint32_t chunk, uint32_t placeholder);
+    /// Whether some chunk of the tile has no layer it can draw.
+    bool NeedsPlaceholder(const Tile& tile);
+
+    /// Liquids (MH2O) of a root as later clients write them, made safe for the client of 3.3.5a in
+    /// place, before it reads them (a root without MCIN only):
+    ///   - an instance's vertex format past 3 is a LiquidObject id (WoD and later): its format is
+    ///     taken from the size of its vertex data (heights and depths 5 bytes a vertex, heights and
+    ///     texture coordinates 8, all three 9, depths 1); format 3 (heights, texture coordinates,
+    ///     depths) is read as 1, whose first two parts it holds, since this client draws 3 flat;
+    ///   - a liquid type its LiquidType.dbc has not (@p known, by id) becomes Water (1), or Ocean
+    ///     (2) for one without heights: the client looks types up without a check in several places;
+    ///   - a chunk whose instances or tables lie outside MH2O, or cover more than 8 x 8, has none.
+    struct LiquidFixes
+    {
+        uint32_t instances = 0, formats = 0, types = 0, dropped = 0;
+    };
+    LiquidFixes FixLiquids(uint8_t* root, uint32_t size, const std::vector<uint8_t>& known);
+
     /// MTXP's flags, one int32 a texture as MTXF lays them out (the client reads MTXF only).
     std::vector<int32_t> FlagsFromMtxp(const Tile& tile);
 

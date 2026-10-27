@@ -27,6 +27,10 @@ namespace wxl::core::services::terrain_tiles
     namespace
     {
         constexpr const char* kTag = "terrain";
+        /// Zeros kept past each file the runtime copies: the client reads an alpha map by its own
+        /// flags (4096 bytes, or 2048, or a run-length map), so one cut short at the end of _tex0
+        /// reads zeros, not past the buffer.
+        constexpr size_t kPadding = 8192;
 
         struct Provider
         {
@@ -49,13 +53,16 @@ namespace wxl::core::services::terrain_tiles
             void*                     area = nullptr;
             uint8_t*                  root = nullptr; ///< the client's buffer (m_fileBuffer)
             uint32_t                  rootSize = 0;
-            std::vector<uint8_t>      files[WXL_TERRAIN_TILE_FILES];
+            std::vector<uint8_t>      files[WXL_TERRAIN_TILE_FILES]; ///< each padded with kPadding zeros past its end
+            uint32_t                  sizes[WXL_TERRAIN_TILE_FILES] = {};
+            std::array<std::array<uint8_t, 64>, 256> layerTables{}; ///< layers the runtime gives a chunk (PlanLayers' own)
             split_tile::Tile          tile;
             std::vector<uint8_t>      chunkInfo;      ///< 256 SMChunkInfo: offset, size, flags, padding
             std::vector<int32_t>      textureFlags;   ///< MTXF as the client reads it, when MTXF is absent or short
             // Names given to FileDataIDs (8.1 and later), laid out as MTEX, MMDX/MMID, MWMO/MWID.
             std::vector<char>         textureNames, modelNames, mapObjNames;
             std::vector<uint32_t>     modelOffsets, mapObjOffsets;
+            uint32_t                  placeholder = UINT32_MAX; ///< kPlaceholderTexture's index, when given
             std::array<ChunkRefs, 256> refs;
         };
 
@@ -103,6 +110,42 @@ namespace wxl::core::services::terrain_tiles
     namespace
     {
         bool g_toldUnnamed = false;
+        bool g_toldLiquids = false;
+        bool g_toldPlaceholder = false;
+
+        /// The liquid types the client's LiquidType.dbc has, by id (read once through its file layer);
+        /// Water, Ocean, Magma and Slime when it cannot be read.
+        const std::vector<uint8_t>& KnownLiquids()
+        {
+            static std::vector<uint8_t> known;
+            if (!known.empty()) return known;
+            std::vector<uint8_t> dbc;
+            if (void* file = wxl::core::binding::file_open("DBFilesClient\\LiquidType.dbc"))
+            {
+                const uint64_t size = wxl::core::binding::file_size(file);
+                if (size >= 20 && size < (16u << 20))
+                {
+                    dbc.resize(static_cast<size_t>(size));
+                    if (wxl::core::binding::file_read(file, dbc.data(), static_cast<uint32_t>(size)) != size) dbc.clear();
+                }
+                wxl::core::binding::file_close(file);
+            }
+            if (dbc.size() >= 20 && std::memcmp(dbc.data(), "WDBC", 4) == 0)
+            {
+                const uint32_t records = Get32(dbc.data() + 4), recordSize = Get32(dbc.data() + 12);
+                for (uint32_t i = 0; recordSize >= 4 && 20 + static_cast<uint64_t>(i + 1) * recordSize <= dbc.size() && i < records; ++i)
+                {
+                    const uint32_t id = Get32(dbc.data() + 20 + static_cast<size_t>(i) * recordSize);
+                    if (id < 65536)
+                    {
+                        if (known.size() <= id) known.resize(id + 1, 0);
+                        known[id] = 1;
+                    }
+                }
+            }
+            if (known.empty()) known = {0, 1, 1, 1, 1};
+            return known;
+        }
 
         /// The name the providers give a FileDataID; false when none does.
         bool NameOf(uint32_t id, std::string& out)
@@ -172,6 +215,28 @@ namespace wxl::core::services::terrain_tiles
             offsets = split_tile::Span{reinterpret_cast<uint8_t*>(offsetTable.data()), static_cast<uint32_t>(offsetTable.size() * 4)};
             return named;
         }
+    }
+
+    /// A tile with a chunk none of whose layers can be drawn gets kPlaceholderTexture after its own
+    /// textures, for those chunks' one layer (PlanLayers).
+    static void GivePlaceholder(SplitArea& split)
+    {
+        split_tile::Tile& t = split.tile;
+        if (!split_tile::NeedsPlaceholder(t)) return;
+        if (split.textureNames.empty() && t.mtex.size)
+            split.textureNames.assign(reinterpret_cast<const char*>(t.mtex.data), reinterpret_cast<const char*>(t.mtex.data) + t.mtex.size);
+        // MTEX's names end with a NUL; a table cut short is ended before the placeholder.
+        if (!split.textureNames.empty() && split.textureNames.back() != 0) split.textureNames.push_back(0);
+        const std::string name = split_tile::kPlaceholderTexture;
+        split.textureNames.insert(split.textureNames.end(), name.begin(), name.end());
+        split.textureNames.push_back(0);
+        split.placeholder = t.textures;
+        t.textures += 1;
+        t.mtex = split_tile::Span{reinterpret_cast<uint8_t*>(split.textureNames.data()), static_cast<uint32_t>(split.textureNames.size())};
+        if (!g_toldPlaceholder)
+            WLOG_INFO(kTag, "chunks of a tile without MCIN have no layer the client can draw (textures not named, or none): they are "
+                            "drawn with %s", split_tile::kPlaceholderTexture);
+        g_toldPlaceholder = true;
     }
 
     static void NameFileIds(SplitArea& split, const char* path)
@@ -252,6 +317,20 @@ namespace wxl::core::services::terrain_tiles
         const void* data = area ? wxl::core::binding::map_area_bytes(area, &x, &y, &file, &size) : nullptr;
         if (!split_tile::IsSplitRoot(static_cast<const uint8_t*>(data), size)) return;
 
+        // Its liquids, before the client reads them: formats and types this client knows.
+        const split_tile::LiquidFixes fixed =
+            split_tile::FixLiquids(static_cast<uint8_t*>(const_cast<void*>(data)), size, KnownLiquids());
+        g_counters.liquidFormats += fixed.formats;
+        g_counters.liquidTypes += fixed.types;
+        g_counters.liquidsDropped += fixed.dropped;
+        if ((fixed.formats || fixed.types || fixed.dropped) && !g_toldLiquids)
+        {
+            WLOG_INFO(kTag, "a tile without MCIN has liquids of later clients: %u of %u instance(s) given a vertex format this client reads "
+                            "(LiquidObject ids, format 3), %u a liquid type its LiquidType.dbc has, %u chunk(s) of liquid out of bounds left dry",
+                      fixed.formats, fixed.instances, fixed.types, fixed.dropped);
+            g_toldLiquids = true;
+        }
+
         auto split      = std::make_unique<SplitArea>();
         split->area     = area;
         split->root     = static_cast<uint8_t*>(const_cast<void*>(data));
@@ -286,6 +365,8 @@ namespace wxl::core::services::terrain_tiles
                 {
                     const uint8_t* bytes = static_cast<const uint8_t*>(files.data[k]);
                     split->files[k].assign(bytes, bytes + files.size[k]);
+                    split->files[k].resize(static_cast<size_t>(files.size[k]) + kPadding, 0);
+                    split->sizes[k] = files.size[k];
                     answered = true;
                 }
         }
@@ -302,14 +383,15 @@ namespace wxl::core::services::terrain_tiles
         std::vector<uint8_t>& tex0 = split->files[WXL_TERRAIN_TILE_TEX0];
         std::vector<uint8_t>& obj0 = split->files[WXL_TERRAIN_TILE_OBJ0];
         std::string           why;
-        if (!split_tile::Index(split->root, size, tex0.empty() ? nullptr : tex0.data(), static_cast<uint32_t>(tex0.size()),
-                               obj0.empty() ? nullptr : obj0.data(), static_cast<uint32_t>(obj0.size()), split->tile, why))
+        if (!split_tile::Index(split->root, size, tex0.empty() ? nullptr : tex0.data(), split->sizes[WXL_TERRAIN_TILE_TEX0],
+                               obj0.empty() ? nullptr : obj0.data(), split->sizes[WXL_TERRAIN_TILE_OBJ0], split->tile, why))
         {
             WLOG_ERROR(kTag, "%s has no MCIN and cannot be read as a split tile (%s): the client reads it as it is", path, why.c_str());
             return;
         }
         if (!why.empty()) WLOG_WARN(kTag, "%s: %sthat file is not used", path, why.c_str());
         NameFileIds(*split, path);
+        GivePlaceholder(*split);
         g_areas.push_back(std::move(split));
     }
 
@@ -383,8 +465,10 @@ namespace wxl::core::services::terrain_tiles
         const split_tile::ChunkParts&   p = t.parts[i];
         uint8_t*                        header = static_cast<uint8_t*>(at.header);
 
-        const uint32_t layers = split_tile::UsableLayers(t, i);
-        if (layers < p.mcly.size / 16) ++g_counters.layersCut;
+        const split_tile::ChunkLayers plan = split_tile::PlanLayers(t, i, split->placeholder);
+        const uint32_t                layers = plan.count;
+        if (split_tile::UsableLayers(t, i) < p.mcly.size / 16) ++g_counters.layersCut;
+        if (plan.own) std::memcpy(split->layerTables[i].data(), plan.table, sizeof plan.table);
 
         ChunkRefs& refs = split->refs[i];
         refs.allDoodads = split_tile::UsableDoodadRefs(t, i, refs.doodads);
@@ -404,7 +488,7 @@ namespace wxl::core::services::terrain_tiles
         }
 
         wxl_core_chunk_split parts{};
-        parts.layers = layers ? p.mcly.data : nullptr;
+        parts.layers = plan.own ? split->layerTables[i].data() : p.mcly.data;
         parts.alpha  = p.mcal.data;
         parts.shadow = p.mcsh.data;
         parts.refs   = refs.allDoodads ? p.mcrd.data : reinterpret_cast<uint8_t*>(refs.doodads.data());
@@ -514,6 +598,8 @@ namespace wxl::core::services::terrain_tiles
         g_inRefs         = false;
         g_toldUnprovided = false;
         g_toldUnnamed    = false;
+        g_toldLiquids    = false;
+        g_toldPlaceholder = false;
     }
 
     const Counters& Count() { return g_counters; }
