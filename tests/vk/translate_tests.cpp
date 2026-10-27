@@ -1014,8 +1014,10 @@ namespace wxl::vk::test
         // Texel centres of the 2x2 texture: layer k's coordinate picks its texel; its height is that texel's alpha.
         const float centre[4][2] = {{0.25f, 0.25f}, {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}};
         uint32_t    drawn = 0;
+        for (uint32_t form = 0; form < 2; ++form)
         for (uint32_t layers = 2; layers <= 4; ++layers)
         {
+            const bool sums = form == 1; // the programs of maps with big alpha sum their layers
             // The vertex program: texture coordinate k from c(10 + k).
             Asm v(false, 3, 0);
             v.Dcl(0, 0, Dst(Reg::Input, 0));
@@ -1029,11 +1031,22 @@ namespace wxl::vk::test
             for (uint32_t k = 0; k <= layers; ++k) p.DclSampler(2, k);
             for (uint32_t k = 0; k <= layers; ++k) p.Op(O::kTex, {Dst(Reg::Temp, k), Src(Reg::Input, k), Src(Reg::Sampler, k)});
             uint32_t acc = 0;
-            for (uint32_t k = 1; k < layers; ++k)
+            if (sums)
             {
-                p.Op(O::kLrp, {Dst(Reg::Temp, 10 + k), Src(Reg::Temp, layers, (k - 1) * 0x55u), Src(Reg::Temp, k), Src(Reg::Temp, acc)});
-                acc = 10 + k;
+                p.Def(20, 1.0f, 0.0f, 0.0f, 0.0f);
+                p.Op(O::kDp3, {Dst(Reg::Temp, 8, 1, true), Src(Reg::Temp, layers), Src(Reg::Const, 20, 0x00)});
+                p.Op(O::kAdd, {Dst(Reg::Temp, 8, 1), Src(Reg::Temp, 8, 0x00, SrcMod::Neg), Src(Reg::Const, 20, 0x00)});
+                p.Op(O::kMul, {Dst(Reg::Temp, 9), Src(Reg::Temp, 0), Src(Reg::Temp, 8, 0x00)});
+                for (uint32_t k = 1; k < layers; ++k)
+                    p.Op(O::kMad, {Dst(Reg::Temp, 9), Src(Reg::Temp, k), Src(Reg::Temp, layers, (k - 1) * 0x55u), Src(Reg::Temp, 9)});
+                acc = 9;
             }
+            else
+                for (uint32_t k = 1; k < layers; ++k)
+                {
+                    p.Op(O::kLrp, {Dst(Reg::Temp, 10 + k), Src(Reg::Temp, layers, (k - 1) * 0x55u), Src(Reg::Temp, k), Src(Reg::Temp, acc)});
+                    acc = 10 + k;
+                }
             p.Op(O::kMov, {Dst(Reg::ColorOut, 0), Src(Reg::Temp, acc)});
             const std::vector<uint8_t> stock = p.Bytes();
             std::vector<uint32_t>      words;
@@ -1070,7 +1083,7 @@ namespace wxl::vk::test
                     }
                 std::memcpy(&lab.pregs[32 * 4], params, sizeof params);
                 Case k;
-                k.name = "the height blend of " + std::to_string(layers) + " layers, pick " + std::to_string(pick);
+                k.name = std::string("the height blend of ") + (sums ? "summed " : "") + std::to_string(layers) + " layers, pick " + std::to_string(pick);
                 k.vs   = v.Bytes();
                 k.ps   = blended;
                 k.tolerance = 2e-5f;
@@ -1082,12 +1095,22 @@ namespace wxl::vk::test
                 const bool ran = lab.Run(k.vs, blended, gpu, w) && lab.Run(k.vs, stock, before, w);
                 const V4& alphas = lab.texels[texel[layers]];
                 float wgt[4] = {}, rem = 1.0f, pct[4] = {}, top = 0.0f, sum = 0.0f, want[4] = {};
-                for (int j = static_cast<int>(layers) - 1; j >= 1; --j)
+                if (sums)
                 {
-                    wgt[j] = alphas.v[j - 1] * rem;
-                    rem *= 1.0f - alphas.v[j - 1];
+                    float total = 0.0f;
+                    for (uint32_t j = 1; j < layers; ++j) total += wgt[j] = alphas.v[j - 1];
+                    for (uint32_t j = layers - 1; j < 3; ++j) total += alphas.v[j]; // the program sums all three
+                    wgt[0] = 1.0f - std::min(1.0f, total);
                 }
-                wgt[0] = rem;
+                else
+                {
+                    for (int j = static_cast<int>(layers) - 1; j >= 1; --j)
+                    {
+                        wgt[j] = alphas.v[j - 1] * rem;
+                        rem *= 1.0f - alphas.v[j - 1];
+                    }
+                    wgt[0] = rem;
+                }
                 for (uint32_t j = 0; j < layers; ++j)
                 {
                     const float h = lab.texels[texel[j]].v[3];
