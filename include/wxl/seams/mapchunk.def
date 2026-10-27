@@ -38,8 +38,7 @@ WXL_SEAM_AFTER(MapChunk, ProcessIffChunks, "CMapChunk::ProcessIffChunks", void, 
 // order the client places them from one list; references it cannot follow are left out. For
 // any tile, placements of a model the client cannot load (an M2 of magic MD21 or a version past
 // 264, a WMO root past 17 or not in its files) are left out the same way, each such file logged
-// once; a chunk whose
-// models all load is not taken.
+// once; a chunk whose models all load is not taken.
 WXL_SEAM_GATE(MapChunk, CreateRefs, "CMapChunk::CreateRefs", void, thiscall, (void* self, void* area, uint32_t* mcrf_ptr, uint32_t doodad_refs, uint32_t map_obj_refs))
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
