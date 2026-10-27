@@ -85,6 +85,7 @@ namespace
 
     services::terrain_layers::Counters g_counters;
     bool                              g_saidRange = false;
+    bool                              g_saidCut   = false;
 
     bool Scaled(const Scales& s)
     {
@@ -201,6 +202,41 @@ namespace wxl::core::services::terrain_layers
         g_ctx      = Context{};
         g_restore  = Restore{};
         g_counters = Counters{};
+    }
+
+    uint32_t TileLoading(void* data, uint32_t size)
+    {
+        // The top-level chunks: id and size, then the data. MCNK's header holds nLayers at 0x0C.
+        constexpr uint32_t kMcnk = 0x4D434E4Bu; // "MCNK", read as the file stores it ("KNCM")
+        auto*              bytes = static_cast<uint8_t*>(data);
+        uint32_t           cut   = 0, layers = 0;
+        for (size_t at = 0; bytes && at + 8 <= size;)
+        {
+            uint32_t id = 0, length = 0;
+            std::memcpy(&id, bytes + at, 4);
+            std::memcpy(&length, bytes + at + 4, 4);
+            if (length > size - at - 8) break;
+            if (id == kMcnk && length >= 0x10)
+            {
+                std::memcpy(&layers, bytes + at + 8 + 0x0C, 4);
+                if (layers > 4)
+                {
+                    const uint32_t four = 4;
+                    std::memcpy(bytes + at + 8 + 0x0C, &four, 4);
+                    ++cut;
+                }
+            }
+            at += 8 + static_cast<size_t>(length);
+        }
+        if (cut)
+        {
+            g_counters.chunks_cut += cut;
+            if (!g_saidCut)
+                WLOG_INFO(kTag, "a tile names more than 4 texture layers in %u chunk(s): the client draws their first 4 (it holds no more), the rest stay in the file for a mod",
+                          cut);
+            g_saidCut = true;
+        }
+        return cut;
     }
 
     void LayerCreated(void* chunk, void* area, const void* mcly)

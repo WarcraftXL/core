@@ -11,6 +11,7 @@
 #include "services/TerrainService.hpp"
 
 #include "binding/Binding.hpp"
+#include "services/TerrainLayers.hpp"
 #include "runtime/Core.hpp"
 
 #include "wxl/events.h"
@@ -51,14 +52,17 @@ namespace wxl::seam::MapArea::AsyncCallback
 {
     void WXL_CALL Before(void* param)
     {
-        wxl::host::ModHost* host = wxl::core::Host();
-        if (!host || !param || !host->Listening(WXL_EV_TerrainTileLoad)) return;
-
+        if (!param) return;
         int32_t     x = 0, y = 0;
         void*       file = nullptr;
         uint32_t    size = 0;
         const void* data = wxl::core::binding::map_area_bytes(param, &x, &y, &file, &size);
         if (!data) return;
+        // A chunk naming more layers than the client holds is cut to 4 before its chunks are walked.
+        wxl::core::services::terrain_layers::TileLoading(const_cast<void*>(data), size);
+
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (!host || !host->Listening(WXL_EV_TerrainTileLoad)) return;
 
         // The name the tile was opened by; one the runtime's file layer opened carries its own
         // prefix, which is not the client's name.

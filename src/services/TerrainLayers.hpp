@@ -36,6 +36,13 @@ namespace wxl::core::services::terrain_layers
     /// The client shuts down.
     void Clear();
 
+    /// The client holds at most 4 texture layers a chunk (CMapRenderChunk::m_layers[4], one alpha
+    /// map texture of three alphas and the shadow, programs for 1 to 4 layers) and writes past them
+    /// for an MCNK naming more. A tile's bytes just read (seam MapArea.AsyncCallback Before): each
+    /// MCNK naming more than 4 is set to its first 4, the rest left in the file for a mod. Answers
+    /// how many chunks were cut.
+    uint32_t TileLoading(void* data, uint32_t size);
+
     /// A layer was appended to @p chunk (CMapRenderChunk*) by CreateLayer(@p area, @p mcly).
     void LayerCreated(void* chunk, void* area, const void* mcly);
 
@@ -62,6 +69,7 @@ namespace wxl::core::services::terrain_layers
         uint64_t layers_extra = 0;  ///< layers answered an extra texture
         uint64_t draws_extra = 0;   ///< single-pass draws that bound an extra texture
         uint32_t chunks_kept = 0;   ///< render chunks holding a scaled layer now
+        uint64_t chunks_cut = 0;    ///< MCNKs that named more than 4 layers, cut to 4
     };
     Counters Count();
 }
