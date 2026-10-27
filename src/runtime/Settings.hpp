@@ -52,6 +52,9 @@ namespace wxl::core::settings
         unsigned gx_frames     = 2;      ///< [gx] frames_in_flight: 1 to 3
         bool     gx_nearest    = false;  ///< [gx] present_filter = nearest: the scene stretched without blending
         bool     gx_async      = true;   ///< [gx] async_pipelines: a draw into the scene whose pipeline compiles is left out rather than waited for
+        bool     gx_rebar      = true;   ///< [gx] vk_rebar: the renderer's rings (and on 64-bit its pools) in the GPU's mapped device-local memory
+        bool     gx_prewarm    = true;   ///< [gx] vk_prewarm: the programs and pipelines of earlier launches made at the device's start
+        bool     gx_gpu_times  = true;   ///< [gx] vk_gpu_times: GPU timestamps around each pass, for the session's last lines and Tracy
 
         /// Lines of the file that were not understood, as messages for the log, at most 8.
         char     problems[8][160] = {};

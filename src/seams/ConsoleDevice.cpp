@@ -7,6 +7,7 @@
 
 #include "binding/Binding.hpp"
 #include "gx/Memory.hpp"
+#include "gx/Pacing.hpp"
 #include "gx/Vulkan.hpp"
 #include "runtime/Session.hpp"
 #include "runtime/Stages.hpp"
@@ -21,6 +22,8 @@ namespace wxl::seam::ConsoleDevice::Initialize
         wxl::core::gx::DeviceReady(wxl::core::session::CurrentSettings());
         // On Direct3D 9 the same report the Vulkan device gives when it is made, to read beside it.
         if (!wxl::core::gx::VulkanActive()) wxl::core::gx::memory::Report("with the device made");
+        // /console gxStats <label>: the frame lines of a test route's step, on every device.
+        wxl::core::gx::pacing::RegisterVariable();
         wxl::core::stages::Reach(WXL_STAGE_GRAPHICS);
     }
 }

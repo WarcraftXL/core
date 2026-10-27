@@ -39,6 +39,7 @@ endif()
 # --- device: the loader, the instance, the physical device, the device, its loss -----------------
 add_library(wxl-vk-device STATIC
     "${WXL_VK_ROOT}/src/gx/vk/Vk.cpp"
+    "${WXL_VK_ROOT}/src/gx/vk/Stats.cpp"
     "${WXL_VK_ROOT}/src/gx/vk/device/Floor.cpp"
     "${WXL_VK_ROOT}/src/gx/vk/device/Device.cpp")
 target_include_directories(wxl-vk-device PUBLIC "${WXL_VK_ROOT}/src")

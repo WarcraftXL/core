@@ -140,6 +140,7 @@ namespace wxl::vk::present
             allocator_->Destroy(readback_);
             allocator_->Destroy(pixels_);
             if (queries_) vkDestroyQueryPool(context_->Device(), queries_, nullptr);
+            if (pass_pool_) vkDestroyQueryPool(context_->Device(), pass_pool_, nullptr);
             pass_.Destroy();
             frames_.Destroy();
         }
@@ -147,6 +148,12 @@ namespace wxl::vk::present
         make_surface_ = nullptr;
         queries_      = VK_NULL_HANDLE;
         sink_         = nullptr;
+        pass_pool_    = VK_NULL_HANDLE;
+        pass_sink_    = nullptr;
+        for (auto& records : pass_records_) records.clear();
+        upload_pass_    = kNoPass;
+        rendering_pass_ = kNoPass;
+        pass_on_        = false;
         offscreen_    = false;
         scene_extent_ = {0, 0};
         samples_      = VK_SAMPLE_COUNT_1_BIT;
@@ -285,6 +292,132 @@ namespace wxl::vk::present
         return ok;
     }
 
+    // --- The GPU time of each pass ----------------------------------------------------------------------
+
+    bool Display::SetPassTiming(bool on)
+    {
+        if (!on)
+        {
+            // The pool stays until the display goes: frames in flight may still write into it.
+            for (auto& records : pass_records_) records.clear();
+            upload_pass_ = rendering_pass_ = kNoPass;
+            pass_on_                       = false;
+            return true;
+        }
+        if (!pass_pool_)
+        {
+            uint32_t familyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(context_->Physical(), &familyCount, nullptr);
+            std::vector<VkQueueFamilyProperties> families(familyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(context_->Physical(), &familyCount, families.data());
+            const uint32_t family = context_->QueueFamily();
+            if (family >= familyCount || families[family].timestampValidBits == 0) return false;
+            const uint32_t bits = families[family].timestampValidBits;
+            pass_mask_          = bits >= 64 ? ~0ull : (1ull << bits) - 1;
+            VkQueryPoolCreateInfo info{};
+            info.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            info.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+            info.queryCount = kPassQueries * frame::Frames::kMax;
+            if (vkCreateQueryPool(context_->Device(), &info, nullptr, &pass_pool_) != VK_SUCCESS)
+            {
+                pass_pool_ = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        pass_on_ = true;
+        return true;
+    }
+
+    uint32_t Display::PassBegin(const char* name) { return frames_.Open() ? PassBeginIn(name, frames_.Current()) : kNoPass; }
+
+    void Display::PassEnd(uint32_t pass)
+    {
+        if (frames_.Open()) PassEndIn(pass, frames_.Current());
+    }
+
+    uint32_t Display::PassBeginIn(const char* name, VkCommandBuffer cmd)
+    {
+        if (!pass_on_ || !pass_pool_ || !frames_.Open() || !cmd) return kNoPass;
+        const uint32_t           slot    = frames_.Index();
+        std::vector<PassRecord>& records = pass_records_[slot];
+        const uint32_t           query   = static_cast<uint32_t>(records.size()) * 2;
+        if (query + 2 > kPassQueries) return kNoPass;
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pass_pool_, slot * kPassQueries + query);
+        records.push_back(PassRecord{name, query, false});
+        return static_cast<uint32_t>(records.size() - 1);
+    }
+
+    void Display::PassEndIn(uint32_t pass, VkCommandBuffer cmd)
+    {
+        if (pass == kNoPass || !pass_pool_ || !frames_.Open() || !cmd) return;
+        const uint32_t           slot    = frames_.Index();
+        std::vector<PassRecord>& records = pass_records_[slot];
+        if (pass >= records.size() || records[pass].ended) return;
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pass_pool_, slot * kPassQueries + records[pass].query + 1);
+        records[pass].ended = true;
+    }
+
+    void Display::PassFrameBegun(uint32_t slot, VkCommandBuffer upload)
+    {
+        upload_pass_ = rendering_pass_ = kNoPass;
+        if (!pass_pool_) return;
+        std::vector<PassRecord>& records = pass_records_[slot];
+        if (!records.empty())
+        {
+            // The slot's previous frame has completed: its timestamps are there without a wait. Each
+            // comes with its availability (a frame dropped before its submission wrote none).
+            const uint32_t count = static_cast<uint32_t>(records.size()) * 2;
+            uint64_t       values[kPassQueries * 2] = {};
+            const VkResult result = vkGetQueryPoolResults(context_->Device(), pass_pool_, slot * kPassQueries, count, sizeof values, values,
+                                                          2 * sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (result == VK_SUCCESS || result == VK_NOT_READY)
+            {
+                const double period = context_->Properties().limits.timestampPeriod;
+                struct Sum
+                {
+                    const char* name;
+                    double      ms;
+                };
+                Sum      sums[kPassQueries / 2];
+                uint32_t kinds = 0;
+                for (const PassRecord& r : records)
+                {
+                    const uint64_t* first = values + r.query * 2;
+                    const uint64_t* last  = values + (r.query + 1) * 2;
+                    if (!r.ended || !first[1] || !last[1]) continue;
+                    const uint64_t ticks = (last[0] - first[0]) & pass_mask_;
+                    const double   ms    = static_cast<double>(ticks) * period / 1e6;
+                    uint32_t       k     = 0;
+                    while (k < kinds && sums[k].name != r.name) ++k;
+                    if (k == kinds) sums[kinds++] = Sum{r.name, 0.0};
+                    sums[k].ms += ms;
+                    if (pass_sink_) pass_sink_->Zone(r.name, static_cast<int64_t>(first[0]), static_cast<int64_t>(last[0]));
+                }
+                for (std::vector<PassTime>* times : {&pass_times_, &pass_segment_})
+                    for (uint32_t k = 0; k < kinds; ++k)
+                    {
+                        auto at = std::find_if(times->begin(), times->end(), [&](const PassTime& t) { return t.name == sums[k].name; });
+                        if (at == times->end())
+                        {
+                            times->push_back(PassTime{});
+                            times->back().name = sums[k].name;
+                            at                 = times->end() - 1;
+                        }
+                        at->per_frame.Add(sums[k].ms);
+                    }
+                if (kinds)
+                {
+                    ++pass_frames_;
+                    ++pass_segment_frames_;
+                }
+            }
+            records.clear();
+        }
+        if (!pass_on_) return;
+        vkCmdResetQueryPool(upload, pass_pool_, slot * kPassQueries, kPassQueries);
+        upload_pass_ = PassBeginIn("upload pass", upload);
+    }
+
     // --- A frame -------------------------------------------------------------------------------------
 
     bool Display::BeginFrame(frame::Wait& wait)
@@ -294,7 +427,13 @@ namespace wxl::vk::present
             wait = frame::Wait::Failed;
             return false;
         }
-        const VkCommandBuffer cmd = frames_.Begin(wait);
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        {
+            // The slot's previous frame: a wait here is the GPU behind the CPU.
+            WXL_VK_ZONE("Vulkan: wait for a frame slot");
+            stats::Scope waited(stats::Cause::GpuWait);
+            cmd = frames_.Begin(wait);
+        }
         if (!cmd)
         {
             if (wait == frame::Wait::Timeout)
@@ -306,6 +445,7 @@ namespace wxl::vk::present
         rendering_ = Rendering::None;
         ++stats_.frames;
         ++epoch_;
+        PassFrameBegun(frames_.Index(), frames_.Upload());
         if (hook_) hook_->FrameBegun(frames_.Index(), frames_.Upload());
 
         if (sink_ && queries_)
@@ -451,6 +591,7 @@ namespace wxl::vk::present
             info.pDepthAttachment = &depth;
             if (HasStencil(depth_format_)) info.pStencilAttachment = &depth;
         }
+        rendering_pass_ = PassBeginIn("scene", frames_.Current());
         vkCmdBeginRendering(frames_.Current(), &info);
         rendering_ = kind;
         ++epoch_;
@@ -462,6 +603,8 @@ namespace wxl::vk::present
         const VkCommandBuffer cmd = frames_.Current();
         if (hook_) hook_->RenderingEnding(cmd);
         vkCmdEndRendering(cmd);
+        PassEndIn(rendering_pass_, cmd);
+        rendering_pass_ = kNoPass;
         rendering_  = Rendering::None;
         target_key_ = 0;
         if (hook_) hook_->RenderingEnded(cmd);
@@ -495,6 +638,7 @@ namespace wxl::vk::present
             info.pDepthAttachment = &depth;
             if (HasStencil(target.depth_format)) info.pStencilAttachment = &depth;
         }
+        rendering_pass_ = PassBeginIn("texture targets", frames_.Current());
         vkCmdBeginRendering(frames_.Current(), &info);
         rendering_     = Rendering::Target;
         target_key_    = target.key;
@@ -507,6 +651,7 @@ namespace wxl::vk::present
     {
         if (!frames_.Open() || !key) return VK_NULL_HANDLE;
         EndRendering();
+        rendering_pass_ = PassBeginIn("wxl.render passes", frames_.Current());
         vkCmdBeginRendering(frames_.Current(), &info);
         rendering_     = Rendering::Target;
         target_key_    = key;
@@ -529,7 +674,8 @@ namespace wxl::vk::present
         if (samples_ == VK_SAMPLE_COUNT_1_BIT) return &scene_;
         if (!msaa_dirty_) return &resolve_;
         // D3D9's resolve of a multisampled back buffer: each pixel the mean of its samples.
-        const VkCommandBuffer cmd = frames_.Current();
+        const VkCommandBuffer cmd     = frames_.Current();
+        const uint32_t        timed   = PassBeginIn("resolve", cmd);
         Barrier(cmd, scene_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_RESOLVE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
         Barrier(cmd, resolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -547,6 +693,7 @@ namespace wxl::vk::present
                 kColorWrite | VK_ACCESS_2_TRANSFER_READ_BIT);
         Barrier(cmd, scene_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_PIPELINE_STAGE_2_RESOLVE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, kColorStage, kColorWrite);
+        PassEndIn(timed, cmd);
         msaa_dirty_ = false;
         ++stats_.resolves;
         return &resolve_;
@@ -557,6 +704,10 @@ namespace wxl::vk::present
         if (!frames_.Open()) return false;
         EndRendering();
         if (hook_) hook_->FrameFlushing(frames_.Upload());
+        PassEndIn(upload_pass_, frames_.Upload());
+        upload_pass_ = kNoPass;
+        WXL_VK_ZONE("Vulkan: readback");
+        stats::Scope   waited(stats::Cause::Readback);
         const uint64_t serial = frames_.Submit();
         frame::Wait    wait   = frame::Wait::Failed;
         if (!serial || !frames_.Resume(wait))
@@ -571,6 +722,7 @@ namespace wxl::vk::present
         last_serial_ = serial;
         graveyard_.Collect(timeline_->Completed());
         ++stats_.flushes;
+        upload_pass_ = PassBeginIn("upload pass", frames_.Upload());
         // A new command buffer: whatever a recorder bound is to be bound again.
         ++epoch_;
         return true;
@@ -752,6 +904,8 @@ namespace wxl::vk::present
         const VkCommandBuffer cmd = frames_.Current();
         EndRendering();
         if (hook_) hook_->FrameEnding(frames_.Upload());
+        PassEndIn(upload_pass_, frames_.Upload());
+        upload_pass_ = kNoPass;
 
         // A frame that never touched the scene still shows something defined: black.
         if (EnsureScene() && !touched_)
@@ -780,7 +934,9 @@ namespace wxl::vk::present
         {
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_NONE, kColorStage, kColorWrite);
+            const uint32_t timed = PassBeginIn("present pass", cmd);
             pass_.Record(cmd, frames_.Index(), Shown().view, target_.view, kSceneFormat, {target_.width, target_.height});
+            PassEndIn(timed, cmd);
             Barrier(cmd, target_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -812,12 +968,18 @@ namespace wxl::vk::present
             return swapchain_.Zero() ? FrameEnd::Drawn : FrameEnd::Dropped;
         }
 
-        uint32_t      index   = 0;
-        const Outcome acquire = swapchain_.Acquire(frames_.Acquire(), kAcquireNs, index);
+        uint32_t index   = 0;
+        Outcome  acquire = Outcome::Failed;
+        {
+            WXL_VK_ZONE("Vulkan: acquire");
+            stats::Scope acquiring(stats::Cause::Present);
+            acquire = swapchain_.Acquire(frames_.Acquire(), kAcquireNs, index);
+        }
         if (acquire != Outcome::Ok && acquire != Outcome::Suboptimal)
         {
             if (acquire == Outcome::Lost)
             {
+                pass_records_[frames_.Index()].clear();
                 frames_.Abandon();
                 submitted_.push_back(Submitted{stats_.frames, timeline_->Last()});
                 for (auto& release : after_) graveyard_.Bury(timeline_->Last(), std::move(release));
@@ -843,7 +1005,9 @@ namespace wxl::vk::present
         const VkImage image = swapchain_.Image(index);
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kColorStage,
                 VK_ACCESS_2_NONE, kColorStage, kColorWrite);
+        const uint32_t timed = PassBeginIn("present pass", cmd);
         pass_.Record(cmd, frames_.Index(), Shown().view, swapchain_.View(index), swapchain_.Format(), swapchain_.Extent());
+        PassEndIn(timed, cmd);
         Barrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 kColorStage, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
         EndTimestamp();
@@ -862,7 +1026,12 @@ namespace wxl::vk::present
             return context_->Lost() ? FrameEnd::Lost : FrameEnd::Dropped;
         }
 
-        const Outcome present = swapchain_.Present(index);
+        Outcome present = Outcome::Failed;
+        {
+            WXL_VK_ZONE("Vulkan: present");
+            stats::Scope presenting(stats::Cause::Present);
+            present = swapchain_.Present(index);
+        }
         limiter_.Shown(NowNs());
         if (present == Outcome::Lost) return FrameEnd::Lost;
         if (present == Outcome::Rebuild || present == Outcome::Suboptimal) rebuild_ = true;

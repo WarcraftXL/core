@@ -276,10 +276,13 @@ namespace
             return;
         }
         Line("graphics: [gx] api = vulkan: Vulkan is tried when the client makes its device, D3D9 if this machine "
-             "cannot; validation %s, gpu %s, pipelines %s",
+             "cannot; validation %s, gpu %s, pipelines %s; vk_prewarm %s, vk_rebar %s, vk_gpu_times %s",
              g_settings.gx_validation ? "on" : "off", g_settings.gx_gpu[0] ? g_settings.gx_gpu : "the best one",
              g_settings.gx_async ? "compiled on workers, a draw into the scene left out until its pipeline is ready"
-                                 : "compiled when first drawn, the frame waiting");
+                                 : "compiled when first drawn, the frame waiting",
+             g_settings.gx_prewarm ? "on (the programs and pipelines of earlier launches made at the start)" : "off",
+             g_settings.gx_rebar ? "on (the rings in the GPU's mapped memory where it has some)" : "off",
+             g_settings.gx_gpu_times ? "on (each pass timed on the GPU)" : "off");
     }
 
     void Settings(const wxl::log::SessionFiles& files)

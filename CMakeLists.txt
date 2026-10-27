@@ -168,6 +168,7 @@ set(WXL_VK_IMGUI_DIR "${WXL_IMGUI_DIR}")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/wxl_vk.cmake")
 set(WXL_CORE_GX_SOURCES
     src/gx/Memory.cpp
+    src/gx/Pacing.cpp
     src/gx/Select.cpp
     src/gx/Vulkan.cpp
     src/gx/vk/gxfront/Front.cpp)

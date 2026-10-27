@@ -133,14 +133,22 @@ namespace wxl::core::settings
                     else if (SameWord(value, "nearest")) out.gx_nearest = true;
                     else Problem(out, number, "not linear or nearest:", value);
                 }
-                else if (SameWord(key, "async_pipelines"))
+                else if (SameWord(key, "async_pipelines") || SameWord(key, "vk_rebar") || SameWord(key, "vk_prewarm") ||
+                         SameWord(key, "vk_gpu_times"))
                 {
-                    if (value == "0" || value == "1") out.gx_async = value == "1";
+                    bool& flag = SameWord(key, "async_pipelines") ? out.gx_async
+                                 : SameWord(key, "vk_rebar")      ? out.gx_rebar
+                                 : SameWord(key, "vk_prewarm")    ? out.gx_prewarm
+                                                                  : out.gx_gpu_times;
+                    if (value == "0" || value == "1") flag = value == "1";
                     else Problem(out, number, "not 0 or 1:", value);
                 }
                 else
                 {
-                    Problem(out, number, "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter, async_pipelines):", key);
+                    Problem(out, number,
+                            "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter, async_pipelines, vk_rebar, "
+                            "vk_prewarm, vk_gpu_times):",
+                            key);
                 }
                 continue;
             }

@@ -42,6 +42,9 @@ namespace wxl::vk::gxfront
         present::Filter filter = present::Filter::Linear; ///< [gx] present_filter
         std::string     cache_dir;                        ///< where the shader pack and the pipeline cache live (empty: none)
         bool            async_pipelines = true;           ///< [gx] async_pipelines: a draw into the scene whose pipeline compiles is left out
+        bool            rebar = true;                     ///< [gx] vk_rebar: rings and stream pools (and on 64-bit, pools) in mapped device memory
+        bool            prewarm = true;                   ///< [gx] vk_prewarm: earlier launches' programs and pipelines made at the start
+        bool            gpu_times = true;                 ///< [gx] vk_gpu_times: each pass timed on the GPU
     };
 
     class Front
@@ -143,6 +146,13 @@ namespace wxl::vk::gxfront
 
         void SimulateLoss();
         void Describe(char* out, uint32_t size) const;
+        /**
+         * @brief What the renderer did over the session (or, @p segment, since NewSegment): the
+         *        main thread's time in the engine's draws, the GPU's per pass, the memory the CPU
+         *        writes where the GPU reads. One line, for the session's frame lines.
+         */
+        void DescribeFrames(char* out, uint32_t size, bool segment) const;
+        void NewSegment();
 
         /// What the device holds of the process's memory and its GPU's, for the memory report.
         struct Memory
@@ -238,5 +248,13 @@ namespace wxl::vk::gxfront
         int ProgramOf(const ShaderRecord& record, bool vertex);
         draw::Texture* Record(void* tex);
         bool           missing_target_ = false; ///< the engine draws into a texture the device has not made
+        /// The main thread in the engine's draws, timed on one frame in eight: the session's and the segment's.
+        struct DrawTime
+        {
+            uint64_t ns = 0;
+            uint64_t draws = 0;
+            uint64_t frames = 0; ///< frames timed
+        };
+        DrawTime draw_time_, draw_segment_;
     };
 }

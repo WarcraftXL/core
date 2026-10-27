@@ -9,11 +9,12 @@
 
 namespace wxl::vk::resources
 {
-    bool Ring::Create(Allocator& allocator, VkBufferUsageFlags usage, VkDeviceSize chunk, uint32_t slots)
+    bool Ring::Create(Allocator& allocator, VkBufferUsageFlags usage, VkDeviceSize chunk, uint32_t slots, Access access)
     {
         Destroy();
         allocator_  = &allocator;
         usage_      = usage;
+        access_     = access;
         chunk_      = chunk;
         slot_count_ = std::clamp(slots, 1u, 3u);
         slot_       = 0;
@@ -79,7 +80,7 @@ namespace wxl::vk::resources
         }
         // A new chunk at the end of the slot's list: the usual size, or the request's when it is larger.
         Chunk fresh;
-        if (!allocator_->CreateBuffer(std::max(chunk_, size), usage_, Access::Upload, fresh.buffer) || !fresh.buffer.mapped)
+        if (!allocator_->CreateBuffer(std::max(chunk_, size), usage_, access_, fresh.buffer) || !fresh.buffer.mapped)
         {
             allocator_->Destroy(fresh.buffer);
             return false;

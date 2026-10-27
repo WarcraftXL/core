@@ -55,6 +55,7 @@ namespace
     wxl_handle                           g_next     = 16; ///< 1 and 2 name the scene's attachments
     bool                                 g_in_point = false;
     bool                                 g_point_zoned = false; ///< the point's own GPU zone is open
+    uint32_t                             g_point_pass  = ~0u;   ///< the point's pass timed on the GPU (Display::PassBegin)
     uint64_t                             g_point_serial = 0; ///< one per point raised: the scene's copies are made once in each
 
     /// The batches mods kept this frame: stable addresses until the frame ends.
@@ -716,6 +717,9 @@ namespace wxl::core::services
             static const char* const kNames[] = {"RenderPoint after_opaque_world", "RenderPoint after_liquids", "RenderPoint after_world",
                                                  "RenderPoint after_ui"};
             g_point_zoned = front && static_cast<uint32_t>(point) < 4 && front->Mods().ZoneBegin(kNames[point]);
+            // The point's GPU time for the session's last lines (wxl.render's zones go to a viewer only).
+            g_point_pass = front && static_cast<uint32_t>(point) < 4 ? front->Screen().PassBegin(kNames[point])
+                                                                     : wxl::vk::present::Display::kNoPass;
             g_in_point    = true;
             ++g_point_serial;
             return true;
@@ -731,6 +735,8 @@ namespace wxl::core::services
             front->Mods().CloseZones();
             if (g_point_zoned) front->Mods().ZoneEnd();
             g_point_zoned = false;
+            front->Screen().PassEnd(g_point_pass);
+            g_point_pass = wxl::vk::present::Display::kNoPass;
         }
 
         wxl_result GpuZoneBegin(std::string_view name)

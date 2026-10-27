@@ -20,6 +20,7 @@
 #include "gx/Memory.hpp"
 #include "gx/Select.hpp"
 #include "gx/vk/Log.hpp"
+#include "gx/vk/Stats.hpp"
 #include "gx/vk/gxfront/Front.hpp"
 #include "binding/Binding.hpp"
 #include "profile/Profile.hpp"
@@ -156,6 +157,9 @@ namespace
         options.filter     = settings.gx_nearest ? vk::present::Filter::Nearest : vk::present::Filter::Linear;
         options.cache_dir  = CacheDirectory();
         options.async_pipelines = settings.gx_async;
+        options.rebar           = settings.gx_rebar;
+        options.prewarm         = settings.gx_prewarm;
+        options.gpu_times       = settings.gx_gpu_times;
         return options;
     }
 
@@ -163,7 +167,7 @@ namespace
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
     /// Each frame as a GPU zone of a "Vulkan" context, from its first command to the end of the
     /// present pass, timed by the frame's own timestamps once it has completed (nothing waits).
-    class GpuZones final : public vk::present::TimestampSink, public vk::render::ZoneSink
+    class GpuZones final : public vk::present::TimestampSink, public vk::render::ZoneSink, public vk::present::PassSink
     {
     public:
         /// The context of the device of the front's generation, made once the profiler is up.
@@ -184,15 +188,16 @@ namespace
             static const char kName[] = "Vulkan";
             ___tracy_emit_gpu_context_name(___tracy_gpu_context_name_data{context_, kName, static_cast<uint16_t>(sizeof kName - 1)});
             std::memset(open_, 0, sizeof open_);
-            // The mods' zones (wxl.profile's gpu_zone_begin) on the same timeline.
+            // The mods' zones (wxl.profile's gpu_zone_begin) and the renderer's passes on the same timeline.
             front.Mods().SetZoneSink(this);
+            display.SetPassSink(this);
         }
 
-        /// A mod's zone, once its frame completed: begun, ended and timed at once.
+        /// A mod's zone or a pass of the renderer, once its frame completed: begun, ended and timed at once.
         void Zone(const char* name, int64_t begin, int64_t end) override
         {
             if (!___tracy_connected()) return;
-            static const char kSource[] = "wxl.render";
+            static const char kSource[] = "Vulkan";
             const size_t      length    = std::strlen(name);
             const uint64_t    location  = ___tracy_alloc_srcloc_name(0, kSource, sizeof kSource - 1, kSource, sizeof kSource - 1, name, length, 0x9B59B6);
             const uint16_t    first     = NextQuery();
@@ -241,6 +246,27 @@ namespace
     };
 
     GpuZones g_zones;
+
+    // --- The renderer's CPU zones in the profiler -----------------------------------------------------
+    uint64_t ZoneBegin(const vk::stats::Location* location)
+    {
+        const TracyCZoneCtx zone = ___tracy_emit_zone_begin(reinterpret_cast<const ___tracy_source_location_data*>(location), 1);
+        return static_cast<uint64_t>(zone.id) << 1 | (zone.active ? 1u : 0u);
+    }
+
+    void ZoneEnd(uint64_t packed)
+    {
+        TracyCZoneCtx zone{};
+        zone.id     = static_cast<uint32_t>(packed >> 1);
+        zone.active = static_cast<int>(packed & 1);
+        ___tracy_emit_zone_end(zone);
+    }
+
+    const vk::stats::ZoneHooks kZoneHooks{&ZoneBegin, &ZoneEnd};
+    static_assert(sizeof(vk::stats::Location) == sizeof(___tracy_source_location_data), "a zone's location is Tracy's");
+
+    /// The renderer's zones go to the profiler while a viewer is connected, and cost a load otherwise.
+    void UpdateZoneHooks() { vk::stats::SetZoneHooks(wxl::core::profile::Connected() ? &kZoneHooks : nullptr); }
 #endif
 
     void Stop(bool released_resources)
@@ -387,6 +413,7 @@ namespace
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
         // Between frames: where the zone's context is made (once per device), its clock sampled.
         g_zones.Attach(*g_front);
+        UpdateZoneHooks();
 #endif
         return WXL_GX_VK_FRAME_OK;
     }

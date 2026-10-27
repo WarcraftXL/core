@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "gx/vk/gxfront/Front.hpp"
+#include "gx/vk/Stats.hpp"
 
 #include "gx/vk/Log.hpp"
 #include "gx/vk/present/Present.hpp"
@@ -112,6 +113,7 @@ namespace wxl::vk::gxfront
         if (!context_.Create(options, why, why_size) || !allocator_.Create(context_, why, why_size) ||
             !timeline_.Create(context_, why, why_size))
             return false;
+        allocator_.SetBar(options_.rebar);
 
         present::Display::Options display;
         display.frames = options_.frames;
@@ -124,8 +126,13 @@ namespace wxl::vk::gxfront
             paths.pipeline_keys  = options_.cache_dir + "pipelines.keys";
         }
         paths.async_pipelines = options_.async_pipelines;
-        if (!display_.Create(context_, allocator_, timeline_, display, why, why_size) ||
-            !renderer_.Create(context_, allocator_, display_, paths, why, why_size))
+        paths.prewarm_known   = options_.prewarm;
+        paths.direct_pools    = options_.rebar;
+        if (!display_.Create(context_, allocator_, timeline_, display, why, why_size))
+            return false;
+        // The passes' GPU time from the first frame (a queue without timestamps times nothing).
+        if (options_.gpu_times) display_.SetPassTiming(true);
+        if (!renderer_.Create(context_, allocator_, display_, paths, why, why_size))
             return false;
         if (!render_.Create(context_, allocator_, timeline_, display_, renderer_))
         {
@@ -344,12 +351,18 @@ namespace wxl::vk::gxfront
 
     bool Front::BeginScene()
     {
+        WXL_VK_ZONE("Vulkan: frame begun");
         if (!context_.Ready()) return false;
         if (display_.InFrame()) return true;
         frame::Wait wait{};
         if (display_.BeginFrame(wait))
         {
             render_.FrameBegun();
+            if ((display_.FrameNumber() & 7) == 0)
+            {
+                ++draw_time_.frames;
+                ++draw_segment_.frames;
+            }
             return true;
         }
         if (!context_.Lost()) context_.MarkLost("a frame could not begin");
@@ -375,6 +388,26 @@ namespace wxl::vk::gxfront
     void Front::Draw(const wxl_gx_batch* batch, int32_t count, bool world)
     {
         ++stats_.draws;
+        // One frame in eight is timed: what a draw costs the main thread, at a cost too small to see.
+        const bool     timed = (display_.FrameNumber() & 7) == 0;
+        const uint64_t begin = timed ? stats::Now() : 0;
+        struct Timed
+        {
+            Front& front;
+            bool   on;
+            uint64_t begin;
+            ~Timed()
+            {
+                if (!on) return;
+                const uint64_t ns = stats::Now() - begin;
+                front.draw_time_.ns += ns;
+                ++front.draw_time_.draws;
+                front.draw_segment_.ns += ns;
+                ++front.draw_segment_.draws;
+                stats::DrawTimed(ns);
+            }
+        } timing{*this, timed, begin};
+        WXL_VK_ZONE("Vulkan: draw");
         // The batch a mod may draw again is this draw's, or none: never an earlier draw's, when
         // this one is left out.
         renderer_.ForgetLastBatch();
@@ -411,6 +444,7 @@ namespace wxl::vk::gxfront
 
     bool Front::Present()
     {
+        WXL_VK_ZONE("Vulkan: frame submitted and shown");
         if (!context_.Ready() || !display_.InFrame()) return !context_.Lost();
         UpdateSync();
         const present::FrameEnd end = display_.EndFrame();
@@ -796,9 +830,11 @@ namespace wxl::vk::gxfront
                       "Vulkan: %s, %llu frames (%llu shown, %llu dropped), %llu swapchain builds, %u sample(s) per pixel, %llu draws "
                       "(%llu drawn, %llu in the world's pass; left out: %llu untranslated programs, %llu into a depth texture alone, "
                       "%llu not ready, %llu while their pipeline compiled, %llu refused by the renderer), %llu pipelines (%s; %llu linked "
-                      "from parts in %.0f ms, %llu compiled on workers in %.0f ms with %llu parts, %llu of %llu drawn before prewarmed, "
+                      "from parts in %.0f ms, %llu compiled on workers in %.0f ms with %llu parts, %llu of the %llu earlier launches drew "
+                      "compiled ahead (%llu of their programs made from the shader pack in %.0f ms), "
                       "%llu linked ones replaced by their whole compile, %llu compiled on the main thread in %.0f ms and %llu parts in "
-                      "%.0f ms; %llu hitches of %.0f ms or more, the longest %.1f ms; %llu failed), %llu programs translated (%llu "
+                      "%.0f ms, %llu workers' compiles waited for in %.0f ms; %llu hitches of %.0f ms or more, the longest %.1f ms; %llu "
+                      "failed; the cache and keys saved %llu time(s) while running), %llu programs translated (%llu "
                       "refused; %llu translated in %.0f ms, %llu from the cache, %llu ahead), %llu target renderings, %llu copies, %llu "
                       "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures alive (%llu made, at most %llu at once), %llu draws with multisampling off in a "
                       "multisampled scene (%llu with their samples on the pixel's centre, %llu antialiased: no sample locations), "
@@ -811,11 +847,62 @@ namespace wxl::vk::gxfront
                       : renderer.PipelineCache().Async()   ? "compiled on workers, draws into the scene left out meanwhile"
                                                            : "compiled when first drawn",
                       n(p.linked), p.linked_ms, n(p.background), p.background_ms, n(p.parts_background), n(p.prewarmed),
-                      n(p.prewarm_known), n(p.optimized), n(p.compiled_main), p.compiled_main_ms, n(p.parts_main), p.parts_main_ms,
-                      n(p.hitches), pipelines::Pipelines::kHitchMs, p.longest_ms, n(p.failed), n(r.programs), n(r.programs_refused),
+                      n(p.prewarm_known), n(r.ahead), r.ahead_ms, n(p.optimized), n(p.compiled_main), p.compiled_main_ms, n(p.parts_main),
+                      p.parts_main_ms, n(p.waited), p.waited_ms, n(p.hitches), pipelines::Pipelines::kHitchMs, p.longest_ms, n(p.failed),
+                      n(p.saves), n(r.programs), n(r.programs_refused),
                       n(c.translated), c.milliseconds, n(c.from_disk), n(c.prewarmed), n(r.target_renderings), n(r.copies), n(s.resolves),
                       n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(r.textures_made), n(r.textures_peak), n(r.centred + r.antialiased), n(r.centred),
                       n(r.antialiased), n(stats_.losses),
                       context_.Lost() ? ", the device is lost" : "");
+    }
+
+    void Front::NewSegment()
+    {
+        draw_segment_ = DrawTime{};
+        display_.NewPassSegment();
+    }
+
+    void Front::DescribeFrames(char* out, uint32_t size, bool segment) const
+    {
+        if (!size) return;
+        out[0] = '\0';
+        if (!context_.Ready()) return;
+        size_t used = 0;
+        auto   add  = [&](const char* format, auto... args) {
+            if (used >= size) return;
+            const int wrote = std::snprintf(out + used, size - used, format, args...);
+            if (wrote > 0) used = std::min<size_t>(size - 1, used + static_cast<size_t>(wrote));
+        };
+        const DrawTime& d      = segment ? draw_segment_ : draw_time_;
+        const double    frames_timed = static_cast<double>(std::max<uint64_t>(d.frames, 1));
+        if (d.draws)
+            add("the main thread in the engine's draws %.2f us a draw (%.2f ms a frame of %.0f draws, timed on one frame in eight)",
+                static_cast<double>(d.ns) / 1e3 / static_cast<double>(d.draws), static_cast<double>(d.ns) / 1e6 / frames_timed,
+                static_cast<double>(d.draws) / frames_timed);
+        const std::vector<present::PassTime>& passes = segment ? display_.PassSegment() : display_.PassTimes();
+        const uint64_t frames = segment ? display_.PassSegmentFrames() : display_.PassFrames();
+        if (!passes.empty() && frames)
+        {
+            add("%sthe GPU per frame by pass (mean, p95, max ms, over %llu frames):", used ? "; " : "", static_cast<unsigned long long>(frames));
+            bool first = true;
+            for (const present::PassTime& t : passes)
+            {
+                // The mean over every frame: a pass a frame lacks counts as none.
+                add("%s %s %.2f, %.2f, %.2f", first ? "" : ",", t.name, t.per_frame.Total() / static_cast<double>(frames),
+                    t.per_frame.Percentile(0.95), t.per_frame.Max());
+                first = false;
+            }
+        }
+        else if (!display_.PassTiming())
+            add("%sthe GPU's pass times off ([gx] vk_gpu_times = 0, or the queue has no timestamps)", used ? "; " : "");
+        if (segment) return;
+        const resources::Bar& bar = allocator_.BarMemory();
+        const draw::Renderer::Stats& r = renderer_.Counters();
+        add("%smapped device memory (BAR): %s, %llu MiB heap%s; %llu MiB of rings and pools made there, %llu fell back; pools %.1f MiB "
+            "written in place, %.1f MiB through staging",
+            used ? "; " : "", bar.on ? "used" : (bar.heap ? "not used ([gx] vk_rebar = 0)" : "none on this device"),
+            static_cast<unsigned long long>(bar.heap >> 20), bar.large ? " (resizable BAR, or memory shared with the CPU)" : "",
+            static_cast<unsigned long long>(allocator_.BarBytes() >> 20), static_cast<unsigned long long>(allocator_.BarFallbacks()),
+            static_cast<double>(r.direct_bytes) / 1048576.0, static_cast<double>(r.staged_bytes) / 1048576.0);
     }
 }

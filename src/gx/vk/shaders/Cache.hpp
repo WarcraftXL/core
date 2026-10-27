@@ -73,6 +73,13 @@ namespace wxl::vk::shaders
         /// Records the worker translates into the pack ahead of their first Get.
         void Prewarm(std::vector<std::vector<uint8_t>> records);
 
+        /// The 64 bits a key is known by outside the cache (the renderer's program identities).
+        static uint64_t Fold(const CacheKey& key) { return key.low ^ (key.high * 0x9E3779B97F4A7C15ull); }
+        /// The keys of every translation the pack holds (refusals left out).
+        std::vector<CacheKey> Keys() const;
+        /// The translation of @p key, kept or read from the pack; null when the pack has none.
+        std::shared_ptr<const Translation> Find(const CacheKey& key);
+
         Stats Counters() const;
         /// Records queued for the worker.
         size_t Pending() const;

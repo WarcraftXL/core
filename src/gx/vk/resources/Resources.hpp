@@ -23,8 +23,21 @@ namespace wxl::vk::resources
     enum class Access
     {
         Device,   ///< device-local, not mapped
-        Upload,   ///< mapped, written by the CPU in order (staging, rings)
+        Upload,   ///< mapped, written by the CPU in order (staging, rings); where the allocator chooses
         Readback, ///< mapped and cached, read by the CPU after the GPU wrote it
+        /// Mapped and device-local (a BAR heap, all of it with resizable BAR): what the GPU reads
+        /// without a copy and the CPU writes in order. Upload when the device has no such memory,
+        /// when it is full, or when the allocator's ReBAR use is off.
+        DeviceUpload,
+    };
+
+    /// The device's memory the CPU can map and the GPU reads at its full speed.
+    struct Bar
+    {
+        uint64_t heap = 0;       ///< bytes of the largest heap with DEVICE_LOCAL | HOST_VISIBLE memory (0: none)
+        uint64_t device = 0;     ///< bytes of the largest DEVICE_LOCAL heap
+        bool     large = false;  ///< it is most of the device's memory: resizable BAR, or memory the CPU and GPU share
+        bool     on = false;     ///< DeviceUpload uses it ([gx] vk_rebar)
     };
 
     struct Buffer
@@ -85,7 +98,15 @@ namespace wxl::vk::resources
         void Destroy();
         bool Ready() const { return vma_ != nullptr; }
 
-        bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out);
+        /// Whether DeviceUpload uses the device's mapped device-local memory ([gx] vk_rebar).
+        void SetBar(bool on) { bar_.on = on && bar_.heap != 0; }
+        const Bar& BarMemory() const { return bar_; }
+        /// Bytes made in DeviceUpload memory that went to the BAR heap, and those that fell back.
+        uint64_t BarBytes() const { return bar_bytes_; }
+        uint64_t BarFallbacks() const { return bar_fallbacks_; }
+
+        /// A buffer of @p access; with @p bar_only, DeviceUpload is the BAR heap or nothing (false).
+        bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out, bool bar_only = false);
         void Destroy(Buffer& buffer);
 
         /// A 2D image with one mip and one layer, and its view of @p aspect (colour unless said),
@@ -116,6 +137,9 @@ namespace wxl::vk::resources
     private:
         VkDevice        device_ = VK_NULL_HANDLE;
         VmaAllocator_T* vma_ = nullptr;
+        Bar             bar_;
+        uint64_t        bar_bytes_ = 0;
+        uint64_t        bar_fallbacks_ = 0;
     };
 
     /**

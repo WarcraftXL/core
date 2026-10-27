@@ -282,6 +282,10 @@ namespace wxl::vk::draw
             uint64_t skipped = 0;      ///< draws left out while their pipeline compiled on a worker
             uint64_t centred = 0;      ///< draws with multisampling off, their samples on the pixel's centre
             uint64_t antialiased = 0;  ///< draws with multisampling off drawn multisampled (the device has no sample locations)
+            uint64_t direct_bytes = 0; ///< pool bytes written straight into mapped device memory (no staging, no copy)
+            uint64_t staged_bytes = 0; ///< pool bytes copied through the staging ring
+            uint64_t ahead = 0;        ///< programs of earlier launches made from the shader pack before the engine asked
+            double   ahead_ms = 0.0;
         };
 
         /// Where the renderer keeps what outlives a launch (empty: nothing is kept), and how it makes
@@ -293,6 +297,13 @@ namespace wxl::vk::draw
             std::string pipeline_keys;   ///< the pipelines drawn, compiled ahead at the next launch
             bool        async_pipelines = false; ///< a missing pipeline is compiled on a worker, its draws into the scene left out meanwhile
             bool        pipeline_libraries = true; ///< linked from parts where the device has them
+            /// The programs and pipelines the earlier launches drew (the keys file, the shader pack)
+            /// made at the renderer's start, before the engine binds them ([gx] vk_prewarm).
+            bool        prewarm_known = true;
+            /// The static and dynamic pools in mapped device memory where the device has a large
+            /// BAR heap ([gx] vk_rebar, 64-bit only: a mapped pool costs address space), written in
+            /// place when no frame in flight reads them.
+            bool        direct_pools = false;
         };
 
         Renderer() = default;
@@ -475,6 +486,8 @@ namespace wxl::vk::draw
         };
 
         bool EnsureDevice(Pool* pool);
+        /// The programs and pipelines of earlier launches made now (Paths::prewarm_known).
+        void PrepareKnown();
         bool FlushPool(Pool* pool);
         void OpenInUpload(Texture* texture);
         void CopyIntoImage(Texture* texture, VkCommandBuffer cmd, const resources::Ring::Span& span, uint32_t pitch);
@@ -521,6 +534,8 @@ namespace wxl::vk::draw
         resources::Buffer     zeros_;   ///< what a vertex input the vertex lacks reads
         bool                  black_ready_ = false;
         bool                  color_rgba_ = false; ///< no B8G8R8A8 vertex input: colours read in RGBA order
+        bool                  direct_pools_ = false; ///< Paths::direct_pools, and the device has the memory
+        bool                  queries_pending_ = false; ///< a query begun by the engine waits for a draw
         std::vector<Texture*> opened_;  ///< open in the frame's upload pass
 
         RegisterFile          vertex_regs_;

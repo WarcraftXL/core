@@ -46,8 +46,9 @@ namespace wxl::vk::resources
         Ring& operator=(const Ring&) = delete;
         ~Ring() { Destroy(); }
 
-        /// @p slots frames in flight, chunks of @p chunk bytes of @p usage (with addresses when it says so).
-        bool Create(Allocator& allocator, VkBufferUsageFlags usage, VkDeviceSize chunk, uint32_t slots);
+        /// @p slots frames in flight, chunks of @p chunk bytes of @p usage (with addresses when it says
+        /// so), in memory of @p access (Upload, or DeviceUpload for what the GPU reads in place).
+        bool Create(Allocator& allocator, VkBufferUsageFlags usage, VkDeviceSize chunk, uint32_t slots, Access access = Access::Upload);
         /// The GPU must be done with every chunk (or the device lost).
         void Destroy();
         bool Ready() const { return allocator_ != nullptr; }
@@ -73,6 +74,7 @@ namespace wxl::vk::resources
 
         Allocator*         allocator_ = nullptr;
         VkBufferUsageFlags usage_ = 0;
+        Access             access_ = Access::Upload;
         VkDeviceSize       chunk_ = 0;
         std::vector<Chunk> slots_[3];
         uint32_t           slot_ = 0;

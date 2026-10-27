@@ -6,6 +6,7 @@
 #include "gx/vk/pipelines/Pipelines.hpp"
 
 #include "gx/vk/Log.hpp"
+#include "gx/vk/Stats.hpp"
 #include "gx/vk/shaders/Interface.hpp"
 
 #include <algorithm>
@@ -229,6 +230,8 @@ namespace wxl::vk::pipelines
         stop_ = false;
         for (uint32_t i = 0; i < workers; ++i) workers_.emplace_back([this] { Work(); });
 
+        saved_at_   = stats::Now();
+        saved_made_ = 0;
         // What the earlier launches drew with the own programs alone (the interface) starts now.
         for (int i = 0; i < static_cast<int>(VertexProgram::Count); ++i) Prewarm(OwnIdentity(false, i));
         return true;
@@ -374,7 +377,11 @@ namespace wxl::vk::pipelines
         for (size_t i = 0; i < targets_.size(); ++i)
             if (targets_[i].color == color && targets_[i].depth == depth && targets_[i].samples == samples) return static_cast<uint8_t>(i);
         targets_.push_back(Target{color, depth, samples});
-        return static_cast<uint8_t>(targets_.size() - 1);
+        const uint8_t id = static_cast<uint8_t>(targets_.size() - 1);
+        // The programs added before it get their part for it in the background: a draw that may
+        // not be left out (into a texture) finds it made.
+        QueueFragments(id);
+        return id;
     }
 
     bool Pipelines::CentreSamples(uint8_t target) const
@@ -586,6 +593,7 @@ namespace wxl::vk::pipelines
             info.pMultisampleState   = &multisample;
             info.pColorBlendState    = &colorBlend;
             break;
+        case Part::Save: return VK_NULL_HANDLE;
         }
         VkPipeline     made   = VK_NULL_HANDLE;
         const VkResult result = vkCreateGraphicsPipelines(context_->Device(), cache_, 1, &info, nullptr, &made);
@@ -603,8 +611,18 @@ namespace wxl::vk::pipelines
 
     // --- Getting a pipeline at a draw --------------------------------------------------------------------
 
-    void Pipelines::Stall(double ms, bool part)
+    void Pipelines::Stall(double ms, bool part, const Key& key)
     {
+        stats::Charge(stats::Cause::Pipelines, static_cast<uint64_t>(ms * 1e6));
+        if (ms >= kHitchMs)
+        {
+            const Target& t = key.target < targets_.size() ? targets_[key.target] : Target{};
+            Log(LogLevel::Info, "pipelines: the main thread stalled %.1f ms compiling %s (programs %u/%u, layout %u, blend %u, target %u: "
+                                "format %d, depth %d, %u sample(s)): a draw that may not be left out (into a texture) or pipelines "
+                                "compiled when first drawn",
+                ms, part ? "a part" : "a whole pipeline", key.vertex, key.pixel, key.layout, key.blend, key.target, static_cast<int>(t.color),
+                static_cast<int>(t.depth), t.samples);
+        }
         if (part)
         {
             ++stats_.parts_main;
@@ -640,6 +658,7 @@ namespace wxl::vk::pipelines
             if (got) *got = Got::Failed;
             return VK_NULL_HANDLE;
         }
+        WXL_VK_ZONE("Vulkan: pipeline missing");
 
         const Recipe recipe = RecipeOf(key);
         const bool   now    = wait || !settings_.async;
@@ -664,9 +683,19 @@ namespace wxl::vk::pipelines
             if (got) *got = Got::Pending;
             return VK_NULL_HANDLE;
         }
+        if (queued_.count(packed) && !TakeOrWait(Part::Whole, packed))
+        {
+            // A worker's compile was under way and is in now.
+            const auto in = pipelines_.find(packed);
+            if (in != pipelines_.end())
+            {
+                if (got) *got = in->second.pipeline ? Got::Ready : Got::Failed;
+                return in->second.pipeline;
+            }
+        }
         const Clock::time_point begin = Clock::now();
         made                          = Make(Part::Whole, recipe);
-        Stall(Since(begin), false);
+        Stall(Since(begin), false, key);
         pipelines_[packed] = Entry{made, false};
         if (made)
         {
@@ -703,9 +732,18 @@ namespace wxl::vk::pipelines
             got = Got::Pending;
             return VK_NULL_HANDLE;
         }
+        if (!cheap && queued_parts_.count(pk) && !TakeOrWait(part, pk))
+        {
+            const auto in = parts_.find(pk);
+            if (in != parts_.end())
+            {
+                if (!in->second) got = Got::Failed;
+                return in->second;
+            }
+        }
         const Clock::time_point begin = Clock::now();
         const VkPipeline        made  = Make(part, recipe);
-        if (!cheap) Stall(Since(begin), true);
+        if (!cheap) Stall(Since(begin), true, key);
         parts_[pk] = made;
         if (!made) got = Got::Failed;
         return made;
@@ -746,6 +784,7 @@ namespace wxl::vk::pipelines
         ++stats_.linked;
         ++stats_.made;
         stats_.linked_ms += ms;
+        stats::Charge(stats::Cause::Pipelines, static_cast<uint64_t>(ms * 1e6));
         if (ms >= kHitchMs) ++stats_.hitches;
         stats_.longest_ms = std::max(stats_.longest_ms, ms);
         const uint64_t packed = key.Packed();
@@ -757,12 +796,64 @@ namespace wxl::vk::pipelines
         return made;
     }
 
+    bool Pipelines::TakeOrWait(Part part, uint64_t key)
+    {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            const auto queued = std::find_if(jobs_.begin(), jobs_.end(), [&](const Job& j) { return j.part == part && j.key == key; });
+            if (queued != jobs_.end())
+            {
+                // Not begun: compiled here instead, once.
+                jobs_.erase(queued);
+                (part == Part::Whole ? queued_ : queued_parts_).erase(key);
+                return true;
+            }
+            // Under way on a worker (or done and not taken in yet): waited for, within the bound.
+            const Clock::time_point begin = Clock::now();
+            const bool in = idle_.wait_for(lock, std::chrono::seconds(2), [&] {
+                return stop_ || std::any_of(done_.begin(), done_.end(), [&](const Done& d) { return d.part == part && d.key == key; });
+            });
+            const double ms = Since(begin);
+            ++stats_.waited;
+            stats_.waited_ms += ms;
+            stats::Charge(stats::Cause::Pipelines, static_cast<uint64_t>(ms * 1e6));
+            if (ms >= kHitchMs) ++stats_.hitches;
+            stats_.longest_ms = std::max(stats_.longest_ms, ms);
+            if (!in) return true;
+        }
+        Collect();
+        return false;
+    }
+
+    void Pipelines::QueueFragments(uint8_t target)
+    {
+        if (!libraries_ || target >= targets_.size() || targets_[target].color != VK_FORMAT_B8G8R8A8_UNORM) return;
+        Key key;
+        key.target = target;
+        for (size_t p = 0; p < pixel_.size(); ++p)
+        {
+            key.pixel           = static_cast<uint16_t>(p);
+            const uint64_t part = PartKey(Part::Fragment, key);
+            if (!parts_.count(part) && !queued_parts_.count(part)) Queue(Part::Fragment, part, RecipeOf(key), true);
+        }
+    }
+
+    std::vector<uint64_t> Pipelines::KnownPrograms() const
+    {
+        std::unordered_set<uint64_t> seen;
+        std::vector<uint64_t>        out;
+        for (const Description& d : known_)
+            for (const uint64_t identity : {d.vertex, d.pixel})
+                if (!program_ids_[0].count(identity) && !program_ids_[1].count(identity) && seen.insert(identity).second) out.push_back(identity);
+        return out;
+    }
+
     // --- The workers ---------------------------------------------------------------------------------------
 
     void Pipelines::Queue(Part part, uint64_t key, const Recipe& recipe, bool prewarm)
     {
         if (workers_.empty()) return;
-        (part == Part::Whole ? queued_ : queued_parts_).insert(key);
+        if (part != Part::Save) (part == Part::Whole ? queued_ : queued_parts_).insert(key);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             Job job;
@@ -790,6 +881,15 @@ namespace wxl::vk::pipelines
                 jobs_.pop_front();
                 ++working_;
             }
+            if (job.part == Part::Save)
+            {
+                Save();
+                std::lock_guard<std::mutex> lock(mutex_);
+                --working_;
+                idle_.notify_all();
+                continue;
+            }
+            WXL_VK_ZONE("Vulkan: pipeline compiled on a worker");
             const Clock::time_point begin = Clock::now();
             const VkPipeline        made  = Make(job.part, job.recipe);
             const double            ms    = Since(begin);
@@ -867,6 +967,25 @@ namespace wxl::vk::pipelines
         frame_ = frame;
         if (!context_) return;
         Collect();
+        constexpr uint64_t kSaveEveryNs = 120'000'000'000ull;
+        if (stats_.made != saved_made_ && !workers_.empty() && stats::Now() - saved_at_ >= kSaveEveryNs)
+        {
+            // The keys here (a few bytes appended), the cache's megabytes on a worker.
+            SaveKeys();
+            if (!cache_file_.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    Job job;
+                    job.part = Part::Save;
+                    jobs_.push_back(job);
+                }
+                wake_.notify_one();
+            }
+            saved_at_   = stats::Now();
+            saved_made_ = stats_.made;
+            ++stats_.saves;
+        }
         size_t kept = 0;
         for (const Retired& r : retired_)
         {

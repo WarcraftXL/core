@@ -233,6 +233,30 @@ namespace wxl::vk::shaders
         return made;
     }
 
+    std::vector<CacheKey> Cache::Keys() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<CacheKey>       keys;
+        keys.reserve(index_.size());
+        for (const auto& entry : index_) keys.push_back(entry.first);
+        return keys;
+    }
+
+    std::shared_ptr<const Translation> Cache::Find(const CacheKey& key)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  kept = memory_.find(key);
+        if (kept != memory_.end()) return kept->second;
+        if (refusals_.count(key)) return nullptr;
+        auto        made    = std::make_shared<Translation>();
+        bool        refused = false;
+        std::string why;
+        if (!ReadPack(key, *made, why, refused) || refused) return nullptr;
+        ++stats_.from_disk;
+        memory_[key] = made;
+        return made;
+    }
+
     void Cache::Prewarm(std::vector<std::vector<uint8_t>> records)
     {
         {

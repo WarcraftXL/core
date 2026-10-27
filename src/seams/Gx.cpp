@@ -10,6 +10,7 @@
 #include "binding/Binding.hpp"
 #include "gx/Events.hpp"
 #include "gx/Memory.hpp"
+#include "gx/Pacing.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
@@ -75,7 +76,10 @@ namespace wxl::seam::Gx::ScenePresent
         }
 
         wxl_frame_args args{};
-        if (!wxl::core::frame::End(args)) return;
+        const bool     painted = wxl::core::frame::End(args);
+        // The frame's time, on every device: a loading screen's present is no frame of the game.
+        wxl::core::gx::pacing::Present(painted);
+        if (!painted) return;
         if (!host) return;
         // The mods' Dear ImGui windows, over the game's interface, while the device is in its scene.
         if (wxl::core::services::imgui::BeginFrame())

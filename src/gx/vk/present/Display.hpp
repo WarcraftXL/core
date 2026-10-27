@@ -24,6 +24,7 @@
 #include "gx/vk/present/Pass.hpp"
 #include "gx/vk/present/Swapchain.hpp"
 #include "gx/vk/resources/Resources.hpp"
+#include "gx/vk/Stats.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -45,6 +46,24 @@ namespace wxl::vk::present
 
     protected:
         ~TimestampSink() = default;
+    };
+
+    /// Receives each timed pass of a frame once the frame has completed: its name and its first
+    /// and last GPU timestamps (device ticks).
+    class PassSink
+    {
+    public:
+        virtual void Zone(const char* name, int64_t begin, int64_t end) = 0;
+
+    protected:
+        ~PassSink() = default;
+    };
+
+    /// The GPU time of one kind of pass, summed over each frame (milliseconds per frame).
+    struct PassTime
+    {
+        const char*         name = nullptr;
+        stats::Distribution per_frame;
     };
 
     /// What records into a frame besides the display: told when a frame's command buffers begin and
@@ -154,6 +173,35 @@ namespace wxl::vk::present
         bool SampleGpuTime(int64_t& ticks);
         /// Nanoseconds per GPU tick.
         float TimestampPeriod() const { return context_ ? context_->Properties().limits.timestampPeriod : 1.0f; }
+
+        // --- The GPU time of each pass ------------------------------------------------------------
+        /**
+         * @brief Times the frame's passes on the GPU from the next frame: its upload pass, each
+         *        rendering (the scene, a texture target, a pass of the caller's own), the resolve,
+         *        the present pass, and what the caller names with PassBegin. A handful of
+         *        timestamps a frame, read once the frame has completed (nothing waits).
+         * @return false when the queue has no timestamps (nothing is timed then).
+         */
+        bool SetPassTiming(bool on);
+        bool PassTiming() const { return pass_on_; }
+        /// A pass of the caller's named @p name (a string that lives as long as the process) begins
+        /// in the frame's command buffer; its handle, or kNoPass when nothing is timed.
+        uint32_t PassBegin(const char* name);
+        void     PassEnd(uint32_t pass);
+        static constexpr uint32_t kNoPass = ~0u;
+        /// Each pass's milliseconds per frame, over the frames timed so far, and since the segment began.
+        const std::vector<PassTime>& PassTimes() const { return pass_times_; }
+        const std::vector<PassTime>& PassSegment() const { return pass_segment_; }
+        void                         NewPassSegment()
+        {
+            pass_segment_.clear();
+            pass_segment_frames_ = 0;
+        }
+        /// The frames whose passes were read back (the session's, the segment's).
+        uint64_t PassFrames() const { return pass_frames_; }
+        uint64_t PassSegmentFrames() const { return pass_segment_frames_; }
+        /// Each pass to @p sink as well, once its frame has completed (null stops it).
+        void SetPassSink(PassSink* sink) { pass_sink_ = sink; }
 
         // --- A frame ------------------------------------------------------------------------------
         /// Opens a frame: waits (bounded) for its slot, frees what completed. False with @p wait
@@ -284,6 +332,10 @@ namespace wxl::vk::present
         uint64_t Submit(const frame::Timeline::WaitOn* waits, uint32_t wait_count, const VkSemaphore* signals, uint32_t signal_count);
         void EndTimestamp();
         void Sleep(uint64_t ns);
+        uint32_t PassBeginIn(const char* name, VkCommandBuffer cmd);
+        void     PassEndIn(uint32_t pass, VkCommandBuffer cmd);
+        /// The slot's passes of its previous frame read back; its queries reset in @p upload.
+        void     PassFrameBegun(uint32_t slot, VkCommandBuffer upload);
 
         device::Context*      context_ = nullptr;
         resources::Allocator* allocator_ = nullptr;
@@ -337,5 +389,25 @@ namespace wxl::vk::present
         TimestampSink* sink_ = nullptr;
         VkQueryPool    queries_ = VK_NULL_HANDLE;
         bool           written_[frame::Frames::kMax] = {};
+
+        // The passes timed: per slot, the passes recorded in its frame (two queries each).
+        static constexpr uint32_t kPassQueries = 128;
+        struct PassRecord
+        {
+            const char* name;
+            uint32_t    query; ///< its first; the second follows
+            bool        ended;
+        };
+        VkQueryPool             pass_pool_ = VK_NULL_HANDLE;
+        uint64_t                pass_mask_ = ~0ull; ///< timestampValidBits
+        bool                    pass_on_ = false;
+        std::vector<PassRecord> pass_records_[frame::Frames::kMax];
+        std::vector<PassTime>   pass_times_;
+        std::vector<PassTime>   pass_segment_;
+        uint64_t                pass_frames_ = 0;
+        uint64_t                pass_segment_frames_ = 0;
+        PassSink*               pass_sink_ = nullptr;
+        uint32_t                upload_pass_ = kNoPass;
+        uint32_t                rendering_pass_ = kNoPass;
     };
 }

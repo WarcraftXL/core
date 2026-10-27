@@ -165,6 +165,9 @@ namespace wxl::vk::pipelines
             uint64_t prewarm_known = 0;    ///< pipelines the earlier launches drew (the keys file)
             uint64_t prewarmed = 0;        ///< of those, compiled ahead in this launch
             uint64_t failed = 0;
+            uint64_t waited = 0;           ///< draws that could not wait which took a worker's compile under way
+            double   waited_ms = 0.0;
+            uint64_t saves = 0;            ///< the pipeline cache and the keys written while the client ran
         };
 
         Pipelines() = default;
@@ -210,8 +213,16 @@ namespace wxl::vk::pipelines
         VkPipeline Get(const Key& key, bool wait, Got* got = nullptr);
 
         /// A frame begins: what the workers finished is taken in (whole pipelines in place of the
-        /// linked ones), and what was replaced in frames up to @p completed is released.
+        /// linked ones), and what was replaced in frames up to @p completed is released. Every
+        /// two minutes with new pipelines, the cache and the keys are written (the cache by a
+        /// worker), so a launch that ends badly keeps what it compiled.
         void BeginFrame(uint64_t frame, uint64_t completed);
+
+        /// The identities of the programs the earlier launches drew with (the keys file), the
+        /// renderer's own left out: what may be made ahead of the engine's first bind.
+        std::vector<uint64_t> KnownPrograms() const;
+        /// Whether a program of @p identity is in the table.
+        bool HasProgram(bool pixel, uint64_t identity) const { return program_ids_[pixel ? 1 : 0].count(identity) != 0; }
 
         /// A program's module (null for an id the table lacks), for pipelines made beside these
         /// (wxl.render's batch programs behind an engine vertex program).
@@ -264,6 +275,7 @@ namespace wxl::vk::pipelines
             PreRaster,
             Fragment,
             Output,
+            Save, ///< the pipeline cache written to its file
         };
         struct Job
         {
@@ -306,7 +318,12 @@ namespace wxl::vk::pipelines
         void       Collect();
         void       Install(const Done& done);
         void       Work();
-        void       Stall(double ms, bool part);
+        void       Stall(double ms, bool part, const Key& key);
+        /// A job of @p key a draw that cannot wait needs: taken off the queue (true: compile it
+        /// now) or, under way on a worker, waited for and taken in (false).
+        bool       TakeOrWait(Part part, uint64_t key);
+        /// Fragment parts of every pixel program for a target first seen.
+        void       QueueFragments(uint8_t target);
         void       Retire(VkPipeline pipeline);
         void       Remember(const Key& key);
         void       Prewarm(uint64_t identity);
@@ -338,6 +355,8 @@ namespace wxl::vk::pipelines
         std::vector<Retired>                       retired_;
         uint64_t                                   frame_ = 0;
         Stats                                      stats_;
+        uint64_t                                   saved_at_ = 0;   ///< stats::Now() of the last save (or the start)
+        uint64_t                                   saved_made_ = 0; ///< stats_.made then
 
         // The keys file: what earlier launches drew, and what this one drew first.
         std::vector<Description>                   known_;

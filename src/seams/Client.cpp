@@ -6,6 +6,7 @@
 #include "wxl/seams/seams.h"
 
 #include "gx/Memory.hpp"
+#include "gx/Pacing.hpp"
 
 #include "common/Log.hpp"
 #include "objects/Objects.hpp"
@@ -41,7 +42,8 @@ namespace wxl::seam::Client::Destroy
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;
 
-        // The graphics memory as the session leaves it, the device still up.
+        // How the session's frames came, and the graphics memory as it leaves it, the device still up.
+        wxl::core::gx::pacing::Report("of the session");
         wxl::core::gx::memory::Report("at exit");
 
         // The last thing a mod is told, and the only chance it has to put something away. It

@@ -6,6 +6,7 @@
 #include "gx/vk/draw/Draw.hpp"
 
 #include "gx/vk/Log.hpp"
+#include "gx/vk/Stats.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -123,7 +124,7 @@ namespace wxl::vk::draw
             return bits;
         }
 
-        uint64_t KeyBits(const shaders::CacheKey& key) { return key.low ^ (key.high * 0x9E3779B97F4A7C15ull); }
+        uint64_t KeyBits(const shaders::CacheKey& key) { return shaders::Cache::Fold(key); }
     }
 
     bool ProgramByName(bool vertex, const char* name, uint16_t& program)
@@ -190,7 +191,8 @@ namespace wxl::vk::draw
         const uint32_t slots = display.FrameCount();
         if (!bindless_.Create(context, 1u << 16, black_.view, why, why_size) ||
             !staging_.Create(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, kStagingChunk, slots) ||
-            !data_.Create(allocator, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kDataChunk, slots) ||
+            !data_.Create(allocator, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, kDataChunk, slots,
+                          resources::Access::DeviceUpload) ||
             !pipelines_.Create(context, bindless_.Layout(), paths.pipeline_cache,
                                pipelines::Settings{paths.async_pipelines, paths.pipeline_libraries, 0, paths.pipeline_keys}, why, why_size))
         {
@@ -217,6 +219,12 @@ namespace wxl::vk::draw
 
         display.SetFrameHook(this);
         stats_ = Stats{};
+        direct_pools_ = paths.direct_pools && sizeof(void*) == 8 && allocator.BarMemory().on && allocator.BarMemory().large;
+        // A texture target's colour and depth, known before any is drawn into: each pixel program's
+        // part for it compiles in the background, so a draw into a texture (which may not be left
+        // out) seldom compiles one on the spot.
+        pipelines_.TargetId(present::Display::kSceneFormat, display.DepthFormat(), 1);
+        if (paths.prewarm_known) PrepareKnown();
         vertex_regs_ = RegisterFile{};
         pixel_regs_  = RegisterFile{};
         // The palette the engine set last stays (it sets one only when its bones change), copied
@@ -302,6 +310,35 @@ namespace wxl::vk::draw
 
     // --- Programs --------------------------------------------------------------------------------------
 
+    void Renderer::PrepareKnown()
+    {
+        const std::vector<uint64_t> known = pipelines_.KnownPrograms();
+        if (known.empty()) return;
+        WXL_VK_ZONE("Vulkan: programs of earlier launches");
+        const uint64_t begin = stats::Now();
+        // A program's identity is its record's key folded, its stage in the top bit: the pack's
+        // keys are folded once to find them.
+        std::unordered_map<uint64_t, shaders::CacheKey> by_fold;
+        for (const shaders::CacheKey& key : cache_.Keys()) by_fold.emplace(KeyBits(key), key);
+        constexpr uint64_t kPixelBit = 0x8000000000000000ull;
+        for (const uint64_t identity : known)
+        {
+            const bool pixel = (identity & kPixelBit) != 0;
+            const auto found = by_fold.find(identity ^ (pixel ? kPixelBit : 0));
+            if (found == by_fold.end() || programs_.count(identity)) continue;
+            const auto translation = cache_.Find(found->second);
+            if (!translation || translation->info.pixel != pixel) continue;
+            const int id = pipelines_.AddProgram(translation->words, translation->info, identity);
+            if (id < 0) continue;
+            programs_.emplace(identity, id);
+            ++stats_.programs;
+            ++stats_.ahead;
+        }
+        stats_.ahead_ms = static_cast<double>(stats::Now() - begin) / 1e6;
+        Log(LogLevel::Debug, "pipelines: %llu programs of earlier launches made from the shader pack in %.1f ms, their pipelines compiling on workers",
+            static_cast<unsigned long long>(stats_.ahead), stats_.ahead_ms);
+    }
+
     int Renderer::Program(bool pixel, const char* name, const void* code, size_t size, std::string* why)
     {
         uint16_t own = 0;
@@ -321,9 +358,11 @@ namespace wxl::vk::draw
             if (found->second < 0 && why) *why = "refused before";
             return found->second;
         }
-        std::string reason;
-        const auto  translation = cache_.Get(code, size, reason);
-        int         id          = -1;
+        WXL_VK_ZONE("Vulkan: program");
+        stats::Scope translating(stats::Cause::Shaders);
+        std::string  reason;
+        const auto   translation = cache_.Get(code, size, reason);
+        int          id          = -1;
         if (!translation) {}
         else if (translation->info.pixel != pixel)
             reason = pixel ? "a vertex program where a pixel one is wanted" : "a pixel program where a vertex one is wanted";
@@ -531,6 +570,7 @@ namespace wxl::vk::draw
 
     Texture* Renderer::CreateTexture(const TextureDesc& desc)
     {
+        WXL_VK_ZONE("Vulkan: texture made");
         if (!Ready() || !desc.width || !desc.height) return nullptr;
         const FormatInfo& info = formats_.Of(desc.format);
         if (info.format == VK_FORMAT_UNDEFINED) return nullptr;
@@ -653,11 +693,14 @@ namespace wxl::vk::draw
         region.imageOffset       = {t->lock_at.x, t->lock_at.y, 0};
         region.imageExtent       = {t->lock_size.width, t->lock_size.height, 1};
         vkCmdCopyBufferToImage(cmd, span.buffer, t->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        stats_.upload_bytes += static_cast<uint64_t>(pitch) * Formats::Rows(t->info, t->lock_size.height);
+        const uint64_t bytes = static_cast<uint64_t>(pitch) * Formats::Rows(t->info, t->lock_size.height);
+        stats_.upload_bytes += bytes;
+        stats::Uploaded(bytes);
     }
 
     void Renderer::UnlockTexture(Texture* t)
     {
+        WXL_VK_ZONE("Vulkan: texture written");
         if (!t || !t->locked) return;
         t->locked = false;
         if (!display_->InFrame()) return;
@@ -762,7 +805,7 @@ namespace wxl::vk::draw
                 return static_cast<uint8_t*>(pool->current.mapped);
             }
         const VkBufferUsageFlags usage = pool->target != kVertexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        if (!allocator_->CreateBuffer(pool->size, usage, resources::Access::Upload, pool->current) || !pool->current.mapped)
+        if (!allocator_->CreateBuffer(pool->size, usage, resources::Access::DeviceUpload, pool->current) || !pool->current.mapped)
         {
             allocator_->Destroy(pool->current);
             return nullptr;
@@ -816,7 +859,10 @@ namespace wxl::vk::draw
         if (pool->device.buffer) return true;
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                          (pool->target != kVertexPool ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        if (!allocator_->CreateBuffer(std::max(pool->size, 4u), usage, resources::Access::Device, pool->device)) return false;
+        // With a large BAR heap (64-bit), mapped: written in place when no frame reads it.
+        if (!(direct_pools_ && allocator_->CreateBuffer(std::max(pool->size, 4u), usage, resources::Access::DeviceUpload, pool->device, true)) &&
+            !allocator_->CreateBuffer(std::max(pool->size, 4u), usage, resources::Access::Device, pool->device))
+            return false;
         pool->dirty_from = 0;
         pool->dirty_to   = pool->size;
         return true;
@@ -827,9 +873,24 @@ namespace wxl::vk::draw
         if (pool->usage == kStream) return pool->current.buffer != VK_NULL_HANDLE;
         if (!EnsureDevice(pool)) return false;
         if (pool->dirty_to <= pool->dirty_from) return true;
+        WXL_VK_ZONE("Vulkan: pool written");
+        stats::Scope uploading(stats::Cause::Uploads);
         // Copies of a multiple of 4 bytes at a multiple of 4.
         const uint32_t from = pool->dirty_from & ~3u;
         const uint32_t to   = std::min((pool->dirty_to + 3u) & ~3u, static_cast<uint32_t>(pool->device.size));
+        stats::Uploaded(to - from);
+        if (pool->device.mapped && pool->used != display_->FrameNumber() && pool->used <= display_->FramesCompleted())
+        {
+            // No frame in flight reads it, nor a draw of this one: written where the GPU reads it,
+            // no staging, no copy.
+            std::memcpy(static_cast<uint8_t*>(pool->device.mapped) + from, pool->shadow.data() + from,
+                        std::min<size_t>(to - from, pool->shadow.size() - from));
+            allocator_->Flush(pool->device, from, to - from);
+            stats_.direct_bytes += to - from;
+            pool->dirty_from = pool->dirty_to = 0;
+            return true;
+        }
+        stats_.staged_bytes += to - from;
         resources::Ring::Span span;
         if (to <= from || !staging_.Allocate(to - from, 16, span)) return false;
         std::memcpy(span.data, pool->shadow.data() + from, std::min<size_t>(to - from, pool->shadow.size() - from));
@@ -1070,7 +1131,8 @@ namespace wxl::vk::draw
         if (!queries_supported_ || !query || query > queries_.size() || !display_->InFrame()) return false;
         Query& q = queries_[query - 1];
         if (q.state == Query::Running || q.state == Query::Pending) return false;
-        q.state = Query::Pending;
+        q.state          = Query::Pending;
+        queries_pending_ = true;
         return true;
     }
 
@@ -1403,6 +1465,7 @@ namespace wxl::vk::draw
             vkCmdBindVertexBuffers(cmd, kZeroBinding, 1, &zero, &origin);
         }
         // Occlusion queries the engine began: counted from this draw, inside this rendering.
+        if (queries_pending_)
         for (Query& q : queries_)
         {
             if (!q.alive || q.state != Query::Pending) continue;
@@ -1419,6 +1482,7 @@ namespace wxl::vk::draw
             q.state = Query::Running;
             ++stats_.queries;
         }
+        queries_pending_ = false;
         if (pipeline != pipeline_)
         {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

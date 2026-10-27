@@ -6,9 +6,11 @@
 #include "gx/vk/resources/Resources.hpp"
 
 #include "gx/vk/Log.hpp"
+#include "gx/vk/Stats.hpp"
 
 #include <vk_mem_alloc.h>
 
+#include <algorithm>
 #include <cstdio>
 
 namespace wxl::vk::resources
@@ -41,6 +43,21 @@ namespace wxl::vk::resources
             return false;
         }
         device_ = context.Device();
+
+        // The heap the CPU maps and the GPU reads at its speed: 256 MiB on a discrete card without
+        // resizable BAR, most of its memory with it, all of it where both share memory.
+        bar_ = Bar{};
+        const VkPhysicalDeviceMemoryProperties* memory = nullptr;
+        vmaGetMemoryProperties(vma_, &memory);
+        constexpr VkMemoryPropertyFlags kBar = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        for (uint32_t t = 0; memory && t < memory->memoryTypeCount; ++t)
+        {
+            const VkMemoryHeap& heap = memory->memoryHeaps[memory->memoryTypes[t].heapIndex];
+            if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) bar_.device = std::max<uint64_t>(bar_.device, heap.size);
+            if ((memory->memoryTypes[t].propertyFlags & kBar) == kBar) bar_.heap = std::max<uint64_t>(bar_.heap, heap.size);
+        }
+        bar_.large = bar_.heap && bar_.heap >= std::max<uint64_t>(uint64_t{1} << 30, bar_.device / 2);
+        bar_bytes_ = bar_fallbacks_ = 0;
         return true;
     }
 
@@ -51,9 +68,46 @@ namespace wxl::vk::resources
         device_ = VK_NULL_HANDLE;
     }
 
-    bool Allocator::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out)
+    bool Allocator::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Access access, Buffer& out, bool bar_only)
     {
+        stats::Scope made(stats::Cause::Memory);
         out = Buffer{};
+        if (access == Access::DeviceUpload)
+        {
+            if (bar_.on)
+            {
+                // Mapped device-local memory, or nothing: never the system memory VMA would fall back to.
+                VkBufferCreateInfo info{};
+                info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                info.size        = size;
+                info.usage       = usage;
+                info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                VmaAllocationCreateInfo memory{};
+                memory.usage         = VMA_MEMORY_USAGE_UNKNOWN;
+                memory.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+                memory.flags         = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                VmaAllocationInfo allocated{};
+                if (vmaCreateBuffer(vma_, &info, &memory, &out.buffer, &out.allocation, &allocated) == VK_SUCCESS && allocated.pMappedData)
+                {
+                    out.size   = size;
+                    out.mapped = allocated.pMappedData;
+                    if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+                    {
+                        VkBufferDeviceAddressInfo address{};
+                        address.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+                        address.buffer = out.buffer;
+                        out.address    = vkGetBufferDeviceAddress(device_, &address);
+                    }
+                    bar_bytes_ += size;
+                    return true;
+                }
+                if (out.buffer) vmaDestroyBuffer(vma_, out.buffer, out.allocation);
+                out = Buffer{};
+                ++bar_fallbacks_;
+            }
+            if (bar_only) return false;
+            access = Access::Upload;
+        }
         VkBufferCreateInfo info{};
         info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         info.size        = size;
@@ -97,6 +151,7 @@ namespace wxl::vk::resources
     bool Allocator::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, Image& out,
                                 VkImageAspectFlags aspect, VkSampleCountFlagBits samples, VkImageCreateFlags flags)
     {
+        stats::Scope made(stats::Cause::Memory);
         out = Image{};
         VkImageCreateInfo info{};
         info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -141,6 +196,7 @@ namespace wxl::vk::resources
 
     bool Allocator::CreateImage(const ImageInfo& info, Image& out)
     {
+        stats::Scope made(stats::Cause::Memory);
         out = Image{};
         VkImageCreateInfo create{};
         create.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
