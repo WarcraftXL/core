@@ -582,6 +582,23 @@ at its occluded alpha, then as usual. An immediate shape keeps what it was built
 the frame: given again unchanged (the same mod, shape and parts, the ground's generation unchanged),
 its mesh is drawn again without a build.
 
+Since abi 0.1.40 the service keeps **emitters** (kept by handle, or thrown by `emit` and by `stop`,
+going once their particles have lived). Their particles live in `gx/shapes/Particles.cpp`'s `Pool`,
+a structure of arrays: each world frame (`Render`, before the shapes) the emitters throw at their
+rate from where they stand (placed, or following an object), then `Pool::Step` moves every particle
+(gravity, drag, an attractor, one bounce or a rest on `sh::HeightAt` of the terrain, asked again once
+a particle moved half a yard) and `Pool::Write` turns each into six vertices of the same stream:
+facing the camera (its axes from the view matrix), lying flat, or stretched along its velocity; its
+size, colour and opacity from the look's keys; its sprite-sheet frame's coordinates in the vertex's
+`other.xy` and its corners' height above the ground over the softness in `other.z`. An emitter's
+particles are one run of the `kParticle` program (`ParticlePs` at c200-c205 on Direct3D 9,
+`draw_particle.frag` on Vulkan), alpha-blended ones sorted far to near and emitters far to near,
+after the lines of their bucket. Budgets are counted as particles are thrown and as they go. The
+soft edge where a particle meets the ground fades by its height above the terrain, which both devices
+compute alike from the vertex; the scene's depth is not read (Direct3D 9 has no copy of it to sample
+at that point of the frame). `MakeSurface`'s row 5 carries a mask (the texture's opacity alone) and
+the blur, a scale of the derivatives the pictures are read with.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
