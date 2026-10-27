@@ -570,6 +570,18 @@ the device holds them (the `IDirect3DBaseTexture9` on sampler 0, or the renderer
 through `Front::TextureOf`); an inside waits for its texture, and a texture no shape used for three
 seconds is closed.
 
+Since abi 0.1.39 a box's and a cylinder's inside is built as faces (`Mesh::Face`: contiguous
+triangles, a frame with the picture's top and left axes, `face_plane` holding each corner in it, the
+cylinder's arc unwrapped with its seam behind the facing); a textured volume draws each face turned
+to the eye as a surface run with `MakeFaceSurface`'s numbers. A frame is put together from
+**buckets** (tested, on top, and one per shape with `occluded_alpha`), each laid as plain insides,
+surfaces, volumes (plain runs and face runs, far to near), shadows, lines; an occluded shape's runs
+go twice, first `behind` (Direct3D 9 `ZFUNC GREATER`, Vulkan a GREATER pipeline) with the run's
+opacity multiplier (`Run::alpha`, the vertex program's `lift.z`: c245.z, the push constants' lift)
+at its occluded alpha, then as usual. An immediate shape keeps what it was built from in its slot of
+the frame: given again unchanged (the same mod, shape and parts, the ground's generation unchanged),
+its mesh is drawn again without a build.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
