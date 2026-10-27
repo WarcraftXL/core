@@ -17,6 +17,11 @@
 //            whose corners carry both ends and a side, widened on the screen by the program.
 //   View     the matrices the world was drawn with, and Project: the vertex program's arithmetic
 //            on the CPU, which the tests hold both devices' pictures to.
+//   Surface  a ground shape's inside drawn with a texture, a feather, a radial fade or a blend of
+//            its own: its triangles carry the shape's own plane coordinates (and a polygon's
+//            distance to its border), and SurfaceConstants the per-draw numbers the pixel programs
+//            read; Shade is their arithmetic on the CPU.
+//   Run      a stretch of the frame's vertices drawn with one program, blend and depth test.
 
 #pragma once
 
@@ -72,6 +77,7 @@ namespace wxl::gx::shapes
         V3              size;
         float           spacing = 0.0f;
         std::vector<V3> points; ///< offsets from center
+        std::vector<float> alphas; ///< a line's opacity at each point; empty for 1
     };
 
     /// Whether the kind lies on the ground.
@@ -99,12 +105,30 @@ namespace wxl::gx::shapes
         {
             V3      a, b;
             uint8_t cap_a = 0, cap_b = 0; ///< a square cap half the width long at that end
+            float   alpha_a = 1.0f, alpha_b = 1.0f; ///< the opacity of each end (a line's points' opacities)
+            float   t_a = -1.0f, t_b = -1.0f;       ///< how far along its line each end is, 0 to 1; -1: not a line's
+        };
+        /// How a ground shape's inside is drawn as a surface: the shape's plane (yards from its
+        /// center, turned by its facing: x along it) and what bounds it.
+        struct Plane
+        {
+            uint32_t code = 0;       ///< 0 round (circle, ring, sector), 1 a box (rectangle, grid), 2 a polygon (distances at the vertices)
+            float    radius = 0.0f;  ///< round: the outer radius
+            float    inner = 0.0f;   ///< round: the hole's
+            float    half_angle = 4.0f; ///< round: half the sector's arc in radians; pi or more for none
+            float    hx = 0.0f, hy = 0.0f; ///< a box's half sides
+            float    extent = 1.0f;  ///< the farthest the inside reaches from the center (for the radial fade)
+            float    min_x = 0.0f, max_x = 0.0f, min_y = 0.0f, max_y = 0.0f; ///< its bounds in its plane
         };
         std::vector<Segment> lines;
         std::vector<V3>      triangles; ///< three corners each
         std::vector<V3>      normals;   ///< one per triangle of a volume (outwards), to draw its front faces only
         bool                 ground = false; ///< drawn pulled towards the eye, over the ground it lies on
         V3                   middle;         ///< where it is, to draw volumes far to near
+        V3                   origin;         ///< the center it was built at
+        float                turn = 0.0f;    ///< and the facing its plane is turned by
+        Plane                plane;          ///< a ground shape's inside, for a surface
+        std::vector<float>   edge;           ///< a polygon's inside built for a feather: each triangle corner's distance to its border
 
         size_t Vertices() const { return lines.size() * 6 + triangles.size(); }
         void   Clear()
@@ -112,6 +136,7 @@ namespace wxl::gx::shapes
             lines.clear();
             triangles.clear();
             normals.clear();
+            edge.clear();
         }
     };
 
@@ -119,8 +144,9 @@ namespace wxl::gx::shapes
     /// its inside (a ground shape's or a volume's fill).
     struct Parts
     {
-        bool lines = true;
-        bool fill = false;
+        bool  lines = true;
+        bool  fill = false;
+        float feather = 0.0f; ///< yards: a polygon's inside is cut finer near its border and its distances kept
     };
 
     /**
@@ -143,7 +169,8 @@ namespace wxl::gx::shapes
     /// The segment a-b laid on the ground: the points where it crosses the terrain's triangles'
     /// edges, appended to @p out as segments (the ends' z where there is no ground). @p cap_a and
     /// @p cap_b cap the first and the last.
-    void DrapeSegment(V3 a, V3 b, Ground* ground, std::vector<Mesh::Segment>& out, bool cap_a, bool cap_b);
+    void DrapeSegment(V3 a, V3 b, Ground* ground, std::vector<Mesh::Segment>& out, bool cap_a, bool cap_b, float alpha_a = 1.0f,
+                      float alpha_b = 1.0f, float t_a = -1.0f, float t_b = -1.0f);
 
     /// The height of the ground at a point, on the triangle under it; false where there is none.
     bool HeightAt(Ground& ground, double x, double y, float& out);
@@ -159,12 +186,14 @@ namespace wxl::gx::shapes
     struct Vertex
     {
         float    pos[3];   ///< from the eye: world minus View::eye
-        float    other[3]; ///< a line corner: the segment's other end; a triangle: pos again
+        float    other[3]; ///< a line corner: the segment's other end; a triangle: pos again, or a surface's plane (x, y, distance)
         uint32_t color;    ///< 0xAARRGGBB (D3DCOLOR)
-        uint8_t  side;     ///< 0: to the left of the segment, 2: to its right, 1: a triangle's corner (not widened)
-        uint8_t  end;      ///< 0: at the segment's first end, 1: at its second
+        uint8_t  side;     ///< bits 0-1: 0 left of the segment, 2 right of it, 1 a triangle's corner (not widened);
+                           ///< bits 2-7: the move down on the screen in half pixels at 1080 lines (6-bit two's complement)
+        uint8_t  end;      ///< bit 0: 0 at the segment's first end, 1 at its second; bits 1-6: the move right, as side's
         uint8_t  width;    ///< the line's width in eighths of a pixel at 1080 lines
-        uint8_t  flags;    ///< 1: pulled towards the eye (a ground shape); + 2: a square cap at this end
+        uint8_t  flags;    ///< bit 0: pulled towards the eye (a ground shape); bit 1: a square cap at this end;
+                           ///< bits 2-7: the edges' softness in quarter pixels at 1080 lines
     };
     static_assert(sizeof(Vertex) == 32, "the stream's stride is 32 bytes on both devices");
 
@@ -196,4 +225,107 @@ namespace wxl::gx::shapes
 
     /// A width in pixels at 1080 lines as the stream carries it (clamped to 0.5..kMaxWidth).
     uint8_t WidthCode(float pixels);
+
+    constexpr float kMaxSoftness     = 15.0f; ///< pixels at 1080 lines
+    constexpr float kMaxShadowOffset = 15.0f;
+
+    /// How a segment is drawn: its colour (the alpha multiplied by its ends' opacities), width,
+    /// softness and the move on the screen (a shadow's).
+    struct LineLook
+    {
+        uint32_t color = 0xFFFFFFFFu;
+        uint8_t  width = 16;
+        uint8_t  soft = 0;    ///< quarter pixels, 0-63 (SoftCode)
+        int8_t   right = 0;   ///< half pixels, -32 to 31 (OffsetCode)
+        int8_t   down = 0;
+        float    alpha_start = 1.0f, alpha_end = 1.0f; ///< along a line (Segment::t), multiplying the colour's alpha
+    };
+    uint8_t SoftCode(float pixels);
+    int8_t  OffsetCode(float pixels);
+    /// The segment's six vertices in @p look.
+    void PushSegment(std::vector<Vertex>& out, const Mesh::Segment& s, V3 eye, const LineLook& look, bool lift);
+
+    /// A surface's triangle: its corners in world coordinates and in the shape's plane (x, y, and
+    /// a polygon's distance to its border).
+    void PushSurfaceTriangle(std::vector<Vertex>& out, const V3 world[3], const V3 plane[3], V3 eye, uint32_t color, bool lift);
+    /// A world point in a mesh's plane (yards from its origin, turned by its facing).
+    V3 InPlane(const Mesh& mesh, V3 world);
+
+    // --- Surfaces -------------------------------------------------------------------------------------
+
+    enum Uv : uint32_t
+    {
+        kUvFit = 0, kUvTile, kUvWorld,
+    };
+    enum Blend : uint32_t
+    {
+        kBlendAlpha = 0, kBlendAdd, kBlendModulate,
+    };
+
+    /// What a surface looks like, from wxl_draw_style's fields of abi 0.1.38.
+    struct SurfaceLook
+    {
+        bool     textured = false;
+        float    right = 1.0f, bottom = 1.0f; ///< the part of the texture the picture fills
+        uint32_t uv = kUvFit;
+        float    size_x = 1.0f, size_y = 1.0f;
+        float    rotation = 0.0f;
+        float    offset_x = 0.0f, offset_y = 0.0f;
+        uint32_t blend = kBlendAlpha;
+        float    feather = 0.0f;
+        float    radial = 0.0f;
+    };
+
+    /// The per-draw numbers of a surface: six rows of four, the pixel programs' (c200 to c205 on
+    /// Direct3D 9, the frame's memory on Vulkan):
+    ///   0, 1  u and v of the picture = row . (x, y, 1), x, y the plane's coordinates
+    ///   2     the picture's part of the texture (right, bottom), 1 when it repeats, 1 when textured
+    ///   3     plane code, outer radius, inner radius, feather (yards)
+    ///   4     half the sector's angle, a box's half sides, where the radial fade starts (2: none)
+    ///   5     1 / the extent, 1 for MODULATE, 0, 0
+    struct SurfaceConstants
+    {
+        float k[6][4] = {};
+    };
+    SurfaceConstants MakeSurface(const Mesh& mesh, const SurfaceLook& look);
+
+    /// Whether the sampler repeats the picture (TILE and WORLD).
+    constexpr bool Repeats(uint32_t uv) { return uv == kUvTile || uv == kUvWorld; }
+
+    /// The surface's pixel at a point of its plane: the pixel programs' arithmetic. @p texel is
+    /// what the texture holds at the picture's coordinate (Picture), @p color the vertex colour (0-1
+    /// each). Writes the colour the blend is given (RGB, alpha).
+    void Picture(const SurfaceConstants& s, float x, float y, float out_uv[2]);
+    void Shade(const SurfaceConstants& s, V3 plane, const float color[4], const float texel[4], float out[4]);
+
+    /// A line's pixel at @p across pixels from its middle: the opacity its softness leaves
+    /// (half_width and soft in pixels as drawn).
+    float LineCoverage(float across, float half_width, float soft);
+
+    // --- Runs -----------------------------------------------------------------------------------------
+
+    enum Program : uint8_t
+    {
+        kPlain = 0,   ///< colour of the vertex, a line's soft edges
+        kSurface = 1, ///< a surface: the picture, the feather, the fade
+    };
+
+    /// A stretch of the frame's vertices drawn alike.
+    struct Run
+    {
+        uint32_t first = 0, count = 0;
+        bool     on_top = false;
+        uint8_t  program = kPlain;
+        uint8_t  blend = kBlendAlpha;  ///< a surface's
+        uint32_t surface = 0;          ///< a surface's: an index into the frame's surfaces
+    };
+
+    /// A surface's numbers and its texture as the device holds it (an IDirect3DBaseTexture9*, a
+    /// Vulkan draw::Texture*; null when untextured).
+    struct Surface
+    {
+        SurfaceConstants constants;
+        void*            texture = nullptr;
+        bool             repeats = false;
+    };
 }

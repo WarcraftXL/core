@@ -46,6 +46,12 @@ WXL_BINDING(gx_model_draw, wxl_bool, (const void* render, wxl_model_batch_args* 
 // no device.
 WXL_BINDING(gx_world_view, wxl_bool, (wxl_core_world_view* out), (out), WXL_FALSE)
 
+// The device's texture (a CGxTex*) of a texture handle (a CTexture*, as texture_open answers),
+// made on the device and filled as the engine does before its first draw with it
+// (CGxDevice::ITexMarkAsUpdated, the device's own): null while the file is still loading, or with
+// no device. For wxl.draw, which draws with it outside the engine's states.
+WXL_BINDING(gx_texture_ready, void*, (void* texture), (texture), 0)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

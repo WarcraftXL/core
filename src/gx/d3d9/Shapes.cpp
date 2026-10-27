@@ -19,12 +19,14 @@ namespace
     using namespace wxl::core::gx::d3d9;
 
     constexpr UINT  kViewRegister = 240; ///< DrawVs's c240 to c245: above every register the game's programs read
+    constexpr UINT  kSurfaceRegister = 200; ///< SurfacePs's c200 to c205: above what the game's pixel programs read
     constexpr DWORD kColorOnly    = D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE;
 
     struct Programs
     {
         IDirect3DVertexShader9*      vertex = nullptr;
         IDirect3DPixelShader9*       pixel  = nullptr;
+        IDirect3DPixelShader9*       surface = nullptr;
         IDirect3DVertexDeclaration9* layout = nullptr;
     };
 
@@ -39,6 +41,7 @@ namespace
     {
         if (g_programs.vertex) device.Release(g_programs.vertex);
         if (g_programs.pixel) device.Release(g_programs.pixel);
+        if (g_programs.surface) device.Release(g_programs.surface);
         if (g_programs.layout) device.Release(g_programs.layout);
         g_programs = Programs{};
     }
@@ -75,7 +78,7 @@ namespace
 
     bool Make(Device& device)
     {
-        if (g_programs.vertex && g_programs.pixel && g_programs.layout) return true;
+        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.layout) return true;
         static const D3DVERTEXELEMENT9 kLayout[] = {
             {0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
             {0, 12, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},
@@ -86,8 +89,10 @@ namespace
             g_programs.vertex = nullptr;
         if (!g_programs.pixel && FAILED(device.CreatePixelShader(reinterpret_cast<const DWORD*>(kDrawPs), &g_programs.pixel)))
             g_programs.pixel = nullptr;
+        if (!g_programs.surface && FAILED(device.CreatePixelShader(reinterpret_cast<const DWORD*>(kSurfacePs), &g_programs.surface)))
+            g_programs.surface = nullptr;
         if (!g_programs.layout && FAILED(device.CreateDeclaration(kLayout, &g_programs.layout))) g_programs.layout = nullptr;
-        if (g_programs.vertex && g_programs.pixel && g_programs.layout) return true;
+        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.layout) return true;
         Drop(device);
         return false;
     }
@@ -114,7 +119,20 @@ namespace wxl::core::gx::d3d9::shapes
     uint32_t Draw(const wxl::gx::shapes::Vertex* vertices, uint32_t tested, uint32_t on_top, const float constants[24],
                   const float viewport[6], std::string* why)
     {
-        if (!tested && !on_top) return 0;
+        wxl::gx::shapes::Run runs[2];
+        runs[0].count  = tested;
+        runs[1].first  = tested;
+        runs[1].count  = on_top;
+        runs[1].on_top = true;
+        return Draw(vertices, runs, 2, nullptr, constants, viewport, why);
+    }
+
+    uint32_t Draw(const wxl::gx::shapes::Vertex* vertices, const wxl::gx::shapes::Run* runs, uint32_t run_count,
+                  const wxl::gx::shapes::Surface* surfaces, const float constants[24], const float viewport[6], std::string* why)
+    {
+        uint32_t total = 0;
+        for (uint32_t i = 0; i < run_count; ++i) total += runs[i].count;
+        if (!total) return 0;
         Device* device = Current();
         if (!device)
         {
@@ -142,15 +160,11 @@ namespace wxl::core::gx::d3d9::shapes
         port.MaxZ   = std::clamp(viewport[5], 0.0f, 1.0f);
         d.SetViewport(port);
         d.SetVertexShader(g_programs.vertex);
-        d.SetPixelShader(g_programs.pixel);
         d.SetDeclaration(g_programs.layout);
         d.SetVertexConstants(kViewRegister, constants, 6);
-        d.SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
         d.SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
         d.SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
         d.SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
-        d.SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
-        d.SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
         d.SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
         d.SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
         d.SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
@@ -161,22 +175,56 @@ namespace wxl::core::gx::d3d9::shapes
         d.SetRenderState(D3DRS_DEPTHBIAS, 0);
 
         // Whole triangles per call, within the device's limit.
-        const UINT per = std::min<UINT>(g_maxPrimitives ? g_maxPrimitives : 1u, 21844u) * 3u;
-        uint32_t   drawn = 0;
-        const auto run = [&](const wxl::gx::shapes::Vertex* from, uint32_t count) {
-            for (uint32_t at = 0; at + 3 <= count; at += per)
+        const UINT per     = std::min<UINT>(g_maxPrimitives ? g_maxPrimitives : 1u, 21844u) * 3u;
+        uint32_t   drawn   = 0;
+        bool       sampled = false;
+        int        zState = -1, program = -1, blend = -1;
+        for (uint32_t i = 0; i < run_count; ++i)
+        {
+            const wxl::gx::shapes::Run& run = runs[i];
+            if (run.count < 3) continue;
+            const int z = run.on_top ? 0 : 1;
+            if (z != zState) d.SetRenderState(D3DRS_ZENABLE, (zState = z) ? D3DZB_TRUE : D3DZB_FALSE);
+            const bool surface = run.program == wxl::gx::shapes::kSurface && surfaces;
+            if (static_cast<int>(surface) != program)
             {
-                const UINT n = std::min<UINT>(per, (count - at) / 3u * 3u);
+                program = surface ? 1 : 0;
+                d.SetPixelShader(surface ? g_programs.surface : g_programs.pixel);
+            }
+            const int b = surface ? std::min<int>(run.blend, 2) : 0;
+            if (b != blend)
+            {
+                blend = b;
+                // ALPHA over the scene, ADD as light, MODULATE multiplying it (SurfacePs gives 1 + (c - 1) a).
+                static const DWORD kSource[3]      = {D3DBLEND_SRCALPHA, D3DBLEND_SRCALPHA, D3DBLEND_DESTCOLOR};
+                static const DWORD kDestination[3] = {D3DBLEND_INVSRCALPHA, D3DBLEND_ONE, D3DBLEND_ZERO};
+                d.SetRenderState(D3DRS_SRCBLEND, kSource[b]);
+                d.SetRenderState(D3DRS_DESTBLEND, kDestination[b]);
+            }
+            if (surface)
+            {
+                const wxl::gx::shapes::Surface& s = surfaces[run.surface];
+                wxl::gx::shapes::SurfaceConstants k = s.constants;
+                if (!s.texture) k.k[2][3] = 0.0f; // no picture to read
+                d.SetPixelConstants(kSurfaceRegister, &k.k[0][0], 6);
+                d.SetTexture(0, static_cast<IDirect3DBaseTexture9*>(s.texture));
+                const DWORD address = s.repeats ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP;
+                d.SetSamplerState(0, D3DSAMP_ADDRESSU, address);
+                d.SetSamplerState(0, D3DSAMP_ADDRESSV, address);
+                d.SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+                d.SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+                d.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+                sampled = true;
+            }
+            const wxl::gx::shapes::Vertex* from = vertices + run.first;
+            for (uint32_t at = 0; at + 3 <= run.count; at += per)
+            {
+                const UINT n = std::min<UINT>(per, (run.count - at) / 3u * 3u);
                 d.DrawUp(D3DPT_TRIANGLELIST, n / 3u, from + at, sizeof(wxl::gx::shapes::Vertex));
                 drawn += n;
             }
-        };
-        run(vertices, tested);
-        if (on_top)
-        {
-            d.SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
-            run(vertices + tested, on_top);
         }
+        if (sampled) d.SetTexture(0, nullptr);
 
         // What the engine leaves set and never sends again (CGxDeviceD3d::IStateSetD3DDefaults),
         // then everything else it keeps, sent again before its next draw.

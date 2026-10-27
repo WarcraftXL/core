@@ -21,9 +21,12 @@ layout(push_constant) uniform Push
     vec4  screen;         ///< the viewport's width and height in pixels, half a pixel's width at 1080 lines / 8
     vec4  lift;           ///< the pull towards the eye: a fraction of the distance, yards
     uvec2 vertices;       ///< the stream's address
+    uvec2 surface;        ///< a surface's numbers (draw_surface.frag)
 } pc;
 
 layout(location = 0) out vec4 color;
+layout(location = 1) out vec3 line;  ///< a line's: pixels across from its middle, half its drawn width, its softness
+layout(location = 2) out vec3 plane; ///< a surface's: its plane's x and y, a polygon's distance to its border
 
 vec4 Clip(vec3 p)
 {
@@ -48,11 +51,17 @@ void main()
     const uint   bytes    = stream.words[at + 7u];
     const vec4   data     = vec4(float(bytes & 255u), float((bytes >> 8) & 255u), float((bytes >> 16) & 255u), float(bytes >> 24));
 
-    const float on  = mod(data.w, 2.0);
-    const float cap = floor(data.w * 0.5);
-    vec4        a   = Clip(Lifted(position, on));
-    vec4        b   = Clip(Lifted(other, on));
-    const float side = data.x - 1.0;
+    const float on    = mod(data.w, 2.0);
+    const float cap   = mod(floor(data.w * 0.5), 2.0);
+    const float soft  = floor(data.w * 0.25);
+    float       down  = floor(data.x * 0.25);
+    float       right = floor(data.y * 0.5);
+    down  = down >= 32.0 ? down - 64.0 : down;
+    right = right >= 32.0 ? right - 64.0 : right;
+    vec4        a    = Clip(Lifted(position, on));
+    vec4        b    = Clip(Lifted(other, on));
+    const float side = mod(data.x, 4.0) - 1.0;
+    line             = vec3(0.0, 1.0, 0.0);
     if (side != 0.0)
     {
         const vec4 a0 = a;
@@ -67,12 +76,16 @@ void main()
         vec2        d  = sb - sa;
         const float len = length(d);
         d = len > 0.0001 ? d / len : vec2(1.0, 0.0);
-        const float along     = 1.0 - 2.0 * data.y;
+        const float along     = 1.0 - 2.0 * mod(data.y, 2.0);
         const vec2  n         = vec2(-d.y, d.x) * along;
-        const float halfWidth = data.z * pc.screen.z;
+        const float halfWidth = data.z * pc.screen.z + 2.0 * soft * pc.screen.z;
         const vec2  offset    = (n * side - d * cap) * halfWidth;
         a.xy += offset / halfScreen * wa;
+        line = vec3(side * halfWidth, halfWidth, soft * 4.0 * pc.screen.z);
     }
+    // A shadow's move on the screen, in half pixels at 1080 lines (y down).
+    a.xy += vec2(right, -down) * 8.0 * pc.screen.z / (0.5 * pc.screen.xy) * a.w;
+    plane = other;
     color       = vec4(float((argb >> 16) & 255u), float((argb >> 8) & 255u), float(argb & 255u), float(argb >> 24)) / 255.0;
     gl_Position = vec4(a.x, -a.y, a.z, a.w);
 }

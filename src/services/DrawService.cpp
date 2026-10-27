@@ -10,9 +10,13 @@
 // has drawn it; a kept one is built when it is added or changed, and again when what it lies on or
 // follows moved: wxl.terrain's ground changed (its generation), its object moved or turned. Each
 // frame writes every shape's vertices from the eye (their colours with the pulse and the fades of
-// the moment) and draws them in two runs, tested against the depth then on top; fills before lines,
-// volumes far to near, a volume's back faces left out. Refusals are logged once per mod and call
-// under `draw`, shapes left out past the frame's budget once a second.
+// the moment) and draws them in runs, tested against the depth then on top: plain insides, then
+// surfaces (an inside with a texture, a feather, a fade or a blend: one run each, with its
+// numbers), volumes far to near (a volume's back faces left out), the lines' shadows, the lines.
+// A surface's texture is opened through the client (texture_open) when a shape first names it,
+// shared by path, readied on the device each frame it is drawn (gx_texture_ready) and closed a few
+// seconds after the last shape that used it went. Refusals are logged once per mod and call under
+// `draw`, shapes left out past the frame's budget once a second.
 
 #include "services/DrawService.hpp"
 
@@ -28,11 +32,13 @@
 #include "services/ScriptService.hpp"
 #include "services/TerrainService.hpp"
 
+#include "wxl/engine/gx.hpp"
 #include "wxl/host/mod_host.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -65,9 +71,69 @@ namespace
         float    pulse = 0.0f;
         float    fade_in = 0.0f;
         float    fade_out = 0.0f;
+        // abi 0.1.38
+        uint32_t        fill_color = 0xFFFFFFu; ///< the inside's: fill_color under WXL_DRAW_STYLE_FILL_COLOR, color otherwise
+        float           softness = 0.0f;
+        bool            along = false;
+        float           alpha_start = 1.0f, alpha_end = 1.0f;
+        uint32_t        shadow_color = 0;
+        float           shadow_alpha = 0.0f, shadow_x = 0.0f, shadow_y = 0.0f, shadow_softness = 0.0f;
+        std::string     texture; ///< the key it is held under (Textures), empty for none
+        sh::SurfaceLook look;
 
-        sh::Parts Parts() const { return sh::Parts{alpha > 0.0f, fill > 0.0f}; }
+        bool      Surface() const { return look.textured || look.feather > 0.0f || look.radial > 0.0f || look.blend != sh::kBlendAlpha; }
+        sh::Parts Parts() const { return sh::Parts{alpha > 0.0f, fill > 0.0f, look.feather}; }
     };
+
+    // --- Textures ----------------------------------------------------------------------------------
+
+    /// A texture the client loads, held while shapes use it.
+    struct Texture
+    {
+        std::string path;
+        void*       handle = nullptr; ///< the client's (texture_open)
+        uint32_t    refs = 0;         ///< kept and immediate shapes that name it
+        double      unused_since = 0.0;
+        uint64_t    frame = 0;        ///< the last frame it was readied in
+        void*       device = nullptr; ///< what the device draws it with this frame; null while it loads
+    };
+
+    std::unordered_map<std::string, Texture> g_textures; ///< by path, lower case with backslashes
+    uint64_t                                 g_frame = 0;
+    constexpr double                         kTextureLinger = 3.0; ///< seconds a texture no shape uses is kept
+
+    std::string TextureKey(const char* path)
+    {
+        std::string key(path);
+        for (char& c : key) c = c == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return key;
+    }
+
+    /// The texture of @p key, opened when no shape held it; false when the client makes none.
+    bool HoldTexture(const std::string& key, const std::string& path)
+    {
+        Texture& t = g_textures[key];
+        if (!t.handle)
+        {
+            t.path   = path;
+            t.handle = binding::texture_open(path.c_str());
+            if (!t.handle)
+            {
+                g_textures.erase(key);
+                return false;
+            }
+        }
+        ++t.refs;
+        return true;
+    }
+
+    void LetGoTexture(const std::string& key)
+    {
+        if (key.empty()) return;
+        const auto at = g_textures.find(key);
+        if (at == g_textures.end() || !at->second.refs) return;
+        if (--at->second.refs == 0) at->second.unused_since = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
 
     struct Kept
     {
@@ -85,6 +151,7 @@ namespace
         uint64_t   generation = 0; ///< wxl.terrain's, for a shape on the ground
         sh::V3     placed;         ///< the object's position it was built at
         float      turned = 0.0f;  ///< and its facing
+        ~Kept() { LetGoTexture(style.texture); }
     };
 
     struct Immediate
@@ -92,6 +159,13 @@ namespace
         uint32_t mod = 0;
         Style    style;
         sh::Mesh mesh;
+
+        /// Drawn or dropped: its texture is no longer held for it.
+        void Done()
+        {
+            LetGoTexture(style.texture);
+            style.texture.clear();
+        }
     };
 
     std::vector<std::unique_ptr<Kept>>        g_kept; ///< oldest first
@@ -115,7 +189,9 @@ namespace
     wxl::vk::render::Render* g_attached = nullptr;
 
     // The frame's vertices, their memory kept from frame to frame.
-    std::vector<sh::Vertex> g_testedFill, g_testedLines, g_topFill, g_topLines, g_stream;
+    std::vector<sh::Vertex>  g_fill[2], g_surfaceVertices[2], g_volumes[2], g_shadows[2], g_lines[2], g_stream;
+    std::vector<sh::Run>     g_surfaceRuns[2], g_runs;
+    std::vector<sh::Surface> g_surfaces;
 
     /// wxl.terrain's ground, its chunks' heights read once per change of the ground.
     class TerrainGround final : public sh::Ground
@@ -236,7 +312,7 @@ namespace
             Refuse(call, "the shape is null");
             return false;
         }
-        if (in->struct_size < sizeof(wxl_draw_shape))
+        if (in->struct_size < WXL_DRAW_SHAPE_SIZE_0136)
         {
             Refuse(call, "the shape's struct_size is not set: set it to sizeof(wxl_draw_shape)");
             return false;
@@ -269,6 +345,9 @@ namespace
             out.points.resize(in->point_count);
             for (uint32_t i = 0; i < in->point_count; ++i) out.points[i] = V(in->points[i]);
         }
+        out.alphas.clear();
+        if (in->struct_size >= sizeof(wxl_draw_shape) && in->point_alphas && in->point_count)
+            out.alphas.assign(in->point_alphas, in->point_alphas + in->point_count);
         if (std::string why = sh::Validate(out); !why.empty())
         {
             Refuse(call, "the shape: " + why);
@@ -281,7 +360,7 @@ namespace
     {
         out = Style{};
         if (!in) return true;
-        if (in->struct_size < sizeof(wxl_draw_style))
+        if (in->struct_size < WXL_DRAW_STYLE_SIZE_0136)
         {
             Refuse(call, "the style's struct_size is not set: set it to sizeof(wxl_draw_style)");
             return false;
@@ -306,6 +385,68 @@ namespace
         out.pulse    = in->pulse;
         out.fade_in  = in->fade_in;
         out.fade_out = in->fade_out;
+        out.fill_color = out.color;
+        if (in->struct_size < sizeof(wxl_draw_style)) return true; // abi 0.1.36's look
+
+        const auto refuse = [&](const char* why) {
+            Refuse(call, std::string("the style's ") + why);
+            return false;
+        };
+        const auto number = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
+        if (in->flags & ~(WXL_DRAW_STYLE_FILL_COLOR | WXL_DRAW_STYLE_LINE_ALPHA))
+            return refuse("flags take WXL_DRAW_STYLE_FILL_COLOR (1) and WXL_DRAW_STYLE_LINE_ALPHA (2) alone");
+        if (!number(in->softness, 0.0f, 1e9f) || !number(in->shadow_softness, 0.0f, 1e9f))
+            return refuse("softness and shadow_softness must be pixels from 0");
+        if (!number(in->shadow_alpha, 0.0f, 1.0f)) return refuse("shadow_alpha must be an opacity from 0 to 1");
+        if (!std::isfinite(in->shadow_x) || !std::isfinite(in->shadow_y)) return refuse("shadow_x and shadow_y must be finite pixels");
+        if ((in->flags & WXL_DRAW_STYLE_LINE_ALPHA) && (!number(in->alpha_start, 0.0f, 1.0f) || !number(in->alpha_end, 0.0f, 1.0f)))
+            return refuse("alpha_start and alpha_end must be opacities from 0 to 1");
+        if (in->uv > WXL_DRAW_UV_WORLD) return refuse("uv must be WXL_DRAW_UV_FIT (0), WXL_DRAW_UV_TILE (1) or WXL_DRAW_UV_WORLD (2)");
+        if (in->blend > WXL_DRAW_BLEND_MODULATE)
+            return refuse("blend must be WXL_DRAW_BLEND_ALPHA (0), WXL_DRAW_BLEND_ADD (1) or WXL_DRAW_BLEND_MODULATE (2)");
+        if (!number(in->texture_right, 0.0f, 1.0f) || !number(in->texture_bottom, 0.0f, 1.0f))
+            return refuse("texture_right and texture_bottom must be parts of the texture from 0 to 1 (0: 1)");
+        if (!number(in->uv_size_x, 0.0f, 1e6f) || !number(in->uv_size_y, 0.0f, 1e6f) || !std::isfinite(in->uv_rotation) ||
+            !std::isfinite(in->uv_offset_x) || !std::isfinite(in->uv_offset_y))
+            return refuse("uv_size must be sizes from 0 (0: 1), uv_rotation and uv_offset finite numbers");
+        if (!number(in->feather, 0.0f, WXL_DRAW_MAX_EXTENT)) return refuse("feather must be yards from 0 to WXL_DRAW_MAX_EXTENT");
+        if (!number(in->radial_fade, 0.0f, 1.0f)) return refuse("radial_fade must be a part of the radius from 0 to 1");
+        std::string path;
+        if (in->texture && *in->texture)
+        {
+            const size_t length = strnlen(in->texture, WXL_DRAW_MAX_TEXTURE_PATH);
+            if (length >= WXL_DRAW_MAX_TEXTURE_PATH) return refuse("texture path is longer than WXL_DRAW_MAX_TEXTURE_PATH");
+            path.assign(in->texture, length);
+        }
+        out.fill_color      = (in->flags & WXL_DRAW_STYLE_FILL_COLOR) ? (in->fill_color & 0xFFFFFFu) : out.color;
+        out.softness        = std::min(in->softness, WXL_DRAW_MAX_SOFTNESS);
+        out.along           = (in->flags & WXL_DRAW_STYLE_LINE_ALPHA) != 0;
+        out.alpha_start     = out.along ? in->alpha_start : 1.0f;
+        out.alpha_end       = out.along ? in->alpha_end : 1.0f;
+        out.shadow_color    = in->shadow_color & 0xFFFFFFu;
+        out.shadow_alpha    = in->shadow_alpha;
+        out.shadow_x        = std::clamp(in->shadow_x, -WXL_DRAW_MAX_SHADOW_OFFSET, WXL_DRAW_MAX_SHADOW_OFFSET);
+        out.shadow_y        = std::clamp(in->shadow_y, -WXL_DRAW_MAX_SHADOW_OFFSET, WXL_DRAW_MAX_SHADOW_OFFSET);
+        out.shadow_softness = std::min(in->shadow_softness, WXL_DRAW_MAX_SOFTNESS);
+        out.look.textured   = !path.empty();
+        out.look.right      = in->texture_right > 0.0f ? in->texture_right : 1.0f;
+        out.look.bottom     = in->texture_bottom > 0.0f ? in->texture_bottom : 1.0f;
+        out.look.uv         = in->uv;
+        out.look.size_x     = in->uv_size_x > 0.0f ? in->uv_size_x : 1.0f;
+        out.look.size_y     = in->uv_size_y > 0.0f ? in->uv_size_y : 1.0f;
+        out.look.rotation   = in->uv_rotation;
+        out.look.offset_x   = in->uv_offset_x;
+        out.look.offset_y   = in->uv_offset_y;
+        out.look.blend      = in->blend;
+        out.look.feather    = in->feather;
+        out.look.radial     = in->radial_fade;
+        if (!path.empty())
+        {
+            // Held from here: the caller lets it go when the style is dropped (or refused later).
+            const std::string key = TextureKey(path.c_str());
+            if (!HoldTexture(key, path)) return refuse(("texture '" + path + "' was not made by the client").c_str());
+            out.texture = key;
+        }
         return true;
     }
 
@@ -387,11 +528,12 @@ namespace
         std::string why;
         if (!sh::Build(desc, look.Parts(), &GroundOf(), slot.mesh, &why))
         {
+            LetGoTexture(look.texture);
             Refuse("draw", "the shape: " + why);
             return WXL_E_INVALID;
         }
         slot.mod   = mod;
-        slot.style = look;
+        slot.style = look; // the texture held for it until it is drawn (Immediate::Done)
         ++g_immediateCount;
         ++count;
         g_immediateSeconds += std::chrono::duration<double>(Clock::now() - started).count();
@@ -491,8 +633,10 @@ namespace
         Style look;
         if (!ReadStyle("set_style", style, look)) return WXL_E_INVALID;
         const sh::Parts before = k->style.Parts(), after = look.Parts();
+        LetGoTexture(k->style.texture);
         k->style = look;
-        if (before.lines != after.lines || before.fill != after.fill) k->built = false;
+        if (before.lines != after.lines || before.fill != after.fill || (k->desc.kind == sh::kPolygon && before.feather != after.feather))
+            k->built = false;
         return WXL_OK;
     }
 
@@ -558,6 +702,9 @@ namespace
         wxl_draw_stats stats = g_stats;
         stats.struct_size    = out->struct_size;
         stats.shapes         = static_cast<uint32_t>(g_kept.size());
+        stats.textures       = static_cast<uint32_t>(g_textures.size());
+        stats.textures_loading = 0;
+        for (const auto& [key, t] : g_textures) stats.textures_loading += t.refs && !t.device ? 1u : 0u;
         std::memcpy(out, &stats, std::min<size_t>(out->struct_size, sizeof stats));
         return WXL_OK;
     }
@@ -640,6 +787,8 @@ local native = __wxl_draw
 __wxl_draw = nil
 local type, ipairs, tostring, format, concat = type, ipairs, tostring, string.format, table.concat
 local kinds = { line = 0, circle = 1, ring = 2, sector = 3, rectangle = 4, polygon = 5, grid = 6, box = 7, sphere = 8, cylinder = 9 }
+local uvs = { fit = 0, tile = 1, world = 2 }
+local blends = { alpha = 0, add = 1, modulate = 2 }
 local function num(t, k, default)
     local v = t[k]
     if v == nil then return default end
@@ -654,6 +803,15 @@ local function point(p, what)
     end
     return x, y, z
 end
+local function pair(t, k, what, default, number_ok)
+    local v = t[k]
+    if v == nil then return default, default end
+    if number_ok and type(v) == "number" then return v, v end
+    if type(v) ~= "table" then error("WxlDraw: '" .. k .. "' must be " .. what, 3) end
+    local x, y = v.x or v[1], v.y or v[2]
+    if type(x) ~= "number" or type(y) ~= "number" then error("WxlDraw: '" .. k .. "' must be " .. what, 3) end
+    return x, y
+end
 function WxlDraw(shape, style)
     if type(shape) ~= "table" then return nil, "WxlDraw: the shape must be a table {kind = \"circle\", center = {x, y, z}, radius = 5, ...}" end
     local kind = kinds[shape.kind]
@@ -667,40 +825,81 @@ function WxlDraw(shape, style)
     local pts = ""
     if shape.points ~= nil then
         if type(shape.points) ~= "table" then return nil, "WxlDraw: the points must be a list of points {x, y, z}" end
+        local alphas = shape.alphas
+        if alphas ~= nil and (type(alphas) ~= "table" or #alphas ~= #shape.points) then
+            return nil, "WxlDraw: the shape's alphas must be a list of opacities, one per point"
+        end
         local list = {}
         for i, p in ipairs(shape.points) do
             local x, y, z = point(p, "point " .. i)
-            list[#list + 1] = format("%.9g,%.9g,%.9g", x, y, z)
+            if alphas then
+                if type(alphas[i]) ~= "number" then return nil, "WxlDraw: alpha " .. i .. " must be a number" end
+                list[#list + 1] = format("%.9g,%.9g,%.9g,%.9g", x, y, z, alphas[i])
+            else
+                list[#list + 1] = format("%.9g,%.9g,%.9g", x, y, z)
+            end
         end
         pts = concat(list, ";")
     end
     style = style or {}
     if type(style) ~= "table" then return nil, "WxlDraw: the style must be a table {color = 0xRRGGBB, alpha, fill_alpha, width, depth, pulse}" end
     local depth = style.depth == "on_top" and 1 or 0
+    local uv = style.uv == nil and 0 or uvs[style.uv]
+    if uv == nil then return nil, "WxlDraw: the style's uv must be fit, tile or world" end
+    local blend = style.blend == nil and 0 or blends[style.blend]
+    if blend == nil then return nil, "WxlDraw: the style's blend must be alpha, add or modulate" end
+    local texture, right, bottom = style.texture, num(style, "texture_right", 0), num(style, "texture_bottom", 0)
+    if type(texture) == "table" then texture, right, bottom = texture[1], texture[2] or 0, texture[3] or 0 end
+    if texture ~= nil and type(texture) ~= "string" then return nil, "WxlDraw: the style's texture must be a path, or {path, right, bottom}" end
+    local shadow = num(style, "shadow_alpha", 0)
+    local sxo, syo = pair(style, "shadow_offset", "{x, y}", shadow > 0 and 1.5 or 0)
+    local usx, usy = pair(style, "uv_size", "{x, y} or a number", 0, true)
+    local uox, uoy = pair(style, "uv_offset", "{x, y}", 0)
+    local along = style.alpha_start ~= nil or style.alpha_end ~= nil
     return native(kind, cx, cy, cz, num(shape, "radius", 0), num(shape, "inner", 0), num(shape, "angle", 0), num(shape, "facing", 0),
                   num(shape, "pitch", 0), num(shape, "roll", 0), sx, sy, sz, num(shape, "spacing", 0), flags, pts,
                   num(style, "color", 0xFFFFFF), num(style, "alpha", 1), num(style, "fill_alpha", 0), num(style, "width", 2), depth,
-                  num(style, "pulse", 0))
+                  num(style, "pulse", 0), num(style, "fill_color", -1), num(style, "softness", 0),
+                  along and num(style, "alpha_start", 1) or -1, along and num(style, "alpha_end", 1) or -1,
+                  num(style, "shadow_color", 0), shadow, sxo, syo, num(style, "shadow_softness", shadow > 0 and 1 or 0),
+                  texture or "", right, bottom, uv, usx, usy, num(style, "uv_rotation", 0), uox, uoy, blend,
+                  num(style, "feather", 0), num(style, "radial_fade", 0))
 end
 )lua";
 
     void WXL_CALL InterfaceDraw(wxl_script_call* call, void*)
     {
         const wxl_script_api& script = services::ScriptApi();
-        double                n[22]  = {};
-        for (uint32_t i = 0; i < 22; ++i)
-            if (i != 15) script.arg_number(call, i, &n[i]);
+        constexpr uint32_t kArgs = 43, kPoints = 15, kTexture = 31;
+        double             n[kArgs] = {};
+        n[22] = n[24] = n[25] = -1.0; // fill_color, alpha_start, alpha_end: not given
+        const uint32_t given = std::min(script.arg_count(call), kArgs);
+        for (uint32_t i = 0; i < given; ++i)
+        {
+            double value = 0.0;
+            if (i != kPoints && i != kTexture && script.arg_number(call, i, &value) == WXL_TRUE) n[i] = value;
+        }
         wxl_str text{};
-        script.arg_string(call, 15, &text);
+        script.arg_string(call, kPoints, &text);
         std::vector<wxl_vec3> points;
+        std::vector<float>    alphas;
         const std::string     list(text.data ? text.data : "", text.size);
         for (size_t at = 0; at < list.size();)
         {
             const size_t end = std::min(list.find(';', at), list.size());
             wxl_vec3     p{};
-            if (std::sscanf(list.substr(at, end - at).c_str(), "%f,%f,%f", &p.x, &p.y, &p.z) == 3) points.push_back(p);
+            float        a = 1.0f;
+            const int    read = std::sscanf(list.substr(at, end - at).c_str(), "%f,%f,%f,%f", &p.x, &p.y, &p.z, &a);
+            if (read >= 3)
+            {
+                points.push_back(p);
+                if (read == 4) alphas.push_back(a);
+            }
             at = end + 1;
         }
+        wxl_str texture{};
+        if (given > kTexture) script.arg_string(call, kTexture, &texture);
+        const std::string path(texture.data ? texture.data : "", texture.size);
         const auto f = [&](int i) { return static_cast<float>(n[i]); };
         wxl_draw_shape shape{};
         shape.struct_size = sizeof shape;
@@ -715,8 +914,9 @@ end
         shape.size        = wxl_vec3{f(10), f(11), f(12)};
         shape.spacing     = f(13);
         shape.flags       = static_cast<uint32_t>(n[14]);
-        shape.points      = points.empty() ? nullptr : points.data();
-        shape.point_count = static_cast<uint32_t>(points.size());
+        shape.points       = points.empty() ? nullptr : points.data();
+        shape.point_count  = static_cast<uint32_t>(points.size());
+        shape.point_alphas = !alphas.empty() && alphas.size() == points.size() ? alphas.data() : nullptr;
         wxl_draw_style style{};
         style.struct_size = sizeof style;
         style.color       = static_cast<uint32_t>(n[16]) & 0xFFFFFFu;
@@ -725,6 +925,35 @@ end
         style.width       = f(19);
         style.depth       = static_cast<uint32_t>(n[20]);
         style.pulse       = f(21);
+        if (n[22] >= 0.0)
+        {
+            style.flags |= WXL_DRAW_STYLE_FILL_COLOR;
+            style.fill_color = static_cast<uint32_t>(n[22]) & 0xFFFFFFu;
+        }
+        style.softness = f(23);
+        if (n[24] >= 0.0 || n[25] >= 0.0)
+        {
+            style.flags |= WXL_DRAW_STYLE_LINE_ALPHA;
+            style.alpha_start = f(24);
+            style.alpha_end   = f(25);
+        }
+        style.shadow_color    = static_cast<uint32_t>(n[26]) & 0xFFFFFFu;
+        style.shadow_alpha    = f(27);
+        style.shadow_x        = f(28);
+        style.shadow_y        = f(29);
+        style.shadow_softness = f(30);
+        style.texture         = path.empty() ? nullptr : path.c_str();
+        style.texture_right   = f(32);
+        style.texture_bottom  = f(33);
+        style.uv              = static_cast<uint32_t>(n[34]);
+        style.uv_size_x       = f(35);
+        style.uv_size_y       = f(36);
+        style.uv_rotation     = f(37);
+        style.uv_offset_x     = f(38);
+        style.uv_offset_y     = f(39);
+        style.blend           = static_cast<uint32_t>(n[40]);
+        style.feather         = f(41);
+        style.radial_fade     = f(42);
         const wxl_result result = DrawNow(&shape, &style);
         if (result == WXL_OK)
         {
@@ -816,18 +1045,46 @@ namespace wxl::core::services
             const char* refusal = Refusal();
             sh::View    view;
             const bool  seen = !refusal && ReadView(view);
+            ++g_frame;
+            wxl::vk::render::Render*  vulkan = seen ? VulkanRender() : nullptr;
+            wxl::vk::gxfront::Front*  front  = vulkan && !g_testRender ? gx::VulkanFront() : nullptr;
+
+            // A texture as the device draws it this frame, readied once a frame; null while it loads.
+            const auto deviceTexture = [&](const std::string& key) -> void* {
+                const auto at = g_textures.find(key);
+                if (at == g_textures.end()) return nullptr;
+                Texture& t = at->second;
+                if (t.frame != g_frame)
+                {
+                    t.frame  = g_frame;
+                    t.device = nullptr;
+                    if (void* gx = binding::gx_texture_ready(t.handle))
+                    {
+                        if (vulkan) t.device = front ? static_cast<void*>(front->TextureOf(gx)) : nullptr;
+                        else t.device = static_cast<wxl::engine::CGxTex*>(gx)->m_apiSpecificData;
+                    }
+                }
+                return t.device;
+            };
 
             // The frame's vertices, kept first (oldest first), then the immediate ones: past the
             // budget the newest go first.
-            g_testedFill.clear();
-            g_testedLines.clear();
-            g_topFill.clear();
-            g_topLines.clear();
+            for (int top = 0; top < 2; ++top)
+            {
+                g_fill[top].clear();
+                g_surfaceVertices[top].clear();
+                g_surfaceRuns[top].clear();
+                g_volumes[top].clear();
+                g_shadows[top].clear();
+                g_lines[top].clear();
+            }
+            g_surfaces.clear();
             std::vector<Job> volumes[2];
-            uint32_t         total = 0, drawn = 0, leftOut = 0;
+            uint32_t         total = 0, drawn = 0, leftOut = 0, textured = 0, shadowed = 0;
             const auto take = [&](const sh::Mesh& mesh, const Style& style, float beat) {
                 if (!mesh.lines.size() && !mesh.triangles.size()) return;
-                const size_t n = mesh.Vertices();
+                const bool   shadow = style.shadow_alpha > 0.0f && !mesh.lines.empty();
+                const size_t n      = mesh.Vertices() + (shadow ? mesh.lines.size() * 6 : 0);
                 if (total + n > WXL_DRAW_MAX_FRAME_VERTICES)
                 {
                     ++leftOut;
@@ -835,22 +1092,69 @@ namespace wxl::core::services
                 }
                 total += static_cast<uint32_t>(n);
                 ++drawn;
-                const bool                 top   = style.depth == WXL_DRAW_DEPTH_ON_TOP;
-                std::vector<sh::Vertex>&   lines = top ? g_topLines : g_testedLines;
-                const uint32_t             lc    = Color(style.color, style.alpha * beat);
-                const uint8_t              width = sh::WidthCode(style.width);
-                for (const sh::Mesh::Segment& s : mesh.lines) sh::PushSegment(lines, s, view.eye, lc, width, mesh.ground);
+                const int top = style.depth == WXL_DRAW_DEPTH_ON_TOP ? 1 : 0;
+                if (!mesh.lines.empty())
+                {
+                    sh::LineLook look;
+                    look.color       = Color(style.color, style.alpha * beat);
+                    look.width       = sh::WidthCode(style.width);
+                    look.soft        = sh::SoftCode(style.softness);
+                    look.alpha_start = style.alpha_start;
+                    look.alpha_end   = style.alpha_end;
+                    for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(g_lines[top], seg, view.eye, look, mesh.ground);
+                    if (shadow)
+                    {
+                        // The same segments once more, under every line: wider by the softness,
+                        // fading over it, moved on the screen.
+                        look.color = Color(style.shadow_color, style.shadow_alpha * beat);
+                        look.width = sh::WidthCode(style.width + style.shadow_softness);
+                        look.soft  = sh::SoftCode(style.shadow_softness);
+                        look.right = sh::OffsetCode(style.shadow_x);
+                        look.down  = sh::OffsetCode(style.shadow_y);
+                        for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(g_shadows[top], seg, view.eye, look, mesh.ground);
+                        ++shadowed;
+                    }
+                }
                 if (mesh.triangles.empty()) return;
                 if (!mesh.normals.empty())
                 {
                     const float dx = mesh.middle.x - view.eye.x, dy = mesh.middle.y - view.eye.y, dz = mesh.middle.z - view.eye.z;
-                    volumes[top ? 1 : 0].push_back(Job{&mesh, &style, beat, dx * dx + dy * dy + dz * dz});
+                    volumes[top].push_back(Job{&mesh, &style, beat, dx * dx + dy * dy + dz * dz});
                     return;
                 }
-                std::vector<sh::Vertex>& fill = top ? g_topFill : g_testedFill;
-                const uint32_t           fc   = Color(style.color, style.fill * beat);
+                const uint32_t fc = Color(style.fill_color, style.fill * beat);
+                if (!style.Surface())
+                {
+                    for (size_t t = 0; t + 2 < mesh.triangles.size(); t += 3)
+                        sh::PushTriangle(g_fill[top], mesh.triangles[t], mesh.triangles[t + 1], mesh.triangles[t + 2], view.eye, fc, mesh.ground);
+                    return;
+                }
+                // A surface: its run and numbers; a texture still loading leaves the inside out.
+                sh::Surface surface;
+                if (style.look.textured && !(surface.texture = deviceTexture(style.texture))) return;
+                surface.constants = sh::MakeSurface(mesh, style.look);
+                surface.repeats   = sh::Repeats(style.look.uv) && style.look.right >= 1.0f && style.look.bottom >= 1.0f;
+                sh::Run run;
+                run.first   = static_cast<uint32_t>(g_surfaceVertices[top].size());
+                run.on_top  = top == 1;
+                run.program = sh::kSurface;
+                run.blend   = static_cast<uint8_t>(style.look.blend);
+                run.surface = static_cast<uint32_t>(g_surfaces.size());
+                const bool edged = mesh.edge.size() == mesh.triangles.size();
                 for (size_t t = 0; t + 2 < mesh.triangles.size(); t += 3)
-                    sh::PushTriangle(fill, mesh.triangles[t], mesh.triangles[t + 1], mesh.triangles[t + 2], view.eye, fc, mesh.ground);
+                {
+                    sh::V3 plane[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        plane[k]   = sh::InPlane(mesh, mesh.triangles[t + k]);
+                        plane[k].z = edged ? mesh.edge[t + k] : 0.0f;
+                    }
+                    sh::PushSurfaceTriangle(g_surfaceVertices[top], &mesh.triangles[t], plane, view.eye, fc, mesh.ground);
+                }
+                run.count = static_cast<uint32_t>(g_surfaceVertices[top].size()) - run.first;
+                g_surfaces.push_back(surface);
+                g_surfaceRuns[top].push_back(run);
+                ++textured;
             };
             if (seen)
             {
@@ -861,10 +1165,10 @@ namespace wxl::core::services
                 for (int top = 0; top < 2; ++top)
                 {
                     std::sort(volumes[top].begin(), volumes[top].end(), [](const Job& a, const Job& b) { return a.distance > b.distance; });
-                    std::vector<sh::Vertex>& fill = top ? g_topFill : g_testedFill;
+                    std::vector<sh::Vertex>& fill = g_volumes[top];
                     for (const Job& job : volumes[top])
                     {
-                        const uint32_t fc = Color(job.style->color, job.style->fill * job.beat);
+                        const uint32_t fc = Color(job.style->fill_color, job.style->fill * job.beat);
                         const sh::Mesh& m = *job.mesh;
                         // The faces turned to the eye; from inside the volume (none is), its inside.
                         auto facing = [&](size_t t, size_t f) {
@@ -881,35 +1185,60 @@ namespace wxl::core::services
                 }
             }
             const uint32_t immediate = static_cast<uint32_t>(g_immediateCount);
+            for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();
             g_immediateCount = 0;
             g_immediateOf.clear();
 
             uint32_t sent = 0;
             if (seen)
             {
+                // Per depth: plain insides; each surface; volumes, the lines' shadows and the lines.
                 g_stream.clear();
-                g_stream.insert(g_stream.end(), g_testedFill.begin(), g_testedFill.end());
-                g_stream.insert(g_stream.end(), g_testedLines.begin(), g_testedLines.end());
-                const uint32_t tested = static_cast<uint32_t>(g_stream.size());
-                g_stream.insert(g_stream.end(), g_topFill.begin(), g_topFill.end());
-                g_stream.insert(g_stream.end(), g_topLines.begin(), g_topLines.end());
-                const uint32_t onTop = static_cast<uint32_t>(g_stream.size()) - tested;
-                float          constants[24];
+                g_runs.clear();
+                const auto plain = [&](bool top, std::initializer_list<const std::vector<sh::Vertex>*> parts) {
+                    sh::Run run;
+                    run.first  = static_cast<uint32_t>(g_stream.size());
+                    run.on_top = top;
+                    for (const auto* part : parts) g_stream.insert(g_stream.end(), part->begin(), part->end());
+                    run.count = static_cast<uint32_t>(g_stream.size()) - run.first;
+                    if (!run.count) return;
+                    // Right after a plain run of the same depth (no surface between): one run.
+                    if (!g_runs.empty() && g_runs.back().program == sh::kPlain && g_runs.back().on_top == top &&
+                        g_runs.back().first + g_runs.back().count == run.first)
+                        g_runs.back().count += run.count;
+                    else
+                        g_runs.push_back(run);
+                };
+                for (int top = 0; top < 2; ++top)
+                {
+                    plain(top == 1, {&g_fill[top]});
+                    const uint32_t base = static_cast<uint32_t>(g_stream.size());
+                    g_stream.insert(g_stream.end(), g_surfaceVertices[top].begin(), g_surfaceVertices[top].end());
+                    for (sh::Run run : g_surfaceRuns[top])
+                    {
+                        run.first += base;
+                        g_runs.push_back(run);
+                    }
+                    plain(top == 1, {&g_volumes[top], &g_shadows[top], &g_lines[top]});
+                }
+                float constants[24];
                 sh::Constants(view, constants);
                 std::string why;
-                if (wxl::vk::render::Render* r = VulkanRender())
+                if (vulkan)
                 {
-                    if (g_attached != r)
+                    if (g_attached != vulkan)
                     {
                         g_vulkan.Forget();
-                        g_vulkan.Attach(*r);
-                        g_attached = r;
+                        g_vulkan.Attach(*vulkan);
+                        g_attached = vulkan;
                     }
-                    sent = g_vulkan.Draw(g_stream.data(), tested, onTop, constants, view.viewport, &why);
+                    sent = g_vulkan.Draw(g_stream.data(), g_runs.data(), static_cast<uint32_t>(g_runs.size()), g_surfaces.data(), constants,
+                                         view.viewport, &why);
                 }
                 else
-                    sent = gx::d3d9::shapes::Draw(g_stream.data(), tested, onTop, constants, view.viewport, &why);
-                if (!sent && tested + onTop) Failed(why);
+                    sent = gx::d3d9::shapes::Draw(g_stream.data(), g_runs.data(), static_cast<uint32_t>(g_runs.size()), g_surfaces.data(),
+                                                  constants, view.viewport, &why);
+                if (!sent && !g_stream.empty()) Failed(why);
             }
             else if (refusal)
                 Failed(refusal);
@@ -923,6 +1252,8 @@ namespace wxl::core::services
             g_stats.build_microseconds     = spent;
             g_stats.max_build_microseconds = std::max(g_stats.max_build_microseconds, spent);
             g_stats.immediate_microseconds = static_cast<float>(g_immediateSeconds * 1e6);
+            g_stats.textured               = textured;
+            g_stats.shadows                = shadowed;
             ++g_stats.frames;
             g_immediateSeconds = 0.0;
             g_leftOutSince += leftOut;
@@ -933,10 +1264,26 @@ namespace wxl::core::services
             if (!g_worldThisFrame)
             {
                 // No world this frame (a loading screen): what was drawn for it goes.
+                for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();
                 g_immediateCount = 0;
                 g_immediateOf.clear();
             }
             g_worldThisFrame = false;
+            // Textures no shape has used for a while are let go of.
+            if (!g_textures.empty())
+            {
+                const double at = Now();
+                for (auto it = g_textures.begin(); it != g_textures.end();)
+                {
+                    if (!it->second.refs && at - it->second.unused_since > kTextureLinger)
+                    {
+                        binding::texture_close(it->second.handle);
+                        it = g_textures.erase(it);
+                    }
+                    else
+                        ++it;
+                }
+            }
             if (!g_leftOutSince) return;
             const double now = Now();
             if (now - g_leftOutSaidAt < 1.0) return;
@@ -959,7 +1306,11 @@ namespace wxl::core::services
             size_t live = 0;
             for (size_t i = 0; i < g_immediateCount; ++i)
             {
-                if (g_immediate[i].mod == mod) continue;
+                if (g_immediate[i].mod == mod)
+                {
+                    g_immediate[i].Done();
+                    continue;
+                }
                 if (live != i) std::swap(g_immediate[live], g_immediate[i]);
                 ++live;
             }
@@ -971,7 +1322,10 @@ namespace wxl::core::services
         {
             g_kept.clear();
             g_byHandle.clear();
+            for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();
             g_immediate.clear();
+            for (auto& [key, t] : g_textures) binding::texture_close(t.handle);
+            g_textures.clear();
             g_immediateCount = 0;
             g_immediateOf.clear();
             g_said.clear();

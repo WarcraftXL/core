@@ -612,6 +612,14 @@ namespace wxl::vk::gxfront
         return true;
     }
 
+    draw::Texture* Front::TextureOf(void* tex)
+    {
+        if (!tex || !textures_.count(tex)) return nullptr;
+        draw::Texture* t = static_cast<TexRecord*>(static_cast<engine::CGxTex*>(tex)->m_apiSpecificData)->texture;
+        if (!t || (!t->defined && t->opened != display_.FrameNumber())) return nullptr;
+        return t;
+    }
+
     void Front::TexDestroy(void* tex)
     {
         if (!textures_.erase(tex)) return;

@@ -801,6 +801,22 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    void* gx_texture_ready(void* texture)
+    {
+        void* device = IsClient() && OnMainThread() && texture ? const_cast<void*>(GxDevice()) : nullptr;
+        if (!device) return nullptr;
+        void* gx = Read<void*>(texture, WXL_FIELD("CTexture", "m_gxTex"));
+        if (!gx) return nullptr; // the file is still loading
+        // CGxDevice::ITexMarkAsUpdated(CGxTex*) is the device vtable's slot 0, which every device
+        // overrides (CGxDeviceD3d at 0x006A3070, the Vulkan adapter's copy of the table): it makes
+        // the texture on the device and fills it, as the engine does before binding it.
+        using MarkFn                 = void(__fastcall*)(void* self, void* edx, void* tex);
+        const void* const* vtable    = Read<const void* const*>(device, 0);
+        reinterpret_cast<MarkFn>(const_cast<void*>(vtable[0]))(device, nullptr, gx);
+        if (Read<int8_t>(gx, WXL_FIELD("CGxTex", "m_needsCreation"))) return nullptr;
+        return Read<void*>(gx, WXL_FIELD("CGxTex", "m_apiSpecificData")) ? gx : nullptr;
+    }
+
     void* gx_d3d9_device()
     {
         // Under Vulkan the device keeps D3D9's EGxApi (so the engine takes D3D9's paths), but no

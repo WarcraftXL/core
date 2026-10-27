@@ -208,8 +208,11 @@ namespace wxl::gx::shapes
             return Dot(a, b) / (la * lb) < 0.906f; // more than 25 degrees
         }
 
-        /// A polyline into segments, laid on the ground when @p ground is given.
-        void Polyline(const std::vector<V3>& pts, bool closed, Ground* ground, std::vector<Mesh::Segment>& out)
+        /// A polyline into segments, laid on the ground when @p ground is given. @p alphas (one per
+        /// point, or empty) are the points' opacities; @p along marks each end with how far along the
+        /// line it is (a line's, for its opacity from start to end).
+        void Polyline(const std::vector<V3>& pts, bool closed, Ground* ground, std::vector<Mesh::Segment>& out,
+                      const std::vector<float>* alphas = nullptr, bool along = false)
         {
             const size_t n = pts.size();
             if (n < 2) return;
@@ -218,13 +221,40 @@ namespace wxl::gx::shapes
                 if (!closed && (i == 0 || i == n - 1)) return true;
                 return Turns(pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
             };
+            std::vector<double> at(count + 1, 0.0);
             for (size_t i = 0; i < count; ++i)
             {
-                const V3   a = pts[i], b = pts[(i + 1) % n];
-                const bool ca = capAt(i), cb = capAt((i + 1) % n);
-                if (ground) DrapeSegment(a, b, ground, out, ca, cb);
-                else out.push_back(Mesh::Segment{a, b, static_cast<uint8_t>(ca), static_cast<uint8_t>(cb)});
+                const V3 a = pts[i], b = pts[(i + 1) % n];
+                at[i + 1]  = at[i] + std::sqrt(static_cast<double>((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z)));
             }
+            const double total = at[count] > 0.0 ? at[count] : 1.0;
+            const bool   per   = alphas && alphas->size() == n;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const V3    a = pts[i], b = pts[(i + 1) % n];
+                const bool  ca = capAt(i), cb = capAt((i + 1) % n);
+                const float aa = per ? (*alphas)[i] : 1.0f, ab = per ? (*alphas)[(i + 1) % n] : 1.0f;
+                const float ta = along ? static_cast<float>(at[i] / total) : -1.0f, tb = along ? static_cast<float>(at[i + 1] / total) : -1.0f;
+                if (ground) DrapeSegment(a, b, ground, out, ca, cb, aa, ab, ta, tb);
+                else out.push_back(Mesh::Segment{a, b, static_cast<uint8_t>(ca), static_cast<uint8_t>(cb), aa, ab, ta, tb});
+            }
+        }
+
+        /// The distance of a point of the plane to a polygon's border (its edges), the polygon given
+        /// in the same plane.
+        double BorderDistance(const std::vector<P2>& poly, double x, double y)
+        {
+            double best = 1e30;
+            for (size_t i = 0, n = poly.size(); i < n; ++i)
+            {
+                const P2     a = poly[i], b = poly[(i + 1) % n];
+                const double dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
+                double       t  = len > 0.0 ? ((x - a.x) * dx + (y - a.y) * dy) / len : 0.0;
+                t               = std::clamp(t, 0.0, 1.0);
+                const double ex = a.x + dx * t - x, ey = a.y + dy * t - y;
+                best            = std::min(best, ex * ex + ey * ey);
+            }
+            return std::sqrt(best);
         }
 
         /// The points of an arc around a centre, from @p from radians over @p span.
@@ -354,11 +384,12 @@ namespace wxl::gx::shapes
             }
     }
 
-    void DrapeSegment(V3 a, V3 b, Ground* ground, std::vector<Mesh::Segment>& out, bool cap_a, bool cap_b)
+    void DrapeSegment(V3 a, V3 b, Ground* ground, std::vector<Mesh::Segment>& out, bool cap_a, bool cap_b, float alpha_a, float alpha_b,
+                      float t_a, float t_b)
     {
         if (!ground || !ground->Present())
         {
-            out.push_back(Mesh::Segment{a, b, static_cast<uint8_t>(cap_a), static_cast<uint8_t>(cap_b)});
+            out.push_back(Mesh::Segment{a, b, static_cast<uint8_t>(cap_a), static_cast<uint8_t>(cap_b), alpha_a, alpha_b, t_a, t_b});
             return;
         }
         const P2 ga = ToGrid(a.x, a.y), gb = ToGrid(b.x, b.y);
@@ -397,7 +428,9 @@ namespace wxl::gx::shapes
                 z0 = PlaneZ(tri, u0, v0);
                 z1 = PlaneZ(tri, u1, v1);
             }
-            out.push_back(Mesh::Segment{World(u0, v0, z0), World(u1, v1, z1), 0, 0});
+            const auto lerp = [](float x, float y, double t) { return static_cast<float>(x + (y - x) * t); };
+            out.push_back(Mesh::Segment{World(u0, v0, z0), World(u1, v1, z1), 0, 0, lerp(alpha_a, alpha_b, t0), lerp(alpha_a, alpha_b, t1),
+                                        t_a < 0.0f ? -1.0f : lerp(t_a, t_b, t0), t_a < 0.0f ? -1.0f : lerp(t_a, t_b, t1)});
         }
         if (out.size() > first)
         {
@@ -480,6 +513,13 @@ namespace wxl::gx::shapes
 
     std::string Validate(const Desc& d)
     {
+        if (!d.alphas.empty())
+        {
+            if (d.kind != kLine) return "point_alphas are a line's: this kind has none";
+            if (d.alphas.size() != d.points.size()) return "point_alphas must hold one opacity per point";
+            for (float a : d.alphas)
+                if (!std::isfinite(a) || a < 0.0f || a > 1.0f) return "point_alphas must be opacities from 0 to 1";
+        }
         if (d.kind >= kKindCount) return Say("its kind is %.0f, which is none (0 line to 9 cylinder)", d.kind);
         if (!Finite(d.center) || !Finite(d.size) || !std::isfinite(d.radius) || !std::isfinite(d.inner) || !std::isfinite(d.angle) ||
             !std::isfinite(d.facing) || !std::isfinite(d.pitch) || !std::isfinite(d.roll) || !std::isfinite(d.spacing))
@@ -539,11 +579,86 @@ namespace wxl::gx::shapes
         }
     }
 
+    V3 InPlane(const Mesh& mesh, V3 w)
+    {
+        const double cf = std::cos(mesh.turn), sf = std::sin(mesh.turn);
+        const double dx = static_cast<double>(w.x) - mesh.origin.x, dy = static_cast<double>(w.y) - mesh.origin.y;
+        return V3{static_cast<float>(dx * cf + dy * sf), static_cast<float>(-dx * sf + dy * cf), 0.0f};
+    }
+
+    namespace
+    {
+        /// A polygon's inside cut finer where it is nearer its border than @p feather yards, so that
+        /// the distances kept at its corners (Mesh::edge) fade it out evenly; @p local is the polygon
+        /// in the mesh's plane.
+        void Feathered(Mesh& out, const std::vector<P2>& local, float feather)
+        {
+            struct Tri
+            {
+                V3    w[3];
+                float d[3];
+                int   depth;
+            };
+            const auto distance = [&](V3 w) {
+                const V3 p = InPlane(out, w);
+                return static_cast<float>(BorderDistance(local, p.x, p.y));
+            };
+            const double finest = std::max(static_cast<double>(feather), 0.5);
+            std::vector<V3> source;
+            source.swap(out.triangles);
+            out.edge.clear();
+            std::vector<Tri> work;
+            for (size_t i = 0; i + 2 < source.size(); i += 3)
+            {
+                Tri t{{source[i], source[i + 1], source[i + 2]}, {}, 0};
+                for (int k = 0; k < 3; ++k) t.d[k] = distance(t.w[k]);
+                work.push_back(t);
+            }
+            const size_t budget = kMaxShapeVertices / 2;
+            while (!work.empty())
+            {
+                const Tri t = work.back();
+                work.pop_back();
+                double longest = 0.0;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const V3 a = t.w[k], b = t.w[(k + 1) % 3];
+                    longest    = std::max(longest, std::hypot(static_cast<double>(b.x - a.x), static_cast<double>(b.y - a.y)));
+                }
+                const float nearest = std::min({t.d[0], t.d[1], t.d[2]});
+                if (t.depth < 6 && longest > finest && nearest < feather && out.triangles.size() + 3 * work.size() + 12 < budget)
+                {
+                    V3    m[3];
+                    float md[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const V3 a = t.w[k], b = t.w[(k + 1) % 3];
+                        m[k]       = V3{0.5f * (a.x + b.x), 0.5f * (a.y + b.y), 0.5f * (a.z + b.z)};
+                        md[k]      = distance(m[k]);
+                    }
+                    work.push_back(Tri{{t.w[0], m[0], m[2]}, {t.d[0], md[0], md[2]}, t.depth + 1});
+                    work.push_back(Tri{{m[0], t.w[1], m[1]}, {md[0], t.d[1], md[1]}, t.depth + 1});
+                    work.push_back(Tri{{m[2], m[1], t.w[2]}, {md[2], md[1], t.d[2]}, t.depth + 1});
+                    work.push_back(Tri{{m[0], m[1], m[2]}, {md[0], md[1], md[2]}, t.depth + 1});
+                    continue;
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    out.triangles.push_back(t.w[k]);
+                    out.edge.push_back(t.d[k]);
+                }
+            }
+        }
+    }
+
     bool Build(const Desc& d, Parts parts, Ground* ground, Mesh& out, std::string* why)
     {
         out.Clear();
         out.ground = IsGround(d.kind) || (d.kind == kLine && (d.flags & kOnGround));
         out.middle = d.center;
+        out.origin = d.center;
+        out.turn   = d.facing;
+        out.plane  = Mesh::Plane{};
         if (std::string refusal = Validate(d); !refusal.empty())
         {
             if (why) *why = refusal;
@@ -569,11 +684,14 @@ namespace wxl::gx::shapes
         {
             std::vector<V3> pts(d.points.size());
             for (size_t i = 0; i < pts.size(); ++i) pts[i] = Add(c, d.points[i]);
-            if (parts.lines) Polyline(pts, (d.flags & kClosed) != 0, lay, out.lines);
+            if (parts.lines) Polyline(pts, (d.flags & kClosed) != 0, lay, out.lines, &d.alphas, true);
             break;
         }
         case kCircle:
         {
+            out.plane.radius = out.plane.extent = d.radius;
+            out.plane.min_x = out.plane.min_y = -d.radius;
+            out.plane.max_x = out.plane.max_y = d.radius;
             const float tau = static_cast<float>(2.0 * kPi);
             Arc(c, d.radius, 0.0f, tau, ArcSegments(d.radius, tau), loop);
             loop.pop_back();
@@ -586,6 +704,11 @@ namespace wxl::gx::shapes
         {
             const bool  whole = d.kind == kRing || d.angle >= static_cast<float>(2.0 * kPi) - 1e-4f;
             const float span  = whole ? static_cast<float>(2.0 * kPi) : d.angle;
+            out.plane.radius = out.plane.extent = d.radius;
+            out.plane.inner      = d.inner;
+            out.plane.half_angle = whole ? 4.0f : 0.5f * span;
+            out.plane.min_x = out.plane.min_y = -d.radius;
+            out.plane.max_x = out.plane.max_y = d.radius;
             const float from  = whole ? 0.0f : d.facing - 0.5f * span;
             const uint32_t n  = ArcSegments(d.radius, span);
             std::vector<V3> outer, inner;
@@ -641,6 +764,14 @@ namespace wxl::gx::shapes
                 return V3{c.x + along * cf - across * sf, c.y + along * sf + across * cf, c.z};
             };
             const float hx = 0.5f * d.size.x, hy = 0.5f * d.size.y;
+            out.plane.code   = 1;
+            out.plane.hx     = hx;
+            out.plane.hy     = hy;
+            out.plane.extent = std::sqrt(hx * hx + hy * hy);
+            out.plane.min_x  = -hx;
+            out.plane.max_x  = hx;
+            out.plane.min_y  = -hy;
+            out.plane.max_y  = hy;
             loop = {at(hx, hy), at(-hx, hy), at(-hx, -hy), at(hx, -hy)};
             fill(Plane(loop));
             if (!parts.lines) break;
@@ -667,6 +798,21 @@ namespace wxl::gx::shapes
         case kPolygon:
         {
             for (const V3& p : d.points) loop.push_back(V3{c.x + p.x, c.y + p.y, c.z});
+            // Its own plane: the points turned by -facing, its bounds there.
+            const double    cf = std::cos(d.facing), sf = std::sin(d.facing);
+            std::vector<P2> local(d.points.size());
+            out.plane.code = 2;
+            for (size_t i = 0; i < d.points.size(); ++i)
+            {
+                const V3 p = d.points[i];
+                local[i]   = P2{p.x * cf + p.y * sf, -p.x * sf + p.y * cf};
+                const float lx = static_cast<float>(local[i].x), ly = static_cast<float>(local[i].y);
+                out.plane.min_x  = i ? std::min(out.plane.min_x, lx) : lx;
+                out.plane.max_x  = i ? std::max(out.plane.max_x, lx) : lx;
+                out.plane.min_y  = i ? std::min(out.plane.min_y, ly) : ly;
+                out.plane.max_y  = i ? std::max(out.plane.max_y, ly) : ly;
+                out.plane.extent = std::max(out.plane.extent, std::sqrt(lx * lx + ly * ly));
+            }
             if (parts.fill)
             {
                 const std::vector<P2> plane = Plane(loop);
@@ -678,6 +824,7 @@ namespace wxl::gx::shapes
                     return false;
                 }
                 for (size_t i = 0; i + 2 < tris.size(); i += 3) fill({plane[tris[i]], plane[tris[i + 1]], plane[tris[i + 2]]});
+                if (parts.feather > 0.0f) Feathered(out, local, parts.feather);
             }
             outline(loop, true);
             break;
@@ -806,6 +953,18 @@ namespace wxl::gx::shapes
         return static_cast<uint8_t>(std::lround(pixels * 8.0f));
     }
 
+    uint8_t SoftCode(float pixels)
+    {
+        if (!(pixels > 0.0f)) return 0;
+        return static_cast<uint8_t>(std::min<long>(std::lround(std::min(pixels, kMaxSoftness) * 4.0f), 63));
+    }
+
+    int8_t OffsetCode(float pixels)
+    {
+        if (!std::isfinite(pixels)) return 0;
+        return static_cast<int8_t>(std::clamp<long>(std::lround(std::clamp(pixels, -kMaxShadowOffset, kMaxShadowOffset) * 2.0f), -32, 31));
+    }
+
     namespace
     {
         void Set(Vertex& v, V3 p, V3 o, V3 eye, uint32_t color, uint8_t side, uint8_t end, uint8_t width, uint8_t flags)
@@ -841,6 +1000,49 @@ namespace wxl::gx::shapes
         out.push_back(q[3]);
     }
 
+    void PushSegment(std::vector<Vertex>& out, const Mesh::Segment& s, V3 eye, const LineLook& look, bool lift)
+    {
+        // Each end's colour: the look's alpha times the end's opacity and, along a line, the
+        // opacity from its start to its end.
+        const auto at = [&](float alpha, float t) {
+            float m = alpha;
+            if (t >= 0.0f) m *= look.alpha_start + (look.alpha_end - look.alpha_start) * t;
+            const float    a = static_cast<float>(look.color >> 24) * std::clamp(m, 0.0f, 1.0f);
+            return (static_cast<uint32_t>(std::lround(a)) << 24) | (look.color & 0xFFFFFFu);
+        };
+        const uint32_t ca = at(s.alpha_a, s.t_a), cb = at(s.alpha_b, s.t_b);
+        const uint8_t  l  = lift ? 1 : 0;
+        const uint8_t  soft = static_cast<uint8_t>(std::min<uint32_t>(look.soft, 63u) << 2);
+        const uint8_t  fa = static_cast<uint8_t>(l + (s.cap_a ? 2 : 0) + soft), fb = static_cast<uint8_t>(l + (s.cap_b ? 2 : 0) + soft);
+        const uint8_t  dy = static_cast<uint8_t>((static_cast<uint8_t>(look.down) & 63u) << 2);
+        const uint8_t  dx = static_cast<uint8_t>((static_cast<uint8_t>(look.right) & 63u) << 1);
+        Vertex         q[4];
+        Set(q[0], s.a, s.b, eye, ca, static_cast<uint8_t>(0 | dy), static_cast<uint8_t>(0 | dx), look.width, fa);
+        Set(q[1], s.b, s.a, eye, cb, static_cast<uint8_t>(0 | dy), static_cast<uint8_t>(1 | dx), look.width, fb);
+        Set(q[2], s.b, s.a, eye, cb, static_cast<uint8_t>(2 | dy), static_cast<uint8_t>(1 | dx), look.width, fb);
+        Set(q[3], s.a, s.b, eye, ca, static_cast<uint8_t>(2 | dy), static_cast<uint8_t>(0 | dx), look.width, fa);
+        out.push_back(q[0]);
+        out.push_back(q[1]);
+        out.push_back(q[2]);
+        out.push_back(q[0]);
+        out.push_back(q[2]);
+        out.push_back(q[3]);
+    }
+
+    void PushSurfaceTriangle(std::vector<Vertex>& out, const V3 world[3], const V3 plane[3], V3 eye, uint32_t color, bool lift)
+    {
+        const uint8_t l = lift ? 1 : 0;
+        for (int k = 0; k < 3; ++k)
+        {
+            Vertex v;
+            Set(v, world[k], eye, eye, color, 1, 0, 0, l);
+            v.other[0] = plane[k].x;
+            v.other[1] = plane[k].y;
+            v.other[2] = plane[k].z;
+            out.push_back(v);
+        }
+    }
+
     void PushTriangle(std::vector<Vertex>& out, V3 a, V3 b, V3 c, V3 eye, uint32_t color, bool lift)
     {
         const uint8_t l = lift ? 1 : 0;
@@ -870,7 +1072,12 @@ namespace wxl::gx::shapes
     void Project(const float k[24], const Vertex& vx, float out[4])
     {
         // The program's arithmetic, line for line (shaders/draw.hlsl, glsl/draw.vert).
-        const float lift = static_cast<float>(vx.flags & 1), cap = static_cast<float>(vx.flags >> 1);
+        const float w    = static_cast<float>(vx.flags);
+        const float lift = std::fmod(w, 2.0f), cap = std::fmod(std::floor(w * 0.5f), 2.0f), soft = std::floor(w * 0.25f);
+        const float sx = static_cast<float>(vx.side), ex = static_cast<float>(vx.end);
+        float       downCode = std::floor(sx * 0.25f), rightCode = std::floor(ex * 0.5f);
+        downCode  = downCode >= 32.0f ? downCode - 64.0f : downCode;
+        rightCode = rightCode >= 32.0f ? rightCode - 64.0f : rightCode;
         auto lifted = [&](const float* p) {
             V3          v{p[0], p[1], p[2]};
             const float d    = Length(v);
@@ -883,7 +1090,7 @@ namespace wxl::gx::shapes
         float a[4], b[4];
         clip(lifted(vx.pos), a);
         clip(lifted(vx.other), b);
-        const float side = static_cast<float>(vx.side) - 1.0f;
+        const float side = std::fmod(sx, 4.0f) - 1.0f;
         if (side != 0.0f)
         {
             float a0[4], b0[4];
@@ -915,13 +1122,135 @@ namespace wxl::gx::shapes
                 dx = 1.0f;
                 dy = 0.0f;
             }
-            const float along = 1.0f - 2.0f * static_cast<float>(vx.end); // d along the segment, first to second end
+            const float along = 1.0f - 2.0f * std::fmod(ex, 2.0f); // d along the segment, first to second end
             const float nx = -dy * along, ny = dx * along;
-            const float half = static_cast<float>(vx.width) * k[18];
+            const float half = static_cast<float>(vx.width) * k[18] + 2.0f * soft * k[18];
             const float ox = (nx * side - dx * cap) * half, oy = (ny * side - dy * cap) * half;
             a[0] += ox / hw * wa;
             a[1] += oy / hh * wa;
         }
+        // A shadow's move on the screen, in half pixels at 1080 lines (y down).
+        const float hw = 0.5f * k[16], hh = 0.5f * k[17];
+        a[0] += rightCode * 8.0f * k[18] / hw * a[3];
+        a[1] -= downCode * 8.0f * k[18] / hh * a[3];
         std::memcpy(out, a, sizeof a);
+    }
+
+    // --- Surfaces ------------------------------------------------------------------------------------
+
+    SurfaceConstants MakeSurface(const Mesh& mesh, const SurfaceLook& look)
+    {
+        SurfaceConstants out;
+        const Mesh::Plane& pl = mesh.plane;
+        const double       sx = look.size_x > 0.0f ? look.size_x : 1.0, sy = look.size_y > 0.0f ? look.size_y : 1.0;
+        const double       cr = std::cos(look.rotation), sr = std::sin(look.rotation);
+        // p = A (x, y) + B: the picture's frame before its turn and size (s to the right, t down).
+        double A[2][2], B[2], O[2];
+        if (look.uv == kUvWorld)
+        {
+            // East and south of the world's origin, in yards: s = -world y, t = -world x.
+            const double cf = std::cos(mesh.turn), sf = std::sin(mesh.turn);
+            A[0][0] = -sf, A[0][1] = -cf, B[0] = -static_cast<double>(mesh.origin.y);
+            A[1][0] = -cf, A[1][1] = sf, B[1] = -static_cast<double>(mesh.origin.x);
+            O[0] = look.offset_x, O[1] = look.offset_y;
+        }
+        else
+        {
+            // Across the bounds from their left (the shape's right is its plane's -y) and top (+x),
+            // around their middle.
+            const double wx = std::max(1e-6, static_cast<double>(pl.max_x) - pl.min_x), wy = std::max(1e-6, static_cast<double>(pl.max_y) - pl.min_y);
+            A[0][0] = 0.0, A[0][1] = -1.0 / wy, B[0] = pl.max_y / wy - 0.5;
+            A[1][0] = -1.0 / wx, A[1][1] = 0.0, B[1] = pl.max_x / wx - 0.5;
+            O[0] = 0.5 + look.offset_x, O[1] = 0.5 + look.offset_y;
+        }
+        // q = M p + O: turned counter-clockwise as seen from above, one picture per size.
+        const double M[2][2] = {{cr / sx, -sr / sx}, {sr / sy, cr / sy}};
+        for (int r = 0; r < 2; ++r)
+        {
+            double x = M[r][0] * A[0][0] + M[r][1] * A[1][0];
+            double y = M[r][0] * A[0][1] + M[r][1] * A[1][1];
+            double c = M[r][0] * B[0] + M[r][1] * B[1] + O[r];
+            if (Repeats(look.uv)) c -= std::floor(c); // a whole picture changes nothing where it repeats
+            out.k[r][0] = static_cast<float>(x);
+            out.k[r][1] = static_cast<float>(y);
+            out.k[r][2] = static_cast<float>(c);
+        }
+        out.k[2][0] = look.right > 0.0f ? std::min(look.right, 1.0f) : 1.0f;
+        out.k[2][1] = look.bottom > 0.0f ? std::min(look.bottom, 1.0f) : 1.0f;
+        out.k[2][2] = Repeats(look.uv) ? 1.0f : 0.0f;
+        out.k[2][3] = look.textured ? 1.0f : 0.0f;
+        out.k[3][0] = static_cast<float>(pl.code);
+        out.k[3][1] = pl.radius;
+        out.k[3][2] = pl.inner;
+        out.k[3][3] = std::max(look.feather, 0.0f);
+        out.k[4][0] = pl.half_angle;
+        out.k[4][1] = pl.hx;
+        out.k[4][2] = pl.hy;
+        out.k[4][3] = look.radial > 0.0f ? 1.0f - std::min(look.radial, 1.0f) : 2.0f;
+        out.k[5][0] = 1.0f / std::max(pl.extent, 1e-4f);
+        out.k[5][1] = look.blend == kBlendModulate ? 1.0f : 0.0f;
+        return out;
+    }
+
+    namespace
+    {
+        float Saturate(float x) { return std::min(std::max(x, 0.0f), 1.0f); }
+        float Smooth(float t) { return t * t * (3.0f - 2.0f * t); }
+    }
+
+    void Picture(const SurfaceConstants& s, float x, float y, float out[2])
+    {
+        // The pixel programs' arithmetic (draw.hlsl SurfacePs, draw_surface.frag).
+        const float u = s.k[0][0] * x + s.k[0][1] * y + s.k[0][2];
+        const float v = s.k[1][0] * x + s.k[1][1] * y + s.k[1][2];
+        if (s.k[2][2] > 0.5f)
+        {
+            out[0] = (u - std::floor(u)) * s.k[2][0];
+            out[1] = (v - std::floor(v)) * s.k[2][1];
+        }
+        else
+        {
+            out[0] = Saturate(u) * s.k[2][0];
+            out[1] = Saturate(v) * s.k[2][1];
+        }
+    }
+
+    void Shade(const SurfaceConstants& s, V3 plane, const float color[4], const float texel[4], float out[4])
+    {
+        // The pixel programs' arithmetic, line for line.
+        const float x = plane.x, y = plane.y;
+        const float r = std::sqrt(x * x + y * y);
+        float       d;
+        if (s.k[3][0] < 0.5f)
+        {
+            d = s.k[3][1] - r;
+            if (s.k[3][2] > 0.0f) d = std::min(d, r - s.k[3][2]);
+            if (s.k[4][0] < 3.14159265f)
+            {
+                const float diff = s.k[4][0] - std::atan2(std::fabs(y), x);
+                d                = std::min(d, diff < 1.57079633f ? r * std::sin(diff) : r);
+            }
+        }
+        else if (s.k[3][0] < 1.5f)
+            d = std::min(s.k[4][1] - std::fabs(x), s.k[4][2] - std::fabs(y));
+        else
+            d = plane.z;
+        const float edge = s.k[3][3] > 0.0f ? Smooth(Saturate(d / s.k[3][3])) : 1.0f;
+        float       fade = 1.0f;
+        if (s.k[4][3] < 1.5f) fade = 1.0f - Smooth(Saturate((r * s.k[5][0] - s.k[4][3]) / std::max(1.0f - s.k[4][3], 1e-4f)));
+        const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const float* t     = s.k[2][3] > 0.5f ? texel : one;
+        const float  a     = color[3] * t[3] * edge * fade;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float c = color[i] * t[i];
+            out[i]        = s.k[5][1] > 0.5f ? 1.0f + (c - 1.0f) * a : c;
+        }
+        out[3] = a;
+    }
+
+    float LineCoverage(float across, float half_width, float soft)
+    {
+        return soft > 0.0f ? Saturate((half_width - std::fabs(across)) / soft) : 1.0f;
     }
 }

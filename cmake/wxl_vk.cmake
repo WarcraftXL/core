@@ -132,7 +132,8 @@ wxl_vk_glsl(wxl-vk-render-programs "${WXL_VK_RENDER_SPIRV_DIR}"
     highlight_blur_frag=highlight_blur.frag
     highlight_composite_frag=highlight_composite.frag
     draw_vert=draw.vert
-    draw_frag=draw.frag)
+    draw_frag=draw.frag
+    draw_surface_frag=draw_surface.frag)
 add_library(wxl-vk-render STATIC
     "${WXL_VK_ROOT}/src/gx/vk/render/Render.cpp"
     "${WXL_VK_ROOT}/src/gx/vk/render/Highlight.cpp"

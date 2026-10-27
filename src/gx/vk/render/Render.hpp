@@ -57,6 +57,10 @@ namespace wxl::vk::render
         /// The runtime's own, past what mods name: the colour blended by its alpha, the target's
         /// alpha kept (wxl.draw, as Direct3D 9's COLORWRITEENABLE without alpha).
         kBlendAlphaKeepAlpha,
+        /// The colour times its alpha added, the target's alpha kept (wxl.draw's ADD).
+        kBlendAddKeepAlpha,
+        /// The target's colour multiplied by the colour, its alpha kept (wxl.draw's MODULATE).
+        kBlendMultiplyKeepAlpha,
     };
     enum DepthTest : uint32_t
     {

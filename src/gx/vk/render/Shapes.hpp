@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// wxl.draw's shapes on the Vulkan renderer, made of wxl.render's pieces: two GRAPHICS pipelines of
-// the runtime's own (glsl/draw.vert and draw.frag; the one tested against the scene's depth, the
-// other on top), the frame's vertices written into the frame's memory and read by address, one
-// pass onto the scene's colour against its depth, with the viewport and the depth range the world
-// was drawn with. The same vertices and the same arithmetic as the Direct3D 9 passes
-// (gx/d3d9/Shapes.cpp). Portable: no runtime, no Windows; the native tests draw it on lavapipe.
+// wxl.draw's shapes on the Vulkan renderer, made of wxl.render's pieces: GRAPHICS pipelines of the
+// runtime's own (glsl/draw.vert with draw.frag for lines and plain insides, with
+// draw_surface.frag for surfaces in each of their three blends; each tested against the scene's
+// depth or on top), made when first drawn with; the frame's vertices and each surface's numbers
+// written into the frame's memory and read by address, a surface's picture read through the
+// bindless table; one pass onto the scene's colour against its depth, with the viewport and the
+// depth range the world was drawn with. The same vertices and the same arithmetic as the
+// Direct3D 9 passes (gx/d3d9/Shapes.cpp). Portable: no runtime, no Windows; the native tests draw
+// it on lavapipe.
 
 #pragma once
 
@@ -50,11 +53,18 @@ namespace wxl::vk::render
         uint32_t Draw(const gx::shapes::Vertex* vertices, uint32_t tested, uint32_t on_top, const float constants[24],
                       const float viewport[6], std::string* why = nullptr);
 
+        /**
+         * @brief Draws @p runs of @p vertices in their order, each with its program, blend and
+         *        depth test; a surface's run reads @p surfaces[run.surface], its texture a
+         *        draw::Texture* of the renderer (null: untextured).
+         */
+        uint32_t Draw(const gx::shapes::Vertex* vertices, const gx::shapes::Run* runs, uint32_t run_count,
+                      const gx::shapes::Surface* surfaces, const float constants[24], const float viewport[6], std::string* why = nullptr);
+
     private:
-        bool Make(std::string* why);
+        Pipeline* PipelineFor(uint8_t program, uint8_t blend, bool on_top, std::string* why);
 
         Render*   render_ = nullptr;
-        Pipeline* tested_ = nullptr;
-        Pipeline* top_ = nullptr;
+        Pipeline* pipelines_[2][3][2] = {}; ///< by program, blend (a surface's), on top
     };
 }
