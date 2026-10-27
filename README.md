@@ -183,14 +183,14 @@ cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test
    beside it, and `WarcraftXL.ini` sets its level (the SDK's `docs/the-log.md`) and turns the
    Tracy profiler on, off by default (`[profile]`, the SDK's `docs/profiling.md`).
    `python3 tools/read_logs.py <game folder>` summarises the last launches.
-6. Optionally, Vulkan: `[gx] api = vulkan` in `WarcraftXL.ini` makes the Vulkan device beside the
-   client's own D3D9 one once it is up, and logs which GPU it took and what it offers, or why the
-   machine has none (no loader, a driver below Vulkan 1.3, a missing feature). The stock client is
-   not drawn through Vulkan yet: the device is released and the client renders through D3D9 as
-   before. `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
+6. Optionally, Vulkan: `[gx] api = vulkan` in `WarcraftXL.ini` draws the stock client through the
+   runtime's Vulkan renderer in place of Direct3D 9, and logs which GPU it took and what it
+   offers. When the machine has none (no 32-bit loader or driver, a driver below Vulkan 1.3, a
+   missing feature) one line says what is missing and the client renders through D3D9 as before.
+   `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
    or a part of the name>` picks the device on a machine with several; `frames_in_flight = 1..3`
    (2), `present_filter = linear|nearest` (linear) and `async_pipelines = 0|1` (1: a draw whose
-   pipeline is still compiling is left out rather than waited for) serve the recompiled client.
+   pipeline is still compiling is left out rather than waited for) serve both clients.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own
