@@ -699,6 +699,9 @@ GROUND_TRUTH = {
     "GameUI.SendTarget":               ("0x00518DC0", "cdecl", [], 2),
     "GameUI.ClearTarget":              ("0x005241B0", "cdecl", [], 3),
     "MapArea.PrepareChunk":            ("0x007D6B30", "thiscall", ["ecx"], 2),
+    # CMapChunk::Purge moves ECX to EDI (0x007C3377), reads no stack and ends in a bare `ret`
+    # (0x007C35CE).
+    "MapChunk.Purge":                  ("0x007C3370", "thiscall", ["ecx"], 0),
     "FrameScript.Initialize":          ("0x00819BB0", "cdecl", [], 1),
     "FrameScript.Destroy":             ("0x0081A9A0", "cdecl", [], 0),
     "FrameScript.CreateEvents":        ("0x0081B5F0", "cdecl", [], 2),
@@ -911,6 +914,8 @@ GROUND_TRUTH = {
     # [ebp+0x10]) and six dwords (the doodad set a word at [ebp+0x1C]) and each ends in a bare
     # `ret` (0x007BEF31, 0x007BECC9, 0x007BF11F).
     "Map.AllocDoodadDef":              ("0x007C01F0", "cdecl", [], 0),
+    # CMap::Unload reads no stack and ends in a bare `ret` (0x007C39F9).
+    "Map.Unload":                      ("0x007C3830", "cdecl", [], 0),
     "Map.CreateDoodadDef":             ("0x007BECD0", "cdecl", [], 3),
     "Map.CreateDoodadDefAt":           ("0x007BEB40", "cdecl", [], 4),
     "Map.CreateDoodadDefInMapObj":     ("0x007BEF40", "cdecl", [], 6),
@@ -1026,6 +1031,15 @@ GROUND_TRUTH = {
     "TextureCall.CreateTexture":       ("0x004E8D30", "cdecl", [], 2),
     "TextureCall.GetGlobalStatusObj":  ("0x0047C090", "cdecl", [], 0),
     "TextureCall.HandleClose":         ("0x0047BF30", "cdecl", [], 1),
+    # wxl.terrain's calls (calls_x86.def), read by hand: CreateBounds writes through ECX
+    # (0x007C5244) and ends in a bare `ret` (0x007C543A); AddBatch moves ECX to ESI (0x007B7AFF),
+    # reads [ebp+8] to [ebp+0x14] and ends `ret 0x10` (0x007B7BC9); FreeInst reads [ebp+8]
+    # (0x007B396B) and ends in a bare `ret` (0x007B3986); OnFallLocal reads [ebp+8] (0x006ECCF3),
+    # moves ECX to ESI (0x006ECCFA) and ends `ret 4` (0x006ECD46).
+    "TerrainCall.CreateBounds":        ("0x007C5220", "thiscall", ["ecx"], 0),
+    "TerrainCall.AddBatch":            ("0x007B7AF0", "thiscall", ["ecx"], 4),
+    "TerrainCall.FreeInst":            ("0x007B3960", "cdecl", [], 1),
+    "TerrainCall.OnFallLocal":         ("0x006ECCF0", "thiscall", ["ecx"], 1),
     # wxl.cvar's calls (calls_x86.def), read by hand: Lookup reads its name at [ebp+8]
     # (0x00767443) and ends in bare `ret`s (0x00767456); Register reads up to its ninth dword
     # at [ebp+0x28] (0x00768068) and ends in bare `ret`s (0x00768085, 0x007681E0); Set moves ECX

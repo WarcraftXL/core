@@ -31,6 +31,7 @@
 #include "services/TextureService.hpp"
 #include "imaging/Imaging.hpp"
 #include "services/CVarService.hpp"
+#include "services/TerrainService.hpp"
 #include <imgui.h>
 #include <implot.h>
 #include "services/DataService.hpp"
@@ -61,6 +62,7 @@
 #include "wxl/core/filestack.hpp"
 #include "wxl/services/script.h"
 #include "wxl/services/storage.h"
+#include "wxl/terrain/grid.hpp"
 
 #if defined(_M_IX86)
     #include "binding/CallX86.hpp"
@@ -164,6 +166,65 @@ namespace
         uint32_t money          = 0; ///< the local block's coinage
         std::vector<uint32_t> block; ///< the descriptor block, empty for none
     };
+
+    /// The map's ground as wxl.terrain's rows read it: a block of 3 x 3 chunks, columns 500-502
+    /// and rows 600-602, flat at 100 yards, normals up as a map file has them, one hole.
+    struct FakeChunk
+    {
+        int32_t  cx = 0, cy = 0;
+        float    heights[wxl::terrain::kVertexCount]{};
+        int8_t   normals[wxl::terrain::kVertexCount * 3]{};
+        float    base   = 100.0f;
+        uint32_t holes  = 0;
+        bool     loaded = true;
+        int      rebuilds = 0;
+        int      clutterFreed = 0;
+
+        void Reset()
+        {
+            for (uint32_t i = 0; i < wxl::terrain::kVertexCount; ++i)
+            {
+                heights[i]         = 0.0f;
+                normals[3 * i]     = 0;
+                normals[3 * i + 1] = 0;
+                normals[3 * i + 2] = 127;
+            }
+        }
+    };
+    FakeChunk g_ground[9];
+    bool      g_groundPresent = false;
+    int       g_groundForgets = 0;
+    int       g_groundFalls   = 0;
+
+    FakeChunk* GroundChunk(int32_t cx, int32_t cy)
+    {
+        if (cx < 500 || cx > 502 || cy < 600 || cy > 602) return nullptr;
+        FakeChunk& chunk = g_ground[(cy - 600) * 3 + (cx - 500)];
+        return chunk.loaded ? &chunk : nullptr;
+    }
+
+    wxl_bool WXL_CALL FakeTerrainPresent(void) { return g_groundPresent ? WXL_TRUE : WXL_FALSE; }
+    void* WXL_CALL FakeTerrainChunk(int32_t cx, int32_t cy) { return GroundChunk(cx, cy); }
+    wxl_bool WXL_CALL FakeTerrainView(void* chunk, wxl_core_terrain_chunk* out)
+    {
+        FakeChunk* c = static_cast<FakeChunk*>(chunk);
+        if (!c || !out) return WXL_FALSE;
+        out->chunk_x = c->cx;
+        out->chunk_y = c->cy;
+        out->heights = c->heights;
+        out->normals = c->normals;
+        out->base_z  = c->base;
+        out->holes   = c->holes;
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeTerrainRebuild(void* chunk, wxl_bool doodads)
+    {
+        FakeChunk* c = static_cast<FakeChunk*>(chunk);
+        ++c->rebuilds;
+        if (doodads) ++c->clutterFreed;
+    }
+    void WXL_CALL FakeForgetCollision(void) { ++g_groundForgets; }
+    void WXL_CALL FakeFallLocal(const void*) { ++g_groundFalls; }
 
     /// A terrain click and a sprite click, as the GameUI rows read them.
     struct FakeTerrainClick
@@ -2247,6 +2308,12 @@ namespace
         init.group_invite_answer    = &FakeGroupAnswer;
         init.resurrect_answer       = &FakeResurrectAnswer;
         init.duel_answer            = &FakeDuelAnswer;
+        init.terrain_present        = &FakeTerrainPresent;
+        init.terrain_chunk          = &FakeTerrainChunk;
+        init.terrain_chunk_view     = &FakeTerrainView;
+        init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
+        init.terrain_forget_collision = &FakeForgetCollision;
+        init.unit_fall_local        = &FakeFallLocal;
         return init;
     }
 }
@@ -3559,6 +3626,256 @@ namespace
         Check(g_received.empty(), "writes made while nobody listened are not noted");
 
         wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+    }
+
+    /// wxl.terrain over the fake ground: reads, edits with their copies across edges, normals,
+    /// owners and layers, the drawing's rebuilds inside and outside the world pass, a chunk read
+    /// again from the disk, the fall of a player standing still, refusals, the map unloading.
+    void CheckTerrainService()
+    {
+        namespace grid = wxl::terrain;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        for (int32_t y = 0; y < 3; ++y)
+            for (int32_t x = 0; x < 3; ++x)
+            {
+                FakeChunk& chunk = g_ground[y * 3 + x];
+                chunk.cx = 500 + x;
+                chunk.cy = 600 + y;
+                chunk.Reset();
+            }
+        g_ground[6].holes = 1u; // chunk (500, 602), cells (0-1, 0-1)
+        g_mapId           = 0;
+        constexpr wxl::host::ModHost::ModToken kMod = 21, kOther = 22;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+
+        const auto at = [](int32_t cx, int32_t cy, uint32_t i) { return grid::VertexPlane(cx, cy, i); };
+        const auto heightAt = [&](grid::Point2 p, bool original) {
+            double z = -1.0;
+            return api.height(p.x, p.y, original ? WXL_TRUE : WXL_FALSE, &z) == WXL_TRUE ? z : -1.0;
+        };
+        const auto rel = [](int32_t cx, int32_t cy, uint32_t i) { return GroundChunk(cx, cy)->heights[i]; };
+        const auto near = [](double a, double b) { return std::fabs(a - b) < 0.01; };
+        const auto up = [](int32_t cx, int32_t cy, uint32_t i) { return GroundChunk(cx, cy)->normals[3 * i + 2] == 127; };
+        const wxl_terrain_height lower{501, 601, grid::OuterIndex(0, 0), 90.0f};
+
+        // No ground: out of the world, or a map without terrain.
+        g_groundPresent = false;
+        Check(api.set_heights(&lower, 1, 0) == WXL_E_UNSUPPORTED && heightAt(at(501, 601, 50), false) < 0.0,
+              "terrain: without ground an edit is unsupported and no height answers");
+        g_groundPresent = true;
+
+        // Reads.
+        const grid::Point2 inner = at(501, 601, grid::InnerIndex(4, 4));
+        Check(near(heightAt(inner, false), 100.0) && api.presence(inner.x, inner.y) == WXL_TERRAIN_GROUND,
+              "terrain: the height of flat ground, and ground there");
+        const grid::Point2 hole = at(500, 602, grid::InnerIndex(0, 1));
+        Check(api.presence(hole.x, hole.y) == WXL_TERRAIN_HOLE && heightAt(hole, false) < 0.0, "terrain: a hole has no height");
+        const grid::Point2 far = at(510, 601, 70);
+        Check(api.presence(far.x, far.y) == WXL_TERRAIN_NOT_LOADED && api.presence(20000.0, 0.0) == WXL_TERRAIN_NONE,
+              "terrain: a chunk not loaded, and off the map");
+        wxl_terrain_place place{};
+        place.struct_size = sizeof place;
+        Check(api.locate(inner.x, inner.y, &place) == WXL_TRUE && place.chunk_x == 501 && place.chunk_y == 601 &&
+                  place.cell_row == 4 && place.cell_col == 4 && place.nearest == grid::InnerIndex(4, 4) && place.loaded == WXL_TRUE,
+              "terrain: locate answers the chunk, the cell and the nearest vertex");
+        wxl_vec3 vertices[145];
+        Check(api.vertices(501, 601, WXL_FALSE, vertices, 145) == 145 && vertices[144].z == 100.0f &&
+                  near(vertices[144].x, at(501, 601, 144).x) && near(vertices[144].y, at(501, 601, 144).y) &&
+                  api.vertices(510, 601, WXL_FALSE, vertices, 145) == 0,
+              "terrain: a loaded chunk's 145 vertices, none of one not loaded");
+
+        // An edit of a corner vertex: the same ground in four chunks.
+        for (FakeChunk& c : g_ground) c.rebuilds = c.clutterFreed = 0;
+        g_groundForgets = 0;
+        Check(api.set_heights(&lower, 1, 0) == WXL_OK, "terrain: an edit is taken");
+        Check(rel(501, 601, 0) == -10.0f && rel(500, 601, grid::OuterIndex(0, 8)) == -10.0f &&
+                  rel(501, 600, grid::OuterIndex(8, 0)) == -10.0f && rel(500, 600, 144) == -10.0f,
+              "terrain: a corner vertex is set in the four chunks holding it, relative to each one's base");
+        Check(!up(501, 601, grid::OuterIndex(0, 1)) && !up(500, 600, grid::InnerIndex(7, 7)) && up(501, 601, grid::OuterIndex(4, 4)),
+              "terrain: the normals around it lean, across the edges, and the others keep the file's");
+        Check(GroundChunk(500, 600)->normals[3 * 144 + 2] == 127, "terrain: the vertex's own normal stays up at a symmetric dip");
+        Check(near(heightAt(at(501, 601, 0), false), 90.0) && near(heightAt(at(501, 601, 0), true), 100.0),
+              "terrain: the height follows, the original stays readable");
+        Check(g_ground[0].rebuilds == 1 && g_ground[1].rebuilds == 1 && g_ground[3].rebuilds == 1 && g_ground[4].rebuilds == 1 &&
+                  g_ground[4].clutterFreed == 1 && g_ground[8].rebuilds == 0 && g_groundForgets == 1,
+              "terrain: the client rebuilds the chunks reshaped, frees their clutter, and forgets the movement's facets");
+
+        // A region in world space: each vertex once, the corner of four chunks in its own chunk.
+        std::vector<wxl_terrain_vertex> region(64);
+        const grid::Point2 corner = at(501, 601, 0);
+        const uint32_t inCircle = api.vertices_in(corner.x, corner.y, 3.0, region.data(), 64);
+        int  corners = 0;
+        bool known   = true;
+        for (uint32_t i = 0; i < inCircle && i < 64; ++i)
+        {
+            const wxl_terrain_vertex& v = region[i];
+            if (std::fabs(v.x - corner.x) < 0.01f && std::fabs(v.y - corner.y) < 0.01f)
+            {
+                ++corners;
+                known = known && v.chunk_x == 501 && v.chunk_y == 601 && v.index == 0 && near(v.z, 90.0) &&
+                        near(v.original_z, 100.0) && v.loaded == WXL_TRUE && v.inner == WXL_FALSE;
+            }
+        }
+        Check(inCircle == 5 && corners == 1 && known && api.vertices_in(corner.x, corner.y, 3.0, nullptr, 0) == 5,
+              "terrain: vertices_in lists a circle's vertices once, the corner of four chunks in its own, with its height and original");
+        const grid::Point2 beyond = at(503, 601, 0);
+        std::vector<wxl_terrain_vertex> edge(32);
+        const uint32_t onEdge = api.vertices_in(beyond.x, beyond.y, 3.0, edge.data(), 32);
+        bool shared = false, away = false;
+        for (uint32_t i = 0; i < onEdge && i < 32; ++i)
+        {
+            shared = shared || (edge[i].chunk_x == 503 && edge[i].index == 0 && edge[i].loaded == WXL_TRUE && near(edge[i].z, 100.0));
+            away   = away || (edge[i].chunk_x == 503 && edge[i].index != 0 && edge[i].loaded == WXL_FALSE);
+        }
+        Check(shared && away, "terrain: a vertex shared with a loaded chunk reads its height there; one of a chunk not loaded says so");
+        Check(api.vertices_in(corner.x, corner.y, 200.0, nullptr, 0) == 0, "terrain: a radius beyond the limit is refused");
+
+        // Inside the world's drawing the clutter waits for its end.
+        wxl::core::services::terrain::WorldBegin();
+        const wxl_terrain_height again{501, 601, grid::InnerIndex(3, 3), 95.0f};
+        api.set_heights(&again, 1, 0);
+        const int freedInside = g_ground[4].clutterFreed;
+        wxl::core::services::terrain::WorldEnd();
+        Check(freedInside == 1 && g_ground[4].clutterFreed == 2, "terrain: clutter reshaped while the world is drawn is freed after it");
+
+        // A trace meets the edited ground.
+        wxl_terrain_hit hit{};
+        hit.struct_size = sizeof hit;
+        const grid::Point2 dip = at(501, 601, grid::InnerIndex(3, 3));
+        Check(api.trace(wxl_vec3{dip.x, dip.y, 200.0f}, wxl_vec3{dip.x, dip.y, 0.0f}, &hit) == WXL_TRUE &&
+                  std::fabs(hit.point.z - 95.0f) < 0.01f && hit.chunk_x == 501 && hit.chunk_y == 601 && hit.normal.z > 0.0f &&
+                  std::fabs(hit.fraction - 0.525f) < 0.001f,
+              "terrain: a trace meets the edited ground, with its chunk and an upward normal");
+        const grid::Point2 a = at(500, 601, 70), b = at(502, 601, 70);
+        Check(api.trace(wxl_vec3{a.x, a.y, 101.0f}, wxl_vec3{b.x, b.y, 99.0f}, &hit) == WXL_TRUE && hit.chunk_x == 501 &&
+                  std::fabs(hit.point.z - 100.0f) < 0.01f,
+              "terrain: a slanting trace across chunks meets the ground where it crosses it");
+        Check(api.trace(wxl_vec3{hole.x, hole.y, 200.0f}, wxl_vec3{hole.x, hole.y, 0.0f}, &hit) == WXL_FALSE,
+              "terrain: a trace goes through a hole");
+
+        // Owners: another mod's edit shows over this one's, and goes back to it.
+        g_host->SwapCurrentMod(kOther);
+        const wxl_terrain_height deeper{501, 601, grid::OuterIndex(0, 0), 80.0f};
+        api.set_heights(&deeper, 1, 0);
+        const double shown = heightAt(at(501, 601, 0), false);
+        Check(api.reset_chunk(501, 601, 0) == WXL_OK && near(heightAt(at(501, 601, 0), false), 90.0) && near(shown, 80.0),
+              "terrain: the newest edit shows; its reset gives the one before back");
+        g_host->SwapCurrentMod(kMod);
+        Check(api.reset_chunk(501, 601, 0) == WXL_OK && rel(500, 600, 144) == 0.0f && near(heightAt(at(501, 601, 0), false), 100.0),
+              "terrain: a chunk's reset takes the edge vertex off its neighbours too");
+        bool allUp = true;
+        for (const FakeChunk& c : g_ground)
+            for (uint32_t i = 0; i < 145; ++i) allUp = allUp && c.normals[3 * i] == 0 && c.normals[3 * i + 2] == 127;
+        Check(allUp, "terrain: with no edit left, every normal is the file's again");
+        Check(api.reset_chunk(501, 601, 0) == WXL_E_NOT_FOUND && api.reset_all(0) == WXL_E_NOT_FOUND,
+              "terrain: nothing to reset is not found");
+
+        // Layers.
+        const wxl_terrain_height one{502, 602, 70, 101.0f}, two{502, 602, 71, 102.0f};
+        api.set_heights(&one, 1, 1);
+        api.set_heights(&two, 1, 2);
+        Check(api.reset_all(1) == WXL_OK && rel(502, 602, 70) == 0.0f && rel(502, 602, 71) == 2.0f,
+              "terrain: a layer is reset alone");
+
+        // A chunk read again from the disk gets its edits back.
+        g_received.clear();
+        wxl::seam::MapChunk::Purge::Before(GroundChunk(502, 602));
+        const Received* gone = Only(WXL_EV_TerrainChunkUnloaded);
+        Check(gone && gone->As<wxl_terrain_chunk_state_args>().chunk_x == 502 && gone->As<wxl_terrain_chunk_state_args>().edited == WXL_TRUE,
+              "terrain: MapChunk.Purge raises TerrainChunkUnloaded, edited");
+        g_ground[8].Reset();
+        g_received.clear();
+        wxl_terrain_stats stats{};
+        stats.struct_size = sizeof stats;
+        api.stats(&stats);
+        const uint64_t reapplied = stats.reapplied;
+        wxl::seam::MapArea::PrepareChunk::After(GroundChunk(502, 602), nullptr, 2, 2);
+        const Received* back = Only(WXL_EV_TerrainChunkLoaded);
+        api.stats(&stats);
+        Check(rel(502, 602, 71) == 2.0f && !up(502, 602, 70) && back && back->As<wxl_terrain_chunk_state_args>().edited == WXL_TRUE &&
+                  stats.reapplied == reapplied + 1,
+              "terrain: MapArea.PrepareChunk After puts the edits back before TerrainChunkLoaded");
+        Check(near(heightAt(at(502, 602, 71), true), 100.0), "terrain: and the originals are what the disk had");
+
+        // A player standing still on the ground falls when it goes down; moving, or above it, not.
+        FakeObject me;
+        me.typeId = WXL_OBJECT_PLAYER;
+        const grid::Point2 feet = at(501, 601, grid::InnerIndex(5, 5));
+        me.position = wxl_vec3{feet.x, feet.y, 100.0f};
+        g_localPlayer = &me;
+        g_groundFalls = 0;
+        const wxl_terrain_height underfoot{501, 601, grid::InnerIndex(5, 5), 98.0f};
+        api.set_heights(&underfoot, 1, 0);
+        Check(g_groundFalls == 1, "terrain: a player standing on ground that goes down falls");
+        me.position.z     = 98.0f;
+        me.movementFlags  = 0x1u;
+        const wxl_terrain_height lowerStill{501, 601, grid::InnerIndex(5, 5), 96.0f};
+        api.set_heights(&lowerStill, 1, 0);
+        me.movementFlags = 0;
+        me.position.z    = 150.0f;
+        const wxl_terrain_height lowest{501, 601, grid::InnerIndex(5, 5), 94.0f};
+        api.set_heights(&lowest, 1, 0);
+        const wxl_terrain_height raise{501, 601, grid::InnerIndex(5, 5), 160.0f};
+        me.position.z = 94.0f;
+        api.set_heights(&raise, 1, 0);
+        Check(g_groundFalls == 1, "terrain: one moving, one on something above the ground, and ground raised start no fall");
+        g_localPlayer = nullptr;
+
+        // Refusals: nothing set.
+        const wxl_terrain_height bad[2] = {{501, 601, 3, 90.0f}, {501, 601, 145, 90.0f}};
+        const wxl_terrain_height nan{501, 601, 3, std::nanf("")};
+        Check(api.set_heights(bad, 2, 0) == WXL_E_INVALID && rel(501, 601, 3) == 0.0f && api.set_heights(&nan, 1, 0) == WXL_E_INVALID &&
+                  api.reset_chunk(-1, 0, 0) == WXL_E_INVALID,
+              "terrain: an entry off the grid or a height not a number refuses the whole edit");
+        wxl_terrain_hit unsized{};
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{0, 0, 1}, &unsized) == WXL_FALSE, "terrain: an answer without its struct_size is refused");
+
+        // The cost of an edit: a digging brush (about 5 yards: the vertices within it) and every
+        // vertex of the 3 x 3 chunks, with their normals and rebuilds.
+        std::vector<wxl_terrain_height> brush;
+        for (uint32_t i = 0; i < 145; ++i)
+        {
+            const grid::Point2 p = at(501, 601, i);
+            const float dx = p.x - feet.x, dy = p.y - feet.y;
+            if (dx * dx + dy * dy <= 25.0f) brush.push_back({501, 601, i, 97.0f});
+        }
+        uint32_t brushWorst = 0, brushTotal = 0;
+        for (int n = 0; n < 50; ++n)
+        {
+            for (auto& e : brush) e.height = 97.0f - 0.01f * n;
+            api.set_heights(brush.data(), static_cast<uint32_t>(brush.size()), 3);
+            api.stats(&stats);
+            brushTotal += stats.last_microseconds;
+            brushWorst = std::max(brushWorst, stats.last_microseconds);
+        }
+        std::vector<wxl_terrain_height> block;
+        for (int32_t cy = 600; cy <= 602; ++cy)
+            for (int32_t cx = 500; cx <= 502; ++cx)
+                for (uint32_t i = 0; i < 145; ++i) block.push_back({cx, cy, i, 99.0f + 0.001f * i});
+        api.set_heights(block.data(), static_cast<uint32_t>(block.size()), 3);
+        api.stats(&stats);
+        std::printf("  terrain: an edit of %zu vertices (a 5-yard brush) took %u us on average, %u at worst, over 50; "
+                    "all %zu vertices of 3 x 3 chunks %u us (%u written, %u chunks)\n",
+                    brush.size(), brushTotal / 50, brushWorst, block.size(), stats.last_microseconds, stats.last_vertices,
+                    stats.last_chunks);
+        Check(stats.last_chunks == 9 && stats.edited_chunks == 25,
+              "terrain: the block edit reshaped the nine chunks loaded, and holds the copies of its edge in the sixteen around");
+
+        // A mod that goes takes its edits; the map unloading drops all and says so.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        api.stats(&stats);
+        Check(stats.edited_chunks == 0 && rel(501, 601, 0) == 0.0f, "terrain: a mod's edits come off when it goes");
+        api.set_heights(&lower, 1, 0);
+        g_received.clear();
+        wxl::seam::Map::Unload::Before();
+        const Received* cleared = Only(WXL_EV_TerrainEditsCleared);
+        api.stats(&stats);
+        Check(cleared && cleared->As<wxl_terrain_cleared_args>().chunks == 4 && stats.edited_chunks == 0,
+              "terrain: Map.Unload drops every edit and raises TerrainEditsCleared with the chunks that had some");
+
+        g_host->SwapCurrentMod(previous);
+        g_groundPresent = false;
+        wxl::core::services::terrain::Clear();
     }
 
     /// MapArea: PrepareChunk's Before raises TerrainChunkBuild with the map, the tile and the chunk.
@@ -12814,6 +13131,7 @@ int main(int argc, char** argv)
     CheckWorldZoneMouseoverClick();
     CheckConsoleVar();
     CheckCVarService();
+    CheckTerrainService();
     CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();
     CheckGlue();
