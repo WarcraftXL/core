@@ -618,6 +618,18 @@ read through the client's own file layer (a file a mod serves is judged as serve
 load is not taken, so a stock tile is placed by the client's own call. The placements are read
 with binding `map_area_placements`.
 
+FileDataIDs (abi 0.1.46, the tile provider's `name_fn`): 8.1 and later name a tile's textures by
+id in `_tex0` (MDID in place of MTEX) and some placements' models in `_obj0` (MDDF flag 0x40, MODF
+flag 0x8, nameId the id). As the set is indexed, the runtime asks the providers to name each id:
+MDID's names are laid out as MTEX (a placeholder `FileDataID_<id>.blp` for one no one names, whose
+layers are then left out, as a layer of a texture the tile has not), and a placement by id gets
+its model's name appended to a copy of MMDX/MMID (MWMO/MWID), its nameId pointed at it and its
+flag cleared in the runtime's copy of `_obj0`, so the client reads it as a placement by name; one
+no one names keeps its flag and is left out. `wxl.modern-adt` names them from a listfile (`id;path`,
+the map's `World\Maps\<map>\listfile.csv` in the archives before the mod's own), indexed once
+into a sorted table kept in its `cache` folder by the CSV's hash, and reads a tile's files a WDT's
+MAID names by id when they are not under their usual names.
+
 ### Messages of a mod's own
 
 `wxl.net` (`src/services/NetService.cpp`) lets a mod claim opcode numbers and speak them with a
