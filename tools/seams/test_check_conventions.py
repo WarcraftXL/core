@@ -926,6 +926,11 @@ GROUND_TRUTH = {
     "M2.DrawBatch":                    ("0x008203B0", "thiscall", ["ecx"], 0),
     "M2.AnimateMT":                    ("0x0082F0F0", "thiscall", ["ecx"], 5),
     "M2.AnimateMTSimple":              ("0x0082E140", "thiscall", ["ecx"], 5),
+    # The model cache's animate worker: BeginThread `mov eax,[ebp+8]`, `mov edx,[ebp+0xc]` with
+    # `this` in ECX and `ret 8` (0x0081BFC1); WaitThread `add ecx, 0x100c` then a bare `ret`
+    # (0x0081BFDD).
+    "M2.BeginThread":                  ("0x0081BFA0", "thiscall", ["ecx"], 2),
+    "M2.WaitThread":                   ("0x0081BFD0", "thiscall", ["ecx"], 0),
     # The character appearance: AddItem(slot, rec, visual) `ret 0xc` (0x004F26C2), RemoveItem(slot)
     # `ret 4` (0x004EE53C); FreeComponent and RemoveVisuals are class statics reading [ebp+8] and
     # ending in a plain `ret` (0x004F16E7, 0x004EB060).
@@ -1047,6 +1052,9 @@ GROUND_TRUTH = {
     "M2Call.SetBoneSequence":          ("0x00832AB0", "thiscall", ["ecx"], 7),
     "M2Call.GetSequenceInfo":          ("0x0082CED0", "thiscall", ["ecx"], 3),
     "M2Call.SetAnimating":             ("0x00823F10", "thiscall", ["ecx"], 1),
+    # Called by the animate gates as CM2Scene::Animate calls them: see M2.AnimateMT above.
+    "M2Call.AnimateMT":                ("0x0082F0F0", "thiscall", ["ecx"], 5),
+    "M2Call.AnimateMTSimple":          ("0x0082E140", "thiscall", ["ecx"], 5),
     "M2Call.IsLoaded":                 ("0x00824F00", "thiscall", ["ecx"], 2),
     "M2Call.GetBoundingBox":           ("0x004F5E20", "thiscall", ["ecx"], 1),
     "M2Call.GetBoundingSphere":        ("0x004F5E80", "thiscall", ["ecx"], 1),
@@ -1485,6 +1493,21 @@ def main():
                "exit 1 naming 0x0069FED0", output[:600])
         report("a slot row popping less than the vtable's function is refused",
                "0x006A74B0 pops 8 byte(s), the row 4" in output, "the pops named", output[:600])
+
+    # The dropped calls: SMemReAlloc keeps _msize's answer (`mov [ebp+8], eax` at 0x0076E62A),
+    # so a row taking that call out is refused; so is a row at an address that is not the call.
+    with tempfile.TemporaryDirectory() as temp:
+        bad = Path(temp) / "drops_x86.def"
+        bad.write_text('WXL_DROP_CALL_X86(trim_alloc, "SMemReAlloc", 0x0076E61F, 0x004112F8, "_msize")\n'
+                       'WXL_DROP_CALL_X86(trim_alloc, "SMemAlloc", 0x0076E589, 0x004112F8, "_msize")\n', encoding="utf-8")
+        result = subprocess.run([sys.executable, "-I", str(CHECKER), "--binary", args.binary, "--drops", str(bad)],
+                                capture_output=True, text=True)
+        output = result.stdout + result.stderr
+        report("a dropped call whose answer the caller reads is refused",
+               result.returncode == 1 and "at 0x0076E61F: the code after the call reads EAX" in output,
+               "exit 1 naming 0x0076E61F", output[:600])
+        report("a dropped call at an address that is not that call is refused",
+               "at 0x0076E589: not a five-byte call to 0x004112F8" in output, "0x0076E589 named", output[:600])
 
     print("\n%d case(s), %d failure(s); the %d real rows in %.1fs (%.1fs with the start)"
           % (report.total, report.failures, len(rows), answer["seconds"], wall))

@@ -50,6 +50,8 @@
 #include "services/Hashes.hpp"
 #include "services/RelayService.hpp"
 #include "services/RenderService.hpp"
+#include "tuning/Animate.hpp"
+#include "tuning/Drops.hpp"
 #include "services/StorageService.hpp"
 
 #include <chrono>
@@ -1709,6 +1711,113 @@ namespace
 
     void* WXL_CALL FakeModelParent(const void* model) { return model ? AsFake(const_cast<void*>(model))->parent : nullptr; }
 
+    // --- The scene's animate list (the M2 BeginThread and WaitThread gates) ---------------------
+
+    /// A model of a fake scene's animate list: how often, on which thread and with which floating
+    /// point state it was animated, and a stand-in for its bones' work (the bench's).
+    struct FakeAnimModel : FakeM2Model
+    {
+        FakeAnimModel*            next = nullptr;
+        std::atomic<int>          animated{0};
+        DWORD                     thread = 0;
+        wxl::core::tuning::FloatState state;
+        uint32_t                  work = 0; ///< bones to pose, the bench's
+        float                     out  = 0.0f;
+    };
+
+    struct FakeAnimScene
+    {
+        FakeAnimModel* head = nullptr;
+    };
+
+    /// CM2Scene::AnimateThread, as the fake client names it.
+    void FakeAnimateThread(void*) {}
+
+    wxl_bool WXL_CALL FakeIsAnimateThread(const void* function)
+    {
+        return function == reinterpret_cast<const void*>(&FakeAnimateThread) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    uint32_t WXL_CALL FakeAnimateList(const void* scene, void** out, uint32_t capacity)
+    {
+        uint32_t count = 0;
+        for (FakeAnimModel* m = scene ? static_cast<const FakeAnimScene*>(scene)->head : nullptr; m; m = m->next)
+        {
+            if (out && count < capacity) out[count] = static_cast<FakeM2Model*>(m);
+            ++count;
+        }
+        return count;
+    }
+
+    void* WXL_CALL FakeSwapAnimateList(void* scene, void* head)
+    {
+        if (!scene) return nullptr;
+        auto* s   = static_cast<FakeAnimScene*>(scene);
+        void* was = s->head ? static_cast<FakeM2Model*>(s->head) : nullptr;
+        s->head   = head ? static_cast<FakeAnimModel*>(static_cast<FakeM2Model*>(head)) : nullptr;
+        return was;
+    }
+
+    /// A model's bones posed: a chain of 4x4 products, about what CM2Model::AnimateMT does per bone.
+    float FakePose(uint32_t bones, float seed)
+    {
+        float m[16], r[16];
+        for (int i = 0; i < 16; ++i) m[i] = seed + static_cast<float>(i) * 0.01f;
+        for (uint32_t b = 0; b < bones; ++b)
+        {
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    r[i * 4 + j] = m[i * 4] * m[j] + m[i * 4 + 1] * m[4 + j] + m[i * 4 + 2] * m[8 + j] + m[i * 4 + 3] * m[12 + j];
+            for (int i = 0; i < 16; ++i) m[i] = r[i] * 0.25f + 0.1f;
+        }
+        return m[0];
+    }
+
+    void WXL_CALL FakeAnimateModel(void* model, void* scene)
+    {
+        if (!model || !scene) return;
+        auto* m   = static_cast<FakeAnimModel*>(static_cast<FakeM2Model*>(model));
+        m->thread = GetCurrentThreadId();
+        m->state  = wxl::core::tuning::CaptureFloat();
+        if (m->work) m->out = FakePose(m->work, 0.01f);
+        m->animated.fetch_add(1);
+    }
+
+    /// A fake scene of @p count models, every @p attachedEvery-th one attached to another.
+    struct AnimScene
+    {
+        FakeAnimScene              scene;
+        std::vector<FakeAnimModel> models;
+        FakeM2Model                parent;
+
+        AnimScene(uint32_t count, uint32_t attachedEvery, uint32_t work = 0) : models(count)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                models[i].next = i + 1 < count ? &models[i + 1] : nullptr;
+                models[i].work = work;
+                if (attachedEvery && i % attachedEvery == attachedEvery - 1) models[i].parent = &parent;
+            }
+            scene.head = count ? &models[0] : nullptr;
+        }
+
+        /// CM2Scene::Animate's threaded part, as the client runs it: BeginThread, its own loop over
+        /// the list (every other model; none while the gate hides it), WaitThread.
+        bool Frame(void* cache, void* function = reinterpret_cast<void*>(&FakeAnimateThread))
+        {
+            void* self = cache;
+            void* fn   = function;
+            void* arg  = &scene;
+            const bool taken = wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg);
+            for (FakeAnimModel* m = scene.head; m; m = m->next ? m->next->next : nullptr)
+                if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), &scene);
+            void* wait = cache;
+            const bool waited = wxl::seam::M2::WaitThread::Gate(&wait);
+            return taken && waited;
+        }
+    };
+
+
     void* WXL_CALL FakeModelSource(const void* model) { return model ? AsFake(const_cast<void*>(model))->source : nullptr; }
 
     void WXL_CALL FakeSetGeosets(void* model, uint32_t first, uint32_t last, wxl_bool visible)
@@ -2269,6 +2378,10 @@ namespace
         init.m2_model_file          = &FakeModelFile;
         init.m2_attachment_point    = &FakeAttachmentPoint;
         init.m2_skeleton            = &FakeSkeleton;
+        init.m2_is_animate_thread   = &FakeIsAnimateThread;
+        init.m2_animate_list        = &FakeAnimateList;
+        init.m2_swap_animate_list   = &FakeSwapAnimateList;
+        init.m2_animate_model       = &FakeAnimateModel;
         init.m2_file_info           = &FakeM2FileInfo;
         init.m2_file_animate_bones  = &FakeM2FileAnimateBones;
         init.m2_create_world_model  = &FakeCreateWorldModel;
@@ -12376,6 +12489,109 @@ void CheckClientError()
     Check(text.find("second") == std::string::npos, "a second fatal error writes nothing: one report");
 }
 
+/// [engine] animate_threads: a scene's models animated as the client does it (its main thread
+/// every other model, its one worker the others, woken by an event and waited for by another)
+/// and by the gates on 2, 4 and 8 threads; each model's work a chain of 4x4 products per bone.
+void BenchAnimate()
+{
+    using Clock = std::chrono::steady_clock;
+    namespace animate = wxl::core::tuning::animate;
+    printf("\nanimate_threads (%s; main-thread ms per frame, median of 200):\n", sizeof(void*) == 8 ? "x64" : "x86");
+
+    struct Stock
+    {
+        HANDLE         start = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE         done  = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        FakeAnimScene* scene = nullptr;
+        static unsigned long __stdcall Main(void* p)
+        {
+            auto& self = *static_cast<Stock*>(p);
+            for (;;)
+            {
+                WaitForSingleObject(self.start, INFINITE);
+                // CM2Scene::AnimateThread: the second, fourth... model.
+                for (FakeAnimModel* m = self.scene->head ? self.scene->head->next : nullptr; m; m = m->next ? m->next->next : nullptr)
+                    if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), self.scene);
+                SetEvent(self.done);
+            }
+        }
+    };
+    static Stock stock;
+    CloseHandle(CreateThread(nullptr, 0, &Stock::Main, &stock, 0, nullptr));
+
+    int   cacheObject = 0;
+    void* cache       = &cacheObject;
+    auto  median      = [](std::vector<double>& v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    for (const auto& load : {std::pair<uint32_t, uint32_t>{0, 400}, {40, 150}, {80, 300}, {80, 600}, {400, 300}})
+    {
+        const uint32_t bones = load.first, models = load.second;
+        AnimScene      a(models, 6, bones);
+        std::vector<double> single, client, gated[3];
+        for (int frame = 0; frame < 220; ++frame)
+        {
+            Clock::time_point t0 = Clock::now();
+            for (FakeAnimModel& m : a.models)
+                if (!m.parent) FakeAnimateModel(static_cast<FakeM2Model*>(&m), &a.scene);
+            if (frame >= 20) single.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            t0          = Clock::now();
+            stock.scene = &a.scene;
+            SetEvent(stock.start);
+            for (FakeAnimModel* m = a.scene.head; m; m = m->next ? m->next->next : nullptr)
+                if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), &a.scene);
+            WaitForSingleObject(stock.done, INFINITE);
+            if (frame >= 20) client.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            const uint32_t counts[3] = {2, 4, 8};
+            for (int k = 0; k < 3; ++k)
+            {
+                animate::SetThreadsForTests(counts[k]);
+                t0 = Clock::now();
+                a.Frame(cache);
+                if (frame >= 20) gated[k].push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            }
+        }
+        printf("  %3u models, %2u bones: one thread %.3f ms, the client's two %.3f; the gates on 2 threads %.3f, 4 %.3f, 8 %.3f\n", models,
+               bones, median(single), median(client), median(gated[0]), median(gated[1]), median(gated[2]));
+    }
+    animate::SetThreadsForTests(0);
+}
+
+/// [engine] trim_alloc: SMemAlloc and SMemFree's heap work, a block allocated and one freed, with
+/// the CRT heap's HeapSize after each (as Wow.exe) and without (the call taken out).
+void BenchTrimAlloc()
+{
+    using Clock = std::chrono::steady_clock;
+    HANDLE   heap = HeapCreate(0, 0x1000, 0); // _heap_init's
+    void*    live[4096] = {};
+    uint32_t seed = 1;
+    volatile SIZE_T sink = 0;
+    printf("\ntrim_alloc (%s; ns per block allocated and freed, 2,000,000 of 8 to 520 bytes):\n", sizeof(void*) == 8 ? "x64" : "x86");
+    for (int with = 1; with >= 0; --with)
+    {
+        const Clock::time_point t0 = Clock::now();
+        const int               n  = 2000000;
+        for (int i = 0; i < n; ++i)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            const uint32_t slot = (seed >> 8) & 4095;
+            const SIZE_T   size = ((((seed >> 20) & 0x1FF) + 8) + 7) & ~SIZE_T{7};
+            if (live[slot])
+            {
+                if (with) sink = HeapSize(heap, 0, live[slot]);
+                HeapFree(heap, 0, live[slot]);
+            }
+            live[slot] = HeapAlloc(heap, 0, size);
+            if (with) sink = HeapSize(heap, 0, live[slot]);
+        }
+        printf("  %-46s %8.1f ns\n", with ? "with the size query (stock)" : "without it (trim_alloc)",
+               std::chrono::duration<double, std::nano>(Clock::now() - t0).count() / n);
+    }
+    (void)sink;
+    HeapDestroy(heap);
+}
+
 void Bench()
 {
     using Clock = std::chrono::steady_clock;
@@ -12588,6 +12804,9 @@ void Bench()
             printf("  %-46s %8.1f MB for 1,000,000 live blocks\n", "accounting's own tables", c.bytes / 1048576.0);
     time("snapshot, 1,000,000 blocks live", 20, [&] { footprint.snapshot(); });
     wxl::core::services::footprint::Reset();
+
+    BenchAnimate();
+    BenchTrimAlloc();
 }
 
 namespace
@@ -12764,6 +12983,106 @@ namespace
         g_received.clear();
         wxl::seam::Component::FreeComponent::Before(nullptr);
         Check(g_received.empty(), "no component raises nothing");
+    }
+
+    void CheckAnimateGates()
+    {
+        namespace animate = wxl::core::tuning::animate;
+        using wxl::core::tuning::FloatState;
+        int cacheObject = 0;
+        void* cache = &cacheObject;
+
+        animate::SetThreadsForTests(0);
+        {
+            AnimScene a(9, 0);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&FakeAnimateThread); void* arg = &a.scene;
+            Check(!wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg) && a.scene.head == &a.models[0],
+                  "animate_threads 0: BeginThread runs as the client's, the list untouched");
+            void* wait = cache;
+            Check(!wxl::seam::M2::WaitThread::Gate(&wait), "and WaitThread too");
+        }
+
+        animate::SetThreadsForTests(4);
+        {
+            AnimScene a(9, 0);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&CheckAnimateGates); void* arg = &a.scene;
+            Check(!wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg) && a.scene.head == &a.models[0],
+                  "a BeginThread for another function than AnimateThread is the client's");
+        }
+
+        // The main thread's state made unlike a new thread's: x87 single precision (as D3D9 leaves
+        // it) and MXCSR with flush to zero.
+        const FloatState before = wxl::core::tuning::CaptureFloat();
+        FloatState mainState = before;
+#if defined(_M_IX86)
+        mainState.control = 0x007F;
+#endif
+        mainState.mxcsr = 0x9F80;
+        wxl::core::tuning::LoadFloat(mainState);
+        {
+            AnimScene a(301, 7);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&FakeAnimateThread); void* arg = &a.scene;
+            const bool taken = wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg);
+            Check(taken && a.scene.head == nullptr, "animate_threads 4: BeginThread taken, the list hidden from the client's loop");
+            void* other = &self;
+            Check(!wxl::seam::M2::WaitThread::Gate(&other), "a WaitThread of another cache is the client's");
+            void* wait = cache;
+            Check(wxl::seam::M2::WaitThread::Gate(&wait) && a.scene.head == &a.models[0], "WaitThread taken, the list back");
+            Check(!wxl::seam::M2::WaitThread::Gate(&wait), "and only once");
+            bool once = true, attachedLeft = true, mainSide = true, workerSide = true;
+            std::set<DWORD> threads;
+            for (uint32_t i = 0; i < a.models.size(); ++i)
+            {
+                const FakeAnimModel& m = a.models[i];
+                if (m.parent)
+                {
+                    attachedLeft = attachedLeft && m.animated == 0;
+                    continue;
+                }
+                once = once && m.animated == 1;
+                threads.insert(m.thread);
+                if (i % 2 == 0) mainSide = mainSide && m.state == mainState;
+                else workerSide = workerSide && !(m.state == mainState);
+            }
+            Check(once, "every model of the list hung on nothing is animated once");
+            Check(attachedLeft, "a model attached to another is left to its parent");
+            Check(mainSide, "the first, third... model with the main thread's floating point state");
+            Check(workerSide, "the second, fourth... with a new thread's, as the client's worker has");
+            Check(wxl::core::tuning::CaptureFloat() == mainState, "the main thread's own state is back after");
+            printf("    (%zu thread(s) animated the 301 models)\n", threads.size());
+        }
+        wxl::core::tuning::LoadFloat(before);
+        {
+            AnimScene a(1000, 5);
+            bool all = true;
+            for (int frame = 0; frame < 50; ++frame)
+            {
+                all = all && a.Frame(cache);
+                for (uint32_t i = 0; i < a.models.size(); ++i)
+                    all = all && a.models[i].animated == (a.models[i].parent ? 0 : frame + 1);
+            }
+            Check(all, "50 frames of 1000 models: each animated once a frame, the client's loop finding nothing");
+            AnimScene empty(0, 0);
+            Check(empty.Frame(cache) && empty.scene.head == nullptr, "an empty list is taken and left empty");
+        }
+        const animate::Counters totals = animate::Totals();
+        Check(totals.frames >= 52 && totals.models >= 50 * 800, "the pool counts its frames and models");
+        animate::SetThreadsForTests(0);
+    }
+
+    void CheckDrops()
+    {
+        using wxl::core::tuning::drops::Drop;
+        using wxl::core::tuning::drops::Outcome;
+        // SMemAlloc's `call _msize` at 0x0076E58A: E8 and 0x004112F8 - 0x0076E58F.
+        uint8_t code[5] = {0xE8, 0x69, 0x2D, 0xCA, 0xFF};
+        Check(Drop(code, 0x0076E58A, 0x004112F8) == Outcome::dropped && code[0] == 0x0F && code[1] == 0x1F && code[4] == 0x00,
+              "the stock call is replaced by a five-byte NOP");
+        Check(Drop(code, 0x0076E58A, 0x004112F8) == Outcome::already, "a second time, it is already gone");
+        uint8_t hooked[5] = {0xE9, 0x00, 0x00, 0x00, 0x00};
+        Check(Drop(hooked, 0x0076E58A, 0x004112F8) == Outcome::foreign && hooked[0] == 0xE9, "other bytes are left as they are");
+        uint8_t other[5] = {0xE8, 0x69, 0x2D, 0xCA, 0xFF};
+        Check(Drop(other, 0x0076E5AC, 0x004112F8) == Outcome::foreign, "a call to another place is left too");
     }
 
     void CheckM2Service()
@@ -14218,6 +14537,8 @@ int main(int argc, char** argv)
     CheckRenderService();
     CheckAppearance();
     CheckM2Service();
+    CheckAnimateGates();
+    CheckDrops();
     CheckM2World();
     CheckModelStages();
     CheckX64Only();

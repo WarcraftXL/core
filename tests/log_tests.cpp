@@ -285,6 +285,30 @@ int main(int argc, char** argv)
                   std::strstr(gxb.problems[2], "line 4") && std::strstr(gxb.problems[3], "[gx]"),
               "each [gx] value that does not read, and an unknown key, is noted; the last api line holds");
 
+        using wxl::core::settings::kAnimateAuto;
+        Check(none.animate_threads == kAnimateAuto && none.trim_alloc, "[engine] animate_threads auto and trim_alloc on by default");
+        const char engineText[] = "[Engine]\n"
+                                  "animate_threads = 6 ; six\n"
+                                  "TRIM_ALLOC = 0\n";
+        wxl::core::settings::Settings en;
+        wxl::core::settings::Parse(engineText, sizeof engineText - 1, en);
+        Check(en.animate_threads == 6 && !en.trim_alloc && en.problem_count == 0, "[engine] animate_threads and trim_alloc, in any case");
+        const char engineZero[] = "[engine]\nanimate_threads = 0\n";
+        wxl::core::settings::Settings ez;
+        wxl::core::settings::Parse(engineZero, sizeof engineZero - 1, ez);
+        Check(ez.animate_threads == 0 && ez.problem_count == 0, "animate_threads = 0 leaves the client's own two threads");
+        const char engineBad[] = "[engine]\n"
+                                 "animate_threads = 1\n"
+                                 "animate_threads = 17\n"
+                                 "animate_threads = many\n"
+                                 "trim_alloc = yes\n"
+                                 "fast = 1\n";
+        wxl::core::settings::Settings eb;
+        wxl::core::settings::Parse(engineBad, sizeof engineBad - 1, eb);
+        Check(eb.animate_threads == kAnimateAuto && eb.trim_alloc && eb.problem_count == 5 && std::strstr(eb.problems[0], "2 to 16") &&
+                  std::strstr(eb.problems[3], "0 or 1") && std::strstr(eb.problems[4], "[engine]"),
+              "1 thread, more than 16, a word, a value that is not 0 or 1 and an unknown key of [engine] are noted, the defaults kept");
+
         using wxl::core::gx::SelectApi;
         Check(SelectApi(WXL_GX_API_D3D9, GxApi::client).api == WXL_GX_API_D3D9 &&
                   !SelectApi(WXL_GX_API_D3D9, GxApi::client).why &&
