@@ -9,3 +9,4 @@
 DrawVs               draw.hlsl       vs_3_0  DrawVs        c240-c245  0
 DrawPs               draw.hlsl       ps_3_0  DrawPs        -          0
 SurfacePs            draw.hlsl       ps_3_0  SurfacePs     c200-c205  1
+ParticlePs           draw.hlsl       ps_3_0  ParticlePs    c200-c205  1

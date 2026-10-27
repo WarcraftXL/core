@@ -62,12 +62,14 @@ void main()
     // The derivatives first, where every pixel of the quad runs.
     const vec2 uv    = vec2(dot(vec3(x, y, 1.0), s.rows[0].xyz), dot(vec3(x, y, 1.0), s.rows[1].xyz));
     const vec2 scale = s.rows[2].xy;
-    const vec2 gx    = dFdx(uv * scale);
-    const vec2 gy    = dFdy(uv * scale);
+    const float blur = max(s.rows[5].w, 1.0);
+    const vec2  gx   = dFdx(uv * scale) * blur;
+    const vec2  gy   = dFdy(uv * scale) * blur;
     if (s.rows[2].w > 0.5)
     {
         const vec2 at = s.rows[2].z > 0.5 ? fract(uv) * scale : clamp(uv, 0.0, 1.0) * scale;
         texel = textureGrad(sampler2D(uImages[nonuniformEXT(s.picture.x)], uSamplers[nonuniformEXT(s.picture.y)]), at, gx, gy);
+        if (s.rows[5].z > 0.5) texel.rgb = vec3(1.0);
     }
     const float a = color.a * texel.a * edge * fade;
     const vec3  c = color.rgb * texel.rgb;

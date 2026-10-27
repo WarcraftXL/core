@@ -515,12 +515,12 @@ namespace wxl::gx::shapes
     {
         if (!d.alphas.empty())
         {
-            if (d.kind != kLine) return "point_alphas are a line's: this kind has none";
+            if (d.kind != kLine && d.kind != kBeam) return "point_alphas are a line's and a beam's: this kind has none";
             if (d.alphas.size() != d.points.size()) return "point_alphas must hold one opacity per point";
             for (float a : d.alphas)
                 if (!std::isfinite(a) || a < 0.0f || a > 1.0f) return "point_alphas must be opacities from 0 to 1";
         }
-        if (d.kind >= kKindCount) return Say("its kind is %.0f, which is none (0 line to 9 cylinder)", d.kind);
+        if (d.kind >= kKindCount) return Say("its kind is %.0f, which is none (0 line to 10 beam)", d.kind);
         if (!Finite(d.center) || !Finite(d.size) || !std::isfinite(d.radius) || !std::isfinite(d.inner) || !std::isfinite(d.angle) ||
             !std::isfinite(d.facing) || !std::isfinite(d.pitch) || !std::isfinite(d.roll) || !std::isfinite(d.spacing))
             return "a number of it is not finite";
@@ -575,6 +575,14 @@ namespace wxl::gx::shapes
         case kCylinder:
             if (!(d.radius > 0.0f && d.size.z > 0.0f)) return "a cylinder's radius and size.z (its height) must be above 0";
             return extent(std::max(d.radius, 0.5f * d.size.z), "it reaches %.1f yards from its center; %.0f at most");
+        case kBeam:
+            if (d.points.size() != 2) return "a beam needs 2 points: where it starts and where it ends";
+            if (Length(Sub(d.points[1], d.points[0])) < 1e-3f) return "a beam's two points must be apart";
+            if (!(d.size.x > 0.0f && d.size.x <= kMaxExtent && d.size.y >= 0.0f && d.size.y <= kMaxExtent))
+                return "a beam's size.x (its width at its start) must be above 0, and size.y (at its end) from 0 (0: as at its start)";
+            for (const V3& p : d.points)
+                if (Length(p) > 2.0f * kMaxExtent) return Say("a point of the beam is %.1f yards from its center; %.0f at most", Length(p), 2.0 * kMaxExtent);
+            return std::string();
         default: return std::string();
         }
     }
@@ -658,6 +666,7 @@ namespace wxl::gx::shapes
         out.middle = d.center;
         out.origin = d.center;
         out.turn   = d.facing;
+        out.beam   = Mesh::Beam{};
         out.plane  = Mesh::Plane{};
         if (std::string refusal = Validate(d); !refusal.empty())
         {
@@ -680,6 +689,18 @@ namespace wxl::gx::shapes
 
         switch (d.kind)
         {
+        case kBeam:
+        {
+            // Nothing built now: its quad faces the eye, made each frame.
+            out.beam.on      = true;
+            out.beam.a       = Add(c, d.points[0]);
+            out.beam.b       = Add(c, d.points[1]);
+            out.beam.width_a = d.size.x;
+            out.beam.width_b = d.size.y > 0.0f ? d.size.y : d.size.x;
+            out.beam.alpha_a = d.alphas.size() == 2 ? d.alphas[0] : 1.0f;
+            out.beam.alpha_b = d.alphas.size() == 2 ? d.alphas[1] : 0.0f;
+            break;
+        }
         case kLine:
         {
             std::vector<V3> pts(d.points.size());
@@ -1295,6 +1316,8 @@ namespace wxl::gx::shapes
         out.k[4][3] = look.radial > 0.0f ? 1.0f - std::min(look.radial, 1.0f) : 2.0f;
         out.k[5][0] = 1.0f / std::max(pl.extent, 1e-4f);
         out.k[5][1] = look.blend == kBlendModulate ? 1.0f : 0.0f;
+        out.k[5][2] = look.mask ? 1.0f : 0.0f;
+        out.k[5][3] = std::exp2(std::clamp(look.blur, 0.0f, 8.0f));
         return out;
     }
     }
@@ -1346,7 +1369,14 @@ namespace wxl::gx::shapes
         float       fade = 1.0f;
         if (s.k[4][3] < 1.5f) fade = 1.0f - Smooth(Saturate((r * s.k[5][0] - s.k[4][3]) / std::max(1.0f - s.k[4][3], 1e-4f)));
         const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        float       masked[4];
         const float* t     = s.k[2][3] > 0.5f ? texel : one;
+        if (s.k[2][3] > 0.5f && s.k[5][2] > 0.5f)
+        {
+            masked[0] = masked[1] = masked[2] = 1.0f;
+            masked[3] = texel[3];
+            t         = masked;
+        }
         const float  a     = color[3] * t[3] * edge * fade;
         for (int i = 0; i < 3; ++i)
         {
@@ -1359,5 +1389,101 @@ namespace wxl::gx::shapes
     float LineCoverage(float across, float half_width, float soft)
     {
         return soft > 0.0f ? Saturate((half_width - std::fabs(across)) / soft) : 1.0f;
+    }
+
+    // --- Beams -------------------------------------------------------------------------------------
+
+    V3 AxisSide(V3 axis, V3 toward, V3 fallback)
+    {
+        const V3    side = CrossV(axis, toward);
+        const float l    = Length(side);
+        return l > 1e-6f ? Scale(side, 1.0f / l) : fallback;
+    }
+
+    float BeamSideways(V3 axis, V3 toward)
+    {
+        const float la = Length(axis), lt = Length(toward);
+        if (la < 1e-6f || lt < 1e-6f) return 0.0f;
+        const float sine = Length(CrossV(axis, toward)) / (la * lt);
+        const float t    = std::clamp((sine - 0.05f) / 0.2f, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+
+    void WriteBeam(const Mesh& mesh, V3 eye, uint32_t color, bool lift, std::vector<Vertex>& out)
+    {
+        const Mesh::Beam& b    = mesh.beam;
+        const V3          axis = Sub(b.b, b.a);
+        const float       len  = Length(axis);
+        const float       base = static_cast<float>(color >> 24) / 255.0f;
+        V3                plane[2][kBeamSegments + 1];
+        V3                world[2][kBeamSegments + 1];
+        float             alpha[kBeamSegments + 1];
+        V3                last = AxisSide(axis, V3{0, 0, 1}, V3{1, 0, 0});
+        for (uint32_t i = 0; i <= kBeamSegments; ++i)
+        {
+            const float t     = static_cast<float>(i) / static_cast<float>(kBeamSegments);
+            const V3    p     = Add(b.a, Scale(axis, t));
+            const V3    toEye = Sub(eye, p);
+            const V3    side  = AxisSide(axis, toEye, last);
+            last              = side;
+            const float half  = 0.5f * (b.width_a + (b.width_b - b.width_a) * t);
+            const float near  = std::clamp((Length(toEye) - kBeamNear) / kBeamNearFade, 0.0f, 1.0f);
+            alpha[i]          = (b.alpha_a + (b.alpha_b - b.alpha_a) * t) * near * BeamSideways(axis, toEye);
+            world[0][i]       = Add(p, Scale(side, -half));
+            world[1][i]       = Add(p, Scale(side, half));
+            plane[0][i]       = V3{t * len, -1.0f, 0.0f};
+            plane[1][i]       = V3{t * len, 1.0f, 0.0f};
+        }
+        const uint8_t flags = lift ? 1 : 0;
+        const auto put = [&](int s, uint32_t i) {
+            Vertex v;
+            v.pos[0]   = world[s][i].x - eye.x;
+            v.pos[1]   = world[s][i].y - eye.y;
+            v.pos[2]   = world[s][i].z - eye.z;
+            v.other[0] = plane[s][i].x;
+            v.other[1] = plane[s][i].y;
+            v.other[2] = 0.0f;
+            const uint32_t a = static_cast<uint32_t>(std::lround(std::clamp(base * alpha[i], 0.0f, 1.0f) * 255.0f));
+            v.color    = (a << 24) | (color & 0xFFFFFFu);
+            v.side     = 1;
+            v.end      = 0;
+            v.width    = 0;
+            v.flags    = flags;
+            out.push_back(v);
+        };
+        for (uint32_t i = 0; i < kBeamSegments; ++i)
+        {
+            put(0, i);
+            put(1, i);
+            put(1, i + 1);
+            put(0, i);
+            put(1, i + 1);
+            put(0, i + 1);
+        }
+    }
+
+    SurfaceConstants MakeBeamSurface(const Mesh& mesh, const SurfaceLook& look)
+    {
+        const float len = Length(Sub(mesh.beam.b, mesh.beam.a));
+        Mesh::Plane pl;
+        pl.code   = 1;
+        pl.hx     = 1e6f; // no fade along it: its opacity goes from end to end
+        pl.hy     = 1.0f; // across: -1 to 1, so the feather is a part of its half width
+        pl.min_x  = 0.0f;
+        pl.max_x  = std::max(len, 1e-3f);
+        pl.min_y  = -1.0f;
+        pl.max_y  = 1.0f;
+        pl.extent = std::max(len, 1e-3f);
+        SurfaceLook l = look;
+        if (l.uv == kUvWorld)
+        {
+            // Yards a picture along it, once across.
+            l.uv     = kUvTile;
+            l.size_y = (look.size_y > 0.0f ? look.size_y : 1.0f) / pl.max_x;
+            l.size_x = 1.0f;
+        }
+        const double A[2][2] = {{0.0, -1.0}, {-1.0, 0.0}};
+        const double B[2]    = {0.0, 0.0};
+        return SurfaceRows(pl, l, A, B);
     }
 }

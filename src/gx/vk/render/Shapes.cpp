@@ -14,6 +14,7 @@ namespace wxl::vk::render
     {
         // The programs, compiled when the runtime is built (cmake/wxl_vk.cmake).
 #include "draw_frag.h"
+#include "draw_particle_frag.h"
 #include "draw_surface_frag.h"
 #include "draw_vert.h"
     }
@@ -48,7 +49,8 @@ namespace wxl::vk::render
     {
         return {{"draw.vert", spirv::draw_vert, sizeof spirv::draw_vert / 4},
                 {"draw.frag", spirv::draw_frag, sizeof spirv::draw_frag / 4},
-                {"draw_surface.frag", spirv::draw_surface_frag, sizeof spirv::draw_surface_frag / 4}};
+                {"draw_surface.frag", spirv::draw_surface_frag, sizeof spirv::draw_surface_frag / 4},
+                {"draw_particle.frag", spirv::draw_particle_frag, sizeof spirv::draw_particle_frag / 4}};
     }
 
     void Shapes::Detach()
@@ -71,18 +73,21 @@ namespace wxl::vk::render
 
     Pipeline* Shapes::PipelineFor(uint8_t program, uint8_t blend, uint32_t depth, std::string* why)
     {
-        const uint32_t prog = program == gx::shapes::kSurface ? 1u : 0u;
+        const uint32_t prog = program == gx::shapes::kSurface ? 1u : program == gx::shapes::kParticle ? 2u : 0u;
         const uint32_t b    = prog ? std::min<uint32_t>(blend, 2u) : 0u;
         Pipeline*&     slot = pipelines_[prog][b][std::min(depth, 2u)];
         if (slot) return slot;
-        static const char* const kNames[2][3] = {{"wxl.draw's shapes", "", ""},
-                                                 {"wxl.draw's surfaces", "wxl.draw's added surfaces", "wxl.draw's modulated surfaces"}};
+        static const char* const kNames[3][3] = {{"wxl.draw's shapes", "", ""},
+                                                 {"wxl.draw's surfaces", "wxl.draw's added surfaces", "wxl.draw's modulated surfaces"},
+                                                 {"wxl.draw's particles", "wxl.draw's added particles", "wxl.draw's modulated particles"}};
         PipelineSpec spec;
         spec.kind             = kGraphics;
         static const char* const kDepths[3] = {"", " on top", " behind the scene"};
         spec.name             = std::string(kNames[prog][b]) + kDepths[std::min(depth, 2u)];
         spec.vertex           = Words(spirv::draw_vert, sizeof spirv::draw_vert);
-        spec.fragment         = prog ? Words(spirv::draw_surface_frag, sizeof spirv::draw_surface_frag) : Words(spirv::draw_frag, sizeof spirv::draw_frag);
+        spec.fragment         = prog == 2 ? Words(spirv::draw_particle_frag, sizeof spirv::draw_particle_frag)
+                                : prog == 1 ? Words(spirv::draw_surface_frag, sizeof spirv::draw_surface_frag)
+                                            : Words(spirv::draw_frag, sizeof spirv::draw_frag);
         spec.color_formats[0] = kBgra8;
         spec.depth_format     = kDepth32f;
         spec.blend[0]         = kBlendOf[b];
@@ -157,7 +162,7 @@ namespace wxl::vk::render
             if (!run.count || !pipeline) continue;
             push.constants[22] = run.alpha;
             push.surface[0] = push.surface[1] = 0;
-            if (run.program == gx::shapes::kSurface && surfaces)
+            if ((run.program == gx::shapes::kSurface || run.program == gx::shapes::kParticle) && surfaces)
             {
                 const gx::shapes::Surface& surface = surfaces[run.surface];
                 SurfaceRows                rows{};

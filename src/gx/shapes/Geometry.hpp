@@ -44,7 +44,7 @@ namespace wxl::gx::shapes
     /// wxl_draw_kind, repeated so that this module needs no SDK header.
     enum Kind : uint32_t
     {
-        kLine = 0, kCircle, kRing, kSector, kRectangle, kPolygon, kGrid, kBox, kSphere, kCylinder, kKindCount
+        kLine = 0, kCircle, kRing, kSector, kRectangle, kPolygon, kGrid, kBox, kSphere, kCylinder, kBeam, kKindCount
     };
 
     /// wxl_draw_shape.flags.
@@ -139,6 +139,15 @@ namespace wxl::gx::shapes
             V3       up, left;             ///< its frame's axes, in the world
         };
         std::vector<Face>    faces;          ///< a volume's, built with its inside
+        /// A beam: from a to b, its width and opacity at each end; its quad is made each frame,
+        /// turned around its axis towards the eye (WriteBeam).
+        struct Beam
+        {
+            bool  on = false;
+            V3    a, b;
+            float width_a = 0.0f, width_b = 0.0f;
+            float alpha_a = 1.0f, alpha_b = 0.0f;
+        } beam;
         std::vector<V3>      face_plane;     ///< each triangle corner of a face in its face's frame (x, y, 0)
 
         size_t Vertices() const { return lines.size() * 6 + triangles.size(); }
@@ -265,6 +274,23 @@ namespace wxl::gx::shapes
     /// A world point in a mesh's plane (yards from its origin, turned by its facing).
     V3 InPlane(const Mesh& mesh, V3 world);
 
+    /// What turns an axis-locked billboard towards a point: the unit vector across @p axis facing
+    /// @p toward (from the axis to it), or @p fallback when they are parallel. A beam's and a
+    /// stretched particle's.
+    V3 AxisSide(V3 axis, V3 toward, V3 fallback);
+
+    /// A beam's segments along its length.
+    constexpr uint32_t kBeamSegments = 8;
+    /// The distance from the eye over which a beam fades in (yards), from kBeamNear.
+    constexpr float kBeamNear = 0.3f, kBeamNearFade = 1.5f;
+
+    /// A beam's quad strip for this frame, turned around its axis towards @p eye, as a surface's
+    /// triangles (its plane: x yards along from a, y -1 to 1 across), its colour's opacity going from
+    /// its a end's to its b end's, faded near the eye and when seen end-on. kBeamSegments * 6 vertices.
+    void WriteBeam(const Mesh& mesh, V3 eye, uint32_t color, bool lift, std::vector<Vertex>& out);
+    /// How seen end-on a beam is from a point: 1 seen from its side, 0 along its axis (smooth).
+    float BeamSideways(V3 axis, V3 toward);
+
     // --- Surfaces -------------------------------------------------------------------------------------
 
     enum Uv : uint32_t
@@ -288,6 +314,8 @@ namespace wxl::gx::shapes
         uint32_t blend = kBlendAlpha;
         float    feather = 0.0f;
         float    radial = 0.0f;
+        bool     mask = false;  ///< the texture gives the opacity alone
+        float    blur = 0.0f;   ///< halvings of the picture's detail
     };
 
     /// The per-draw numbers of a surface: six rows of four, the pixel programs' (c200 to c205 on
@@ -296,7 +324,7 @@ namespace wxl::gx::shapes
     ///   2     the picture's part of the texture (right, bottom), 1 when it repeats, 1 when textured
     ///   3     plane code, outer radius, inner radius, feather (yards)
     ///   4     half the sector's angle, a box's half sides, where the radial fade starts (2: none)
-    ///   5     1 / the extent, 1 for MODULATE, 0, 0
+    ///   5     1 / the extent, 1 for MODULATE, 1 for a mask, the derivatives' scale (2^blur)
     struct SurfaceConstants
     {
         float k[6][4] = {};
@@ -305,6 +333,9 @@ namespace wxl::gx::shapes
     /// A volume's face's numbers: the same rows, in the face's frame; WORLD from the world's origin
     /// along the face's axes.
     SurfaceConstants MakeFaceSurface(const Mesh::Face& face, const SurfaceLook& look);
+    /// A beam's numbers as a surface: its plane x along it (0 to its length), y across (-1 to 1),
+    /// faded to its sides over `feather` of its half width; WORLD lays uv_size yards a picture along it.
+    SurfaceConstants MakeBeamSurface(const Mesh& mesh, const SurfaceLook& look);
 
     /// Whether the sampler repeats the picture (TILE and WORLD).
     constexpr bool Repeats(uint32_t uv) { return uv == kUvTile || uv == kUvWorld; }
@@ -325,6 +356,7 @@ namespace wxl::gx::shapes
     {
         kPlain = 0,   ///< colour of the vertex, a line's soft edges
         kSurface = 1, ///< a surface: the picture, the feather, the fade
+        kParticle = 2, ///< particles: a soft blot or a picture, faded near the ground (Particles.hpp)
     };
 
     /// A stretch of the frame's vertices drawn alike.

@@ -25,6 +25,7 @@
 #include "gx/Vulkan.hpp"
 #include "gx/d3d9/Shapes.hpp"
 #include "gx/shapes/Geometry.hpp"
+#include "gx/shapes/Particles.hpp"
 #include "gx/vk/gxfront/Front.hpp"
 #include "gx/vk/render/Shapes.hpp"
 #include "objects/Objects.hpp"
@@ -43,6 +44,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <set>
 #include <string>
@@ -201,8 +203,8 @@ namespace
     /// ranges are within each part's own vertices until the frame's stream is put together.
     struct Bucket
     {
-        std::vector<sh::Vertex> fill, surfaces, volumes, shadows, lines;
-        std::vector<sh::Run>    surfaceRuns, volumeRuns;
+        std::vector<sh::Vertex> fill, surfaces, volumes, shadows, lines, particles;
+        std::vector<sh::Run>    surfaceRuns, volumeRuns, particleRuns;
         float                   occluded = 0.0f; ///< an occluded shape's own bucket: its hidden part's opacity
 
         void Clear()
@@ -214,11 +216,13 @@ namespace
             lines.clear();
             surfaceRuns.clear();
             volumeRuns.clear();
+            particles.clear();
+            particleRuns.clear();
         }
     };
 
     Bucket                   g_buckets[2];  ///< tested, on top
-    std::vector<Bucket>      g_occluded;    ///< a bucket per shape with an occluded_alpha; the first g_occludedCount live
+    std::deque<Bucket>       g_occluded;    ///< a bucket per shape with an occluded_alpha (a deque: volumes hold them by address while more are made); the first g_occludedCount live
     size_t                   g_occludedCount = 0;
     std::vector<sh::Vertex>  g_stream;
     std::vector<sh::Run>     g_runs;
@@ -437,8 +441,8 @@ namespace
             return false;
         };
         const auto number = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
-        if (in->flags & ~(WXL_DRAW_STYLE_FILL_COLOR | WXL_DRAW_STYLE_LINE_ALPHA))
-            return refuse("flags take WXL_DRAW_STYLE_FILL_COLOR (1) and WXL_DRAW_STYLE_LINE_ALPHA (2) alone");
+        if (in->flags & ~(WXL_DRAW_STYLE_FILL_COLOR | WXL_DRAW_STYLE_LINE_ALPHA | WXL_DRAW_STYLE_MASK))
+            return refuse("flags take WXL_DRAW_STYLE_FILL_COLOR (1), WXL_DRAW_STYLE_LINE_ALPHA (2) and WXL_DRAW_STYLE_MASK (4) alone");
         if (!number(in->softness, 0.0f, 1e9f) || !number(in->shadow_softness, 0.0f, 1e9f))
             return refuse("softness and shadow_softness must be pixels from 0");
         if (!number(in->shadow_alpha, 0.0f, 1.0f)) return refuse("shadow_alpha must be an opacity from 0 to 1");
@@ -484,10 +488,16 @@ namespace
         out.look.blend      = in->blend;
         out.look.feather    = in->feather;
         out.look.radial     = in->radial_fade;
-        if (in->struct_size >= sizeof(wxl_draw_style))
+        if (in->struct_size >= WXL_DRAW_STYLE_SIZE_0139)
         {
             if (!number(in->occluded_alpha, 0.0f, 1.0f)) return refuse("occluded_alpha must be an opacity from 0 to 1");
             out.occluded = in->occluded_alpha;
+        }
+        if (in->struct_size >= sizeof(wxl_draw_style))
+        {
+            if (!number(in->texture_blur, 0.0f, 8.0f)) return refuse("texture_blur must be from 0 to 8");
+            out.look.blur = in->texture_blur;
+            out.look.mask = (in->flags & WXL_DRAW_STYLE_MASK) != 0;
         }
         if (!path.empty())
         {
@@ -771,6 +781,423 @@ namespace
         return WXL_OK;
     }
 
+    // --- Particles (abi 0.1.40) ---------------------------------------------------------------------
+
+    sh::Camera g_camera; ///< read with the world's view each frame
+
+    /// An emitter: kept (a handle) or thrown (emit, or a kept one stopped), and its particles.
+    struct Emitter
+    {
+        uint32_t    mod = 0;
+        wxl_handle  handle = WXL_HANDLE_NONE; ///< none once thrown or stopped
+        sh::Emitter desc;
+        float       rate = 0.0f;
+        double      ends = 0.0;   ///< its rate stops then; 0 never
+        bool        stopped = false;
+        bool        paused = false; ///< the object it followed left view: no rate until placed again
+        float       carry = 0.0f;   ///< the part of a particle its rate owes
+        sh::Look    look;
+        std::string texture;      ///< the key it is held under (Textures)
+        uint32_t    blend = WXL_DRAW_BLEND_ALPHA;
+        uint32_t    depth = WXL_DRAW_DEPTH_TESTED;
+        float       occluded = 0.0f;
+        wxl_handle  target = WXL_HANDLE_NONE;
+        uint32_t    attach = 0;
+        sh::V3      at;           ///< where it throws from now
+        float       facing = 0.0f;
+        sh::Pool    pool;
+        sh::Random  random;
+        ~Emitter() { LetGoTexture(texture); }
+    };
+
+    std::vector<std::unique_ptr<Emitter>>  g_emitters;
+    std::unordered_map<wxl_handle, Emitter*> g_emitterByHandle;
+    uint64_t                               g_emitterSerial = 0;
+    uint32_t                               g_particlesAlive = 0;
+    std::unordered_map<uint32_t, uint32_t> g_particlesOf; ///< alive by mod
+    uint32_t                               g_emittedFrame = 0, g_culled = 0;
+    double                                 g_lastStep = 0.0;
+
+    Emitter* FindEmitter(wxl_handle handle)
+    {
+        const auto at = g_emitterByHandle.find(handle);
+        return at == g_emitterByHandle.end() || at->second->mod != Caller() ? nullptr : at->second;
+    }
+
+    void DropEmitter(size_t index)
+    {
+        Emitter& e = *g_emitters[index];
+        if (e.handle) g_emitterByHandle.erase(e.handle);
+        g_particlesAlive -= static_cast<uint32_t>(std::min<size_t>(e.pool.Size(), g_particlesAlive));
+        uint32_t& mine = g_particlesOf[e.mod];
+        mine -= static_cast<uint32_t>(std::min<size_t>(e.pool.Size(), mine));
+        g_emitters.erase(g_emitters.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+
+    /// Throws up to @p count particles, within the budgets; the rest are counted as culled.
+    void Throw(Emitter& e, uint32_t count)
+    {
+        uint32_t& mine    = g_particlesOf[e.mod];
+        const uint32_t room = std::min(WXL_DRAW_MAX_PARTICLES - std::min(g_particlesAlive, WXL_DRAW_MAX_PARTICLES),
+                                       WXL_DRAW_MAX_MOD_PARTICLES - std::min(mine, WXL_DRAW_MAX_MOD_PARTICLES));
+        const uint32_t n    = std::min(count, room);
+        g_culled += count - n;
+        if (!n) return;
+        e.pool.Spawn(e.desc, e.at, e.facing, n, e.random);
+        g_particlesAlive += n;
+        mine += n;
+        g_emittedFrame += n;
+    }
+
+    uint32_t EmittersOf(uint32_t mod)
+    {
+        uint32_t n = 0;
+        for (const auto& e : g_emitters) n += e->mod == mod ? 1u : 0u;
+        return n;
+    }
+
+    /// An emitter's description, checked: false (logged) when refused.
+    bool ReadEmitter(const char* call, const wxl_draw_emitter* in, sh::Emitter& out, uint32_t& burst, float& rate, float& duration,
+                     uint32_t& seed)
+    {
+        if (!in)
+        {
+            Refuse(call, "the emitter is null");
+            return false;
+        }
+        if (in->struct_size < sizeof(wxl_draw_emitter))
+        {
+            Refuse(call, "the emitter's struct_size is not set: set it to sizeof(wxl_draw_emitter)");
+            return false;
+        }
+        const auto refuse = [&](const char* why) {
+            Refuse(call, std::string("the emitter's ") + why);
+            return false;
+        };
+        const auto finite = [](wxl_vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        const auto range  = [](float a, float b, float lo, float hi) {
+            return std::isfinite(a) && std::isfinite(b) && a >= lo && b >= lo && a <= hi && b <= hi;
+        };
+        if (in->spawn > WXL_DRAW_SPAWN_SEGMENT) return refuse("spawn must be WXL_DRAW_SPAWN_POINT, DISC, BOX or SEGMENT (0 to 3)");
+        if (in->ground > WXL_DRAW_GROUND_SETTLE) return refuse("ground must be WXL_DRAW_GROUND_NONE, BOUNCE or SETTLE (0 to 2)");
+        if (!finite(in->center) || !finite(in->extent) || !finite(in->direction) || !finite(in->attractor) || !std::isfinite(in->facing))
+            return refuse("center, extent, direction, attractor and facing must be finite numbers");
+        if ((in->spawn == WXL_DRAW_SPAWN_DISC || in->spawn == WXL_DRAW_SPAWN_BOX) &&
+            (in->extent.x < 0.0f || in->extent.y < 0.0f || in->extent.z < 0.0f || in->extent.x > WXL_DRAW_MAX_EXTENT ||
+             in->extent.y > WXL_DRAW_MAX_EXTENT || in->extent.z > WXL_DRAW_MAX_EXTENT))
+            return refuse("extent of a disc or a box must be yards from 0 to WXL_DRAW_MAX_EXTENT");
+        if (!(in->spread >= 0.0f && in->spread <= 3.1416f)) return refuse("spread must be radians from 0 to pi");
+        if (in->burst > WXL_DRAW_MAX_BURST) return refuse("burst is more than WXL_DRAW_MAX_BURST particles");
+        if (!(in->rate >= 0.0f && in->rate <= WXL_DRAW_MAX_RATE)) return refuse("rate must be particles a second from 0 to WXL_DRAW_MAX_RATE");
+        if (!(in->duration >= 0.0f) || !std::isfinite(in->duration)) return refuse("duration must be seconds from 0 (0: until stopped)");
+        if (!range(in->speed_min, in->speed_max, 0.0f, 1000.0f)) return refuse("speed_min and speed_max must be yards a second from 0 to 1000");
+        if (!range(in->life_min, in->life_max, 0.001f, WXL_DRAW_MAX_PARTICLE_LIFE))
+            return refuse("life_min and life_max must be seconds above 0, up to WXL_DRAW_MAX_PARTICLE_LIFE");
+        if (!range(in->size_min, in->size_max, 0.0f, WXL_DRAW_MAX_PARTICLE_SIZE))
+            return refuse("size_min and size_max must be yards from 0 to WXL_DRAW_MAX_PARTICLE_SIZE");
+        if (!range(in->spin_min, in->spin_max, -100.0f, 100.0f)) return refuse("spin_min and spin_max must be radians a second, -100 to 100");
+        if (!std::isfinite(in->gravity) || !std::isfinite(in->attraction)) return refuse("gravity and attraction must be finite numbers");
+        if (!(in->drag >= 0.0f && in->drag <= 100.0f)) return refuse("drag must be from 0 to 100 a second");
+        if (!(in->restitution >= 0.0f && in->restitution <= 1.0f)) return refuse("restitution must be from 0 to 1");
+        if (!(in->friction >= 0.0f && in->friction <= 100.0f)) return refuse("friction must be from 0 to 100");
+        if (!(in->attract_radius >= 0.0f) || !std::isfinite(in->attract_radius)) return refuse("attract_radius must be yards from 0");
+        out.spawn          = in->spawn;
+        out.center         = V(in->center);
+        out.extent         = V(in->extent);
+        out.facing         = in->facing;
+        out.direction      = V(in->direction);
+        out.spread         = in->spread;
+        out.speed_min      = std::min(in->speed_min, in->speed_max);
+        out.speed_max      = std::max(in->speed_min, in->speed_max);
+        out.life_min       = std::min(in->life_min, in->life_max);
+        out.life_max       = std::max(in->life_min, in->life_max);
+        out.size_min       = std::min(in->size_min, in->size_max);
+        out.size_max       = std::max(in->size_min, in->size_max);
+        out.spin_min       = std::min(in->spin_min, in->spin_max);
+        out.spin_max       = std::max(in->spin_min, in->spin_max);
+        out.gravity        = in->gravity;
+        out.drag           = in->drag;
+        out.ground         = in->ground;
+        out.restitution    = in->restitution;
+        out.friction       = in->friction;
+        out.attractor      = V(in->attractor);
+        out.attraction     = in->attraction;
+        out.attract_radius = in->attract_radius;
+        burst              = in->burst;
+        rate               = in->rate;
+        duration           = in->duration;
+        seed               = in->seed;
+        return true;
+    }
+
+    /// A look, checked; null: soft white blots fading out. Its texture is held from here when
+    /// accepted (the caller lets it go).
+    bool ReadLook(const char* call, const wxl_draw_particles* in, Emitter& out)
+    {
+        sh::Look look;
+        uint32_t blend = WXL_DRAW_BLEND_ALPHA, depth = WXL_DRAW_DEPTH_TESTED;
+        float    occluded = 0.0f;
+        std::string key;
+        if (in)
+        {
+            if (in->struct_size < sizeof(wxl_draw_particles))
+            {
+                Refuse(call, "the look's struct_size is not set: set it to sizeof(wxl_draw_particles)");
+                return false;
+            }
+            const auto refuse = [&](const char* why) {
+                Refuse(call, std::string("the look's ") + why);
+                return false;
+            };
+            const auto unit = [](float v) { return std::isfinite(v) && v >= 0.0f && v <= 1.0f; };
+            if (in->mode > WXL_DRAW_BILLBOARD_STRETCHED) return refuse("mode must be WXL_DRAW_BILLBOARD_CAMERA, GROUND or STRETCHED (0 to 2)");
+            if (in->blend > WXL_DRAW_BLEND_MODULATE) return refuse("blend must be WXL_DRAW_BLEND_ALPHA, ADD or MODULATE (0 to 2)");
+            if (in->depth > WXL_DRAW_DEPTH_ON_TOP) return refuse("depth must be WXL_DRAW_DEPTH_TESTED or WXL_DRAW_DEPTH_ON_TOP");
+            if (!unit(in->texture_right) || !unit(in->texture_bottom)) return refuse("texture_right and texture_bottom must be from 0 to 1 (0: 1)");
+            const uint32_t fx = std::max(in->frames_x, 1u), fy = std::max(in->frames_y, 1u);
+            if (fx > 64 || fy > 64) return refuse("frames_x and frames_y must be 64 at most");
+            if (!(in->frame_rate >= 0.0f && in->frame_rate <= 240.0f)) return refuse("frame_rate must be frames a second from 0 to 240");
+            if (!unit(in->occluded_alpha)) return refuse("occluded_alpha must be an opacity from 0 to 1");
+            if (!(in->stretch >= 0.0f && in->stretch <= 10.0f)) return refuse("stretch must be seconds from 0 to 10");
+            if (!(in->softness >= 0.0f && in->softness <= WXL_DRAW_MAX_PARTICLE_SIZE)) return refuse("softness must be yards from 0");
+            if (in->key_count > WXL_DRAW_MAX_PARTICLE_KEYS) return refuse("key_count is more than WXL_DRAW_MAX_PARTICLE_KEYS");
+            if (in->flags & ~WXL_DRAW_PARTICLES_MASK) return refuse("flags take WXL_DRAW_PARTICLES_MASK (1) alone");
+            if (!(in->texture_blur >= 0.0f && in->texture_blur <= 8.0f)) return refuse("texture_blur must be from 0 to 8");
+            look.mask = (in->flags & WXL_DRAW_PARTICLES_MASK) != 0;
+            look.blur = in->texture_blur;
+            float last = 0.0f;
+            for (uint32_t i = 0; i < in->key_count; ++i)
+            {
+                const wxl_draw_particle_key& k = in->keys[i];
+                if (!unit(k.t) || k.t < last || !unit(k.alpha) || !(k.size >= 0.0f && k.size <= 100.0f))
+                    return refuse("keys must go in order of t (0 to 1), with sizes from 0 and opacities from 0 to 1");
+                last = k.t;
+                look.keys[i] = sh::Key{k.t, k.size, k.color & 0xFFFFFFu, k.alpha};
+            }
+            look.key_count  = in->key_count;
+            look.mode       = in->mode;
+            look.right      = in->texture_right > 0.0f ? in->texture_right : 1.0f;
+            look.bottom     = in->texture_bottom > 0.0f ? in->texture_bottom : 1.0f;
+            look.frames_x   = fx;
+            look.frames_y   = fy;
+            look.frame_rate = in->frame_rate;
+            look.stretch    = in->stretch;
+            look.softness   = in->softness;
+            blend           = in->blend;
+            depth           = in->depth;
+            occluded        = in->occluded_alpha;
+            if (in->texture && *in->texture)
+            {
+                const size_t length = strnlen(in->texture, WXL_DRAW_MAX_TEXTURE_PATH);
+                if (length >= WXL_DRAW_MAX_TEXTURE_PATH) return refuse("texture path is longer than WXL_DRAW_MAX_TEXTURE_PATH");
+                const std::string path(in->texture, length);
+                key = TextureKey(path.c_str());
+                if (!HoldTexture(key, path)) return refuse(("texture '" + path + "' was not made by the client").c_str());
+                look.textured = true;
+            }
+        }
+        LetGoTexture(out.texture);
+        out.texture  = key;
+        out.look     = look;
+        out.blend    = blend;
+        out.depth    = depth;
+        out.occluded = occluded;
+        return true;
+    }
+
+    /// A new emitter of the caller's, from a description and a look; null when refused.
+    Emitter* MakeEmitter(const char* call, const wxl_draw_emitter* desc, const wxl_draw_particles* look, bool kept)
+    {
+        if (!OnMainThread(call)) return nullptr;
+        if (const char* why = Refusal())
+        {
+            Refuse(call, why);
+            return nullptr;
+        }
+        const uint32_t mod = Caller();
+        if (EmittersOf(mod) >= WXL_DRAW_MAX_EMITTERS)
+        {
+            Refuse(call, "the mod holds " + std::to_string(WXL_DRAW_MAX_EMITTERS) + " emitters, as many as it may: stop some first");
+            return nullptr;
+        }
+        auto     e = std::make_unique<Emitter>();
+        uint32_t burst = 0, seed = 0;
+        float    duration = 0.0f;
+        if (!ReadEmitter(call, desc, e->desc, burst, e->rate, duration, seed) || !ReadLook(call, look, *e)) return nullptr;
+        if (!kept && !burst)
+        {
+            Refuse(call, "the emitter's burst is 0: emit throws one burst, and this one throws nothing");
+            return nullptr;
+        }
+        static uint32_t counter = 0;
+        e->random = sh::Random(seed ? seed : 0x9E3779B9u ^ (++counter * 0x85EBCA6Bu) ^ static_cast<uint32_t>(Now() * 1000.0));
+        e->mod    = mod;
+        e->at     = e->desc.center;
+        e->facing = e->desc.facing;
+        e->ends   = kept && duration > 0.0f ? Now() + duration : 0.0;
+        e->stopped = !kept;
+        if (kept)
+        {
+            e->handle                     = static_cast<wxl_handle>(++g_emitterSerial) | (static_cast<wxl_handle>(0xE7u) << 56);
+            g_emitterByHandle[e->handle]  = e.get();
+        }
+        Emitter* made = e.get();
+        g_emitters.push_back(std::move(e));
+        Throw(*made, burst);
+        return made;
+    }
+
+    wxl_result WXL_CALL EmitNow(const wxl_draw_emitter* emitter, const wxl_draw_particles* look)
+    {
+        return MakeEmitter("emit", emitter, look, false) ? WXL_OK : (Refusal() ? WXL_E_UNSUPPORTED : WXL_E_INVALID);
+    }
+
+    wxl_handle WXL_CALL AddEmitter(const wxl_draw_emitter* emitter, const wxl_draw_particles* look)
+    {
+        Emitter* e = MakeEmitter("add_emitter", emitter, look, true);
+        return e ? e->handle : WXL_HANDLE_NONE;
+    }
+
+    wxl_result WXL_CALL UpdateEmitter(wxl_handle handle, const wxl_draw_emitter* desc)
+    {
+        if (!OnMainThread("update_emitter")) return WXL_E_INVALID;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return WXL_E_NOT_FOUND;
+        sh::Emitter next;
+        uint32_t    burst = 0, seed = 0;
+        float       rate = 0.0f, duration = 0.0f;
+        if (!ReadEmitter("update_emitter", desc, next, burst, rate, duration, seed)) return WXL_E_INVALID;
+        e->desc = next;
+        e->rate = rate;
+        e->ends = duration > 0.0f ? Now() + duration : 0.0;
+        if (!e->target)
+        {
+            e->at     = next.center;
+            e->facing = next.facing;
+        }
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL SetEmitterStyle(wxl_handle handle, const wxl_draw_particles* look)
+    {
+        if (!OnMainThread("set_emitter_style")) return WXL_E_INVALID;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return WXL_E_NOT_FOUND;
+        return ReadLook("set_emitter_style", look, *e) ? WXL_OK : WXL_E_INVALID;
+    }
+
+    wxl_result WXL_CALL Burst(wxl_handle handle, uint32_t count)
+    {
+        if (!OnMainThread("burst")) return WXL_E_INVALID;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return WXL_E_NOT_FOUND;
+        if (count > WXL_DRAW_MAX_BURST)
+        {
+            Refuse("burst", "a burst of more than WXL_DRAW_MAX_BURST particles");
+            return WXL_E_INVALID;
+        }
+        Throw(*e, count);
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL Place(wxl_handle handle, wxl_vec3 center, float facing)
+    {
+        if (!OnMainThread("place")) return WXL_E_INVALID;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return WXL_E_NOT_FOUND;
+        if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) || !std::isfinite(facing))
+        {
+            Refuse("place", "the center and the facing must be finite numbers");
+            return WXL_E_INVALID;
+        }
+        e->target      = WXL_HANDLE_NONE;
+        e->paused      = false;
+        e->desc.center = V(center);
+        e->desc.facing = facing;
+        e->at          = e->desc.center;
+        e->facing      = facing;
+        return WXL_OK;
+    }
+
+    wxl_result WXL_CALL Follow(wxl_handle handle, wxl_handle target, uint32_t flags)
+    {
+        if (!OnMainThread("follow")) return WXL_E_INVALID;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return WXL_E_NOT_FOUND;
+        if (!objects::Service().Handles().Resolve(target)) return WXL_E_NOT_FOUND;
+        if (flags & ~WXL_DRAW_ATTACH_TURN)
+        {
+            Refuse("follow", "the flags take WXL_DRAW_ATTACH_TURN (1) alone");
+            return WXL_E_INVALID;
+        }
+        e->target = target;
+        e->attach = flags;
+        e->paused = false;
+        return WXL_OK;
+    }
+
+    void WXL_CALL StopEmitter(wxl_handle handle)
+    {
+        if (!OnMainThread("stop")) return;
+        Emitter* e = FindEmitter(handle);
+        if (!e) return;
+        g_emitterByHandle.erase(handle);
+        e->handle  = WXL_HANDLE_NONE;
+        e->stopped = true;
+    }
+
+    /// The particles move on @p dt seconds: emitters throw at their rate from where they stand, their
+    /// particles step, and the emitters with nothing more to throw nor to show go.
+    void StepParticles(double now, float dt)
+    {
+        for (size_t i = g_emitters.size(); i-- > 0;)
+        {
+            Emitter& e = *g_emitters[i];
+            if (e.target)
+            {
+                void*    object = objects::Service().Handles().Resolve(e.target);
+                wxl_vec3 at{};
+                float    facing = 0.0f;
+                if (!object || binding::object_position(object, &at) != WXL_TRUE)
+                {
+                    // It left view: the emitter throws no more until it is placed again.
+                    e.target = WXL_HANDLE_NONE;
+                    e.paused = true;
+                }
+                else
+                {
+                    binding::object_facing(object, &facing);
+                    float c = 1.0f, s = 0.0f, turn = 0.0f;
+                    if (e.attach & WXL_DRAW_ATTACH_TURN)
+                    {
+                        c    = std::cos(facing);
+                        s    = std::sin(facing);
+                        turn = facing;
+                    }
+                    const sh::V3 o = e.desc.center;
+                    e.at           = sh::V3{at.x + o.x * c - o.y * s, at.y + o.x * s + o.y * c, at.z + o.z};
+                    e.facing       = e.desc.facing + turn;
+                }
+            }
+            if (e.ends > 0.0 && now >= e.ends) e.stopped = true;
+            if (!e.stopped && !e.paused && e.rate > 0.0f)
+            {
+                e.carry += e.rate * dt;
+                const uint32_t n = static_cast<uint32_t>(e.carry);
+                e.carry -= static_cast<float>(n);
+                if (n) Throw(e, n);
+            }
+            const size_t before = e.pool.Size();
+            e.pool.Step(e.desc, dt, &GroundOf(), e.at.z, e.look.softness > 0.0f || e.look.mode == sh::kBillboardGround);
+            const uint32_t gone = static_cast<uint32_t>(before - e.pool.Size());
+            g_particlesAlive -= std::min(gone, g_particlesAlive);
+            uint32_t& mine = g_particlesOf[e.mod];
+            mine -= std::min(gone, mine);
+            if (e.stopped && !e.handle && e.pool.Size() == 0) DropEmitter(i);
+            else if (e.stopped && e.handle && e.ends > 0.0 && e.pool.Size() == 0) DropEmitter(i); // its duration over, its particles gone
+        }
+    }
+
     // --- A frame -------------------------------------------------------------------------------------
 
     uint32_t Color(uint32_t rgb, float alpha)
@@ -814,6 +1241,15 @@ namespace
         out.viewport[5] = w.viewport[5];
         out.eye         = V(w.eye);
         out.scale       = height > 0.0f ? height / 1080.0f : 1.0f;
+        // The camera's axes in the world: the view matrix's columns (row vectors: p * view).
+        const auto axis = [&](int c) {
+            sh::V3      a{w.view[c], w.view[4 + c], w.view[8 + c]};
+            const float l = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+            return l > 1e-6f ? sh::V3{a.x / l, a.y / l, a.z / l} : a;
+        };
+        g_camera.right   = axis(0);
+        g_camera.up      = axis(1);
+        g_camera.forward = axis(2);
         return out.viewport[2] > 0.0f && out.viewport[3] > 0.0f;
     }
 
@@ -840,7 +1276,7 @@ namespace
 local native = __wxl_draw
 __wxl_draw = nil
 local type, ipairs, tostring, format, concat = type, ipairs, tostring, string.format, table.concat
-local kinds = { line = 0, circle = 1, ring = 2, sector = 3, rectangle = 4, polygon = 5, grid = 6, box = 7, sphere = 8, cylinder = 9 }
+local kinds = { line = 0, circle = 1, ring = 2, sector = 3, rectangle = 4, polygon = 5, grid = 6, box = 7, sphere = 8, cylinder = 9, beam = 10 }
 local uvs = { fit = 0, tile = 1, world = 2 }
 local blends = { alpha = 0, add = 1, modulate = 2 }
 local function num(t, k, default)
@@ -1041,6 +1477,14 @@ namespace wxl::core::services
             table.remove             = &Remove;
             table.clear              = &ClearMine;
             table.stats              = &Stats;
+            table.emit               = &EmitNow;
+            table.add_emitter        = &AddEmitter;
+            table.update_emitter     = &UpdateEmitter;
+            table.set_emitter_style  = &SetEmitterStyle;
+            table.burst              = &Burst;
+            table.place              = &Place;
+            table.follow             = &Follow;
+            table.stop               = &StopEmitter;
             return table;
         }();
         return api;
@@ -1051,9 +1495,26 @@ namespace wxl::core::services
         void Render()
         {
             g_worldThisFrame = true;
-            if (g_kept.empty() && !g_immediateCount) return;
-            const auto started = Clock::now();
-            const double now   = Now();
+            const auto   started = Clock::now();
+            const double now     = Now();
+            // The particles move on by the time since the last world drawn (at most a tenth of a
+            // second: a frame held longer does not throw them far).
+            const float dt   = g_lastStep > 0.0 ? static_cast<float>(std::clamp(now - g_lastStep, 0.0, 0.1)) : 0.0f;
+            g_lastStep       = now;
+            g_emittedFrame   = 0;
+            StepParticles(now, dt);
+            const float stepped = std::chrono::duration<float, std::micro>(Clock::now() - started).count();
+            if (g_kept.empty() && !g_immediateCount && g_emitters.empty())
+            {
+                g_stats.particles             = g_particlesAlive;
+                g_stats.emitters              = 0;
+                g_stats.particles_emitted     = g_emittedFrame;
+                g_stats.particle_draws        = 0;
+                g_stats.particle_microseconds = stepped;
+                g_stats.particles_culled      = g_culled;
+                g_culled                      = 0;
+                return;
+            }
 
             // Kept shapes: those whose time is up go, those whose object left view go, those that
             // moved or whose ground changed are built again.
@@ -1155,6 +1616,43 @@ namespace wxl::core::services
                 runs.push_back(run);
             };
             const auto take = [&](const sh::Mesh& mesh, const Style& style, float beat) {
+                if (mesh.beam.on)
+                {
+                    // A beam: its quad turned towards the eye this frame; a surface when it is soft
+                    // across, textured or blended, else a plain inside.
+                    if (!(style.fill > 0.0f)) return;
+                    const size_t n = sh::kBeamSegments * 6;
+                    if (total + n > WXL_DRAW_MAX_FRAME_VERTICES)
+                    {
+                        ++leftOut;
+                        return;
+                    }
+                    total += static_cast<uint32_t>(n);
+                    ++drawn;
+                    const bool top    = style.depth == WXL_DRAW_DEPTH_ON_TOP;
+                    Bucket*    bucket = &g_buckets[top ? 1 : 0];
+                    if (style.occluded > 0.0f && !top)
+                    {
+                        if (g_occludedCount == g_occluded.size()) g_occluded.emplace_back();
+                        bucket = &g_occluded[g_occludedCount++];
+                        bucket->Clear();
+                        bucket->occluded = style.occluded;
+                        ++occluded;
+                    }
+                    const uint32_t fc = Color(style.fill_color, style.fill * beat);
+                    if (!style.Surface())
+                    {
+                        sh::WriteBeam(mesh, view.eye, fc, false, bucket->fill);
+                        return;
+                    }
+                    void* texture = nullptr;
+                    if (style.look.textured && !(texture = deviceTexture(style.texture))) return;
+                    surfaceRun(bucket->surfaceRuns, bucket->surfaces, style, top, sh::MakeBeamSurface(mesh, style.look), texture);
+                    sh::WriteBeam(mesh, view.eye, fc, false, bucket->surfaces);
+                    bucket->surfaceRuns.back().count = static_cast<uint32_t>(bucket->surfaces.size()) - bucket->surfaceRuns.back().first;
+                    ++textured;
+                    return;
+                }
                 if (!mesh.lines.size() && !mesh.triangles.size()) return;
                 const bool   shadow = style.shadow_alpha > 0.0f && !mesh.lines.empty();
                 const bool   xray   = style.occluded > 0.0f && style.depth == WXL_DRAW_DEPTH_TESTED;
@@ -1280,6 +1778,51 @@ namespace wxl::core::services
                     ++textured;
                 }
             }
+            // Particles: an emitter's in one run, sorted far to near when blended by their opacity;
+            // emitters far to near too. A texture still loading leaves them out of the frame.
+            const auto particlesFrom = Clock::now();
+            if (seen && !g_emitters.empty())
+            {
+                std::vector<std::pair<float, Emitter*>> order;
+                order.reserve(g_emitters.size());
+                for (const auto& e : g_emitters)
+                    if (e->pool.Size())
+                    {
+                        const float dx = e->at.x - view.eye.x, dy = e->at.y - view.eye.y, dz = e->at.z - view.eye.z;
+                        order.push_back({dx * dx + dy * dy + dz * dz, e.get()});
+                    }
+                std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (const auto& [distance, e] : order)
+                {
+                    void* texture = nullptr;
+                    if (e->look.textured && !(texture = deviceTexture(e->texture))) continue;
+                    const bool top    = e->depth == WXL_DRAW_DEPTH_ON_TOP;
+                    Bucket*    bucket = &g_buckets[top ? 1 : 0];
+                    if (e->occluded > 0.0f && !top)
+                    {
+                        if (g_occludedCount == g_occluded.size()) g_occluded.emplace_back();
+                        bucket = &g_occluded[g_occludedCount++];
+                        bucket->Clear();
+                        bucket->occluded = e->occluded;
+                        ++occluded;
+                    }
+                    sh::Surface surface;
+                    surface.constants = sh::ParticleConstants(texture != nullptr, e->blend == WXL_DRAW_BLEND_MODULATE, e->look.mask, e->look.blur);
+                    surface.texture   = texture;
+                    sh::Run run;
+                    run.first   = static_cast<uint32_t>(bucket->particles.size());
+                    run.on_top  = top;
+                    run.program = sh::kParticle;
+                    run.blend   = static_cast<uint8_t>(e->blend);
+                    run.surface = static_cast<uint32_t>(g_surfaces.size());
+                    e->pool.Write(bucket->particles, e->look, g_camera, view.eye, e->blend == WXL_DRAW_BLEND_ALPHA);
+                    run.count = static_cast<uint32_t>(bucket->particles.size()) - run.first;
+                    g_surfaces.push_back(surface);
+                    bucket->particleRuns.push_back(run);
+                }
+            }
+            const float particlesWritten = std::chrono::duration<float, std::micro>(Clock::now() - particlesFrom).count();
+
             const uint32_t immediate = static_cast<uint32_t>(g_immediateCount);
             for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();
             g_immediateCount = 0;
@@ -1330,6 +1873,7 @@ namespace wxl::core::services
                     withRuns(b.volumes, b.volumeRuns);
                     plain(b.shadows);
                     plain(b.lines);
+                    withRuns(b.particles, b.particleRuns);
                 };
                 lay(g_buckets[0], false);
                 for (const sh::Run& run : runs) add(run);
@@ -1382,6 +1926,15 @@ namespace wxl::core::services
             g_stats.shadows                = shadowed;
             g_stats.occluded               = occluded;
             g_stats.reused                 = reused;
+            uint32_t particleDraws = 0;
+            for (const sh::Run& run : g_runs) particleDraws += seen && run.program == sh::kParticle ? 1u : 0u;
+            g_stats.particles             = g_particlesAlive;
+            g_stats.particles_emitted     = g_emittedFrame;
+            g_stats.particle_draws        = particleDraws;
+            g_stats.emitters              = static_cast<uint32_t>(g_emitters.size());
+            g_stats.particle_microseconds = stepped + particlesWritten;
+            g_stats.particles_culled      = g_culled;
+            g_culled                      = 0;
             ++g_stats.frames;
             g_immediateSeconds = 0.0;
             g_leftOutSince += leftOut;
@@ -1429,6 +1982,8 @@ namespace wxl::core::services
 
         void ForgetMod(uint32_t mod)
         {
+            for (size_t i = g_emitters.size(); i-- > 0;)
+                if (g_emitters[i]->mod == mod) DropEmitter(i);
             for (size_t i = g_kept.size(); i-- > 0;)
                 if (g_kept[i]->mod == mod) Drop(g_kept[i].get());
             size_t live = 0;
@@ -1448,6 +2003,12 @@ namespace wxl::core::services
 
         void Clear()
         {
+            g_emitters.clear();
+            g_emitterByHandle.clear();
+            g_particlesAlive = 0;
+            g_particlesOf.clear();
+            g_culled         = 0;
+            g_lastStep       = 0.0;
             g_kept.clear();
             g_byHandle.clear();
             for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();

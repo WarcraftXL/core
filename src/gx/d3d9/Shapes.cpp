@@ -27,6 +27,7 @@ namespace
         IDirect3DVertexShader9*      vertex = nullptr;
         IDirect3DPixelShader9*       pixel  = nullptr;
         IDirect3DPixelShader9*       surface = nullptr;
+        IDirect3DPixelShader9*       particle = nullptr;
         IDirect3DVertexDeclaration9* layout = nullptr;
     };
 
@@ -42,6 +43,7 @@ namespace
         if (g_programs.vertex) device.Release(g_programs.vertex);
         if (g_programs.pixel) device.Release(g_programs.pixel);
         if (g_programs.surface) device.Release(g_programs.surface);
+        if (g_programs.particle) device.Release(g_programs.particle);
         if (g_programs.layout) device.Release(g_programs.layout);
         g_programs = Programs{};
     }
@@ -78,7 +80,7 @@ namespace
 
     bool Make(Device& device)
     {
-        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.layout) return true;
+        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.particle && g_programs.layout) return true;
         static const D3DVERTEXELEMENT9 kLayout[] = {
             {0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
             {0, 12, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},
@@ -91,8 +93,10 @@ namespace
             g_programs.pixel = nullptr;
         if (!g_programs.surface && FAILED(device.CreatePixelShader(reinterpret_cast<const DWORD*>(kSurfacePs), &g_programs.surface)))
             g_programs.surface = nullptr;
+        if (!g_programs.particle && FAILED(device.CreatePixelShader(reinterpret_cast<const DWORD*>(kParticlePs), &g_programs.particle)))
+            g_programs.particle = nullptr;
         if (!g_programs.layout && FAILED(device.CreateDeclaration(kLayout, &g_programs.layout))) g_programs.layout = nullptr;
-        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.layout) return true;
+        if (g_programs.vertex && g_programs.pixel && g_programs.surface && g_programs.particle && g_programs.layout) return true;
         Drop(device);
         return false;
     }
@@ -199,11 +203,13 @@ namespace wxl::core::gx::d3d9::shapes
                 lift[2] = alpha;
                 d.SetVertexConstants(kViewRegister + 5, lift, 1);
             }
-            const bool surface = run.program == wxl::gx::shapes::kSurface && surfaces;
-            if (static_cast<int>(surface) != program)
+            // Surfaces and particles read their numbers and their picture; lines and plain insides none.
+            const int  which   = surfaces ? (run.program == wxl::gx::shapes::kSurface ? 1 : run.program == wxl::gx::shapes::kParticle ? 2 : 0) : 0;
+            const bool surface = which != 0;
+            if (which != program)
             {
-                program = surface ? 1 : 0;
-                d.SetPixelShader(surface ? g_programs.surface : g_programs.pixel);
+                program = which;
+                d.SetPixelShader(which == 1 ? g_programs.surface : which == 2 ? g_programs.particle : g_programs.pixel);
             }
             const int b = surface ? std::min<int>(run.blend, 2) : 0;
             if (b != blend)

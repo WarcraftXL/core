@@ -66,6 +66,6 @@ namespace wxl::vk::render
         Pipeline* PipelineFor(uint8_t program, uint8_t blend, uint32_t depth, std::string* why);
 
         Render*   render_ = nullptr;
-        Pipeline* pipelines_[2][3][3] = {}; ///< by program, blend (a surface's), depth
+        Pipeline* pipelines_[3][3][3] = {}; ///< by program (plain, surface, particle), blend, depth
     };
 }

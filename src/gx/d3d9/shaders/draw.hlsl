@@ -138,15 +138,43 @@ float4 SurfacePs(float4 color : COLOR0, float3 plane : TEXCOORD1) : COLOR0
     // The derivatives first, where every pixel of the quad runs.
     const float2 uv    = float2(dot(float3(x, y, 1.0), surface[0].xyz), dot(float3(x, y, 1.0), surface[1].xyz));
     const float2 scale = surface[2].xy;
-    const float2 gx    = ddx(uv * scale);
-    const float2 gy    = ddy(uv * scale);
+    const float  blur  = max(surface[5].w, 1.0);
+    const float2 gx    = ddx(uv * scale) * blur;
+    const float2 gy    = ddy(uv * scale) * blur;
     float4       texel = float4(1.0, 1.0, 1.0, 1.0);
     if (surface[2].w > 0.5)
     {
         const float2 at = surface[2].z > 0.5 ? frac(uv) * scale : saturate(uv) * scale;
         texel = tex2Dgrad(picture, at, gx, gy);
+        if (surface[5].z > 0.5) texel.rgb = float3(1.0, 1.0, 1.0);
     }
     const float  a = color.a * texel.a * edge * fade;
+    const float3 c = color.rgb * texel.rgb;
+    return surface[5].y > 0.5 ? float4(1.0 + (c - 1.0) * a, a) : float4(c, a);
+}
+
+// Particles (gx/shapes/Particles.hpp): a picture of the texture, or a soft round blot of the
+// sprite's 0 to 1 square; faded by the corner's height above the ground over the softness, as
+// ParticleShade on the CPU. surface[2].w: textured; surface[5].y: MODULATE.
+float4 ParticlePs(float4 color : COLOR0, float3 plane : TEXCOORD1) : COLOR0
+{
+    const float2 uv = plane.xy;
+    const float  blur = max(surface[5].w, 1.0);
+    const float2 gx = ddx(uv) * blur;
+    const float2 gy = ddy(uv) * blur;
+    float4       texel;
+    if (surface[2].w > 0.5)
+    {
+        texel = tex2Dgrad(picture, uv, gx, gy);
+        if (surface[5].z > 0.5) texel.rgb = float3(1.0, 1.0, 1.0);
+    }
+    else
+    {
+        const float2 d = uv * 2.0 - 1.0;
+        const float  a = saturate(1.0 - dot(d, d));
+        texel = float4(1.0, 1.0, 1.0, a * a);
+    }
+    const float  a = color.a * texel.a * saturate(plane.z);
     const float3 c = color.rgb * texel.rgb;
     return surface[5].y > 0.5 ? float4(1.0 + (c - 1.0) * a, a) : float4(c, a);
 }
