@@ -34,6 +34,7 @@
 #include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/StorageService.hpp"
+#include "services/NetService.hpp"
 #include "services/RelayService.hpp"
 
 #include "wxl/services/object.h"
@@ -102,6 +103,7 @@ namespace wxl::core::attachment
             { WXL_TERRAIN_SERVICE, WXL_TERRAIN_SERVICE_VERSION, &services::TerrainApi() },
             { WXL_DRAW_SERVICE, WXL_DRAW_SERVICE_VERSION, &services::DrawApi() },
             { WXL_ANIMATION_SERVICE, WXL_ANIMATION_SERVICE_VERSION, &services::AnimationApi() },
+            { WXL_NET_SERVICE, WXL_NET_SERVICE_VERSION, &services::NetApi() },
 #if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
             { WXL_PROFILE_SERVICE, WXL_PROFILE_SERVICE_VERSION, &profile::Api() },
 #endif

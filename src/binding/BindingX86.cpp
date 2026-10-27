@@ -2832,6 +2832,25 @@ namespace wxl::core::binding
         x86::CallMember<void>(WXL_SITE("CMovement_C::OnFallLocal", 0), movement, os_time_ms());
     }
 
+    // --- NetClient: a message of a mod's, sent as the client sends its own -----------------------
+
+    wxl_bool net_send(const void* message, uint32_t size)
+    {
+        if (!IsClient() || !OnMainThread() || !message || size < 4) return WXL_FALSE;
+        // ClientServices::Send2 ends the client (SErrDisplayAppFatalMessage) when there is no
+        // connection: ask first.
+        if (!*reinterpret_cast<void* const*>(WXL_STATIC("ClientServices::s_currentConnection"))) return WXL_FALSE;
+        // A CDataStore of 0x18 bytes over the message, as the client wraps received bytes:
+        // CDataStore::CDataStore(data, size) (__thiscall, `ret 8`, 0x004669A0) sets its vtable,
+        // m_alloc -1 (nothing to free) and m_read 0. ClientServices::Send2(msg) (__cdecl, 0x006B0B50)
+        // hands it to NetClient::Send, which frames, encrypts and sends it.
+        alignas(4) uint8_t store[0x18] = {};
+        x86::CallMember<void*>(WXL_SITE_AT("CDataStore::CDataStore", 0x004669A0, 0), store,
+                               const_cast<uint8_t*>(static_cast<const uint8_t*>(message)), size);
+        x86::CallFree<void>(WXL_SITE("ClientServices::Send2", 0), static_cast<void*>(store));
+        return WXL_TRUE;
+    }
+
     // --- Animation: a unit's animation as the client plays it --------------------------------
 
     void unit_play_animation(void* unit, uint32_t anim, uint32_t flags)

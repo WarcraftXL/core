@@ -32,6 +32,7 @@
 #include "services/DrawService.hpp"
 #include "services/StorageService.hpp"
 #include "services/Hashes.hpp"
+#include "services/NetService.hpp"
 #include "services/RelayService.hpp"
 
 #include "wxl/core/init.h"
@@ -147,6 +148,8 @@ namespace
         wxl::core::services::draw::ForgetMod(token);
         // Its animations on units end; the game chooses theirs again.
         wxl::core::services::animation::ForgetMod(token);
+        // Its opcode numbers are given back: their messages stop reaching anyone.
+        wxl::core::services::net::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a

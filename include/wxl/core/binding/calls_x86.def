@@ -6,7 +6,7 @@
 // the textures wxl.selectioncircle draws the game's circles with, for wxl.cvar's variables, for
 // the interface's signature the FrameXML seam asks about, for the scene's models the animate gates
 // animate on the runtime's threads, for the ground wxl.terrain reshapes
-// and the fall it starts, and for the units' animations wxl.animation plays (src/binding/BindingX86.cpp), and the device's own work the Vulkan
+// and the fall it starts, for the units' animations wxl.animation plays and for the messages wxl.net sends (src/binding/BindingX86.cpp), and the device's own work the Vulkan
 // renderer's adapter of the stock client keeps (src/gx/x86/), as data: one row per function, with
 // the convention and the parameters BindingX86 calls it with. check_conventions.py holds every row against Wow.exe
 // as it holds the seams; BindingX86 resolves each symbol when it compiles.
@@ -115,6 +115,8 @@ WXL_BINDING_CALL_X86(GxCall, CommandRegister, "ConsoleCommandRegister", int32_t,
 WXL_BINDING_CALL_X86(GxCall, ConsoleWrite, "ConsoleWrite", void, cdecl, (const char* text, uint32_t color))
 // A texture's callback (CGxTex::m_userFunc, a GxTexUserFunc) is called as this one of them is.
 WXL_BINDING_CALL_X86(GxCall, TexUserFunc, "CGxDevice::ICursorUpdate", void, cdecl, (uint32_t command, uint32_t width, uint32_t height, uint32_t face, uint32_t level, void* user_arg, uint32_t* stride, const void** texels))
+WXL_BINDING_CALL_X86(NetCall, StoreOver, "CDataStore::CDataStore@0x004669A0", void*, thiscall, (void* self, uint8_t* data, uint32_t size))
+WXL_BINDING_CALL_X86(NetCall, Send2, "ClientServices::Send2", void, cdecl, (void* message))
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
