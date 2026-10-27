@@ -10262,6 +10262,24 @@ namespace
         return DefWindowProcA(static_cast<HWND>(window), message, wparam, lparam);
     }
 
+    // CGxDevice::ITexWHDStartEnd as Wow.exe's (0x006A5EF0): a mipmapped texture's first level is the
+    // device's base mip level, read through ECX (`mov ecx,[ecx+0x350]` at 0x006A5FAE).
+    void* g_whdThis = nullptr;
+    void __fastcall StandInWHDStartEnd(void* self, void*, void* texture, uint32_t* width, uint32_t* height, uint32_t* base, uint32_t* count)
+    {
+        g_whdThis       = self;
+        const auto* tex = static_cast<const wxl::engine::CGxTex*>(texture);
+        *count          = 7; // a 64x64 texture
+        *base           = self ? std::min<uint32_t>(static_cast<const wxl::engine::CGxDevice*>(self)->m_baseMipLevel, *count - 1) : 99;
+        *width          = tex->m_width >> *base;
+        *height         = tex->m_height >> *base;
+    }
+    void __cdecl StandInTexUser(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t* stride, const void** texels)
+    {
+        *stride = 0;
+        *texels = nullptr;
+    }
+
     // CGxDevice::DeviceCreate as Wow.exe's: the window procedure kept, then DeviceSetFormat through the vtable.
     int32_t __fastcall StandInBaseDeviceCreate(void* self, void*, void* proc, const void* format)
     {
@@ -10280,6 +10298,7 @@ namespace
     {
         wxl_result create = WXL_E_FAILED;
         uint32_t   created = 0, destroyed = 0, scenes = 0, presents = 0, draws = 0, caps = 0;
+        uint32_t   textures = 0, tex_width = 0, tex_levels = 0;
     } g_backendCalls;
 
     wxl_gx_vk_backend MakeBackendStandIn()
@@ -10308,7 +10327,14 @@ namespace
         b.pool_memory        = [](void*, void*) -> char* { return nullptr; };
         b.pool_resize        = [](void*, void*) {};
         b.pool_destroy       = [](void*, void*) {};
-        b.tex_create         = [](void*, void*, uint32_t, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.tex_create         = [](void*, void* tex, uint32_t width, uint32_t height, uint32_t levels) -> int32_t {
+            ++g_backendCalls.textures;
+            g_backendCalls.tex_width  = width;
+            g_backendCalls.tex_levels = levels;
+            static int record;
+            static_cast<wxl::engine::CGxTex*>(tex)->m_apiSpecificData = &record;
+            return 1;
+        };
         b.tex_destroy        = [](void*, void*) {};
         b.simulate_loss      = [](void*) {};
         b.describe           = [](void*, char* out, uint32_t size) { std::snprintf(out, size, "stand-in"); };
@@ -10352,6 +10378,7 @@ namespace
 #include "wxl/core/binding/calls_x86.def"
         stock.GxCall_DeviceCreate    = &StandInBaseDeviceCreate;
         stock.GxCall_DeviceSetFormat = &StandInBaseSetFormat;
+        stock.GxCall_ITexWHDStartEnd = &StandInWHDStartEnd;
         static void*    devicePtr = nullptr;
         static uint8_t  shadow[2 * 0x1008] = {};
         static void*    uiVertex[2] = {};
@@ -10442,6 +10469,24 @@ namespace
             CallSlot(table[38], device, nullptr, 0, 0);
             Check(g_backendCalls.draws == 1 && g_backendCalls.presents == 1 && g_backendCalls.scenes == 2,
                   "its draws and presents reach the table, and the next frame opens");
+
+            // A mipmapped texture bound for the first time: made with every level from the device's
+            // base mip, which CGxDevice::ITexWHDStartEnd reads through `this`.
+            auto* tex                 = static_cast<wxl::engine::CGxTex*>(Scratch());
+            std::memset(tex, 0, sizeof *tex);
+            tex->m_width              = 64;
+            tex->m_height             = 64;
+            tex->m_flags.m_filter     = 4; // trilinear: mips
+            tex->m_needsUpdate        = 1;
+            tex->m_needsCreation      = 1;
+            tex->m_userFunc           = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&StandInTexUser));
+            engine->m_baseMipLevel    = 0;
+            g_whdThis                 = nullptr;
+            uint32_t texArg           = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(tex));
+            CallSlot(table[0], device, &texArg, 1, 0);
+            Check(g_slotEspBefore == g_slotEspAfter && g_whdThis == device && g_backendCalls.textures == 1 &&
+                      g_backendCalls.tex_levels == 7 && g_backendCalls.tex_width == 64 && !tex->m_needsCreation,
+                  "a texture bound the first time is made from the device's base mip with all its levels (ITexWHDStartEnd given `this`)");
             uint32_t flags = 0;
             g_d3d9Destroyed = 0;
             CallSlot(table[8], device, &flags, 1, 0);

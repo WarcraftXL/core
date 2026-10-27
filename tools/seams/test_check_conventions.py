@@ -172,6 +172,15 @@ ANSWERS = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "mov eax, 7"), (1, "pop
 ANSWER_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402440"), (2, "test eax, eax"),
                      (1, "pop ebp"), (1, "ret"))
 
+# A member that writes ECX on an early return and reads `this` through it only past the branch
+# that skips the write, as CGxDevice::ITexWHDStartEnd (0x006A5F1F, 0x006A5FAE): read straight
+# down, ECX looks written before it is read.
+BRANCH_ECX = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"),
+                  (2, "test eax, eax"), (2, "jne 0x4024d1"), (3, "mov ecx, dword ptr [ebp + 8]"),
+                  (1, "pop ebp"), (3, "ret 4"),
+                  # 0x004024D1
+                  (6, "mov ecx, dword ptr [ecx + 0x350]"), (1, "pop ebp"), (3, "ret 4"))
+
 PROGRAM = {
     0x00401000: CDECL_TWO,
     0x00401100: STDCALL_TWO,
@@ -202,6 +211,7 @@ PROGRAM = {
     0x00402400: NO_ANSWER_CALLER,
     0x00402440: ANSWERS,
     0x00402480: ANSWER_CALLER,
+    0x004024C0: BRANCH_ECX,
 }
 
 # (name, address, extent)
@@ -219,7 +229,7 @@ SYMBOLS = [("Thing::Plain", 0x00401000, 0x20), ("Thing::Owned", 0x00401100, 0x20
            ("Thing::TailCaller", 0x00402200, 0x20), ("Thing::FloatSlot", 0x00402300, 0x20),
            ("Thing::PushedEcx", 0x00402340, 0x20), ("Thing::NoAnswer", 0x00402380, 0x20),
            ("Thing::NoAnswerCaller", 0x00402400, 0x20), ("Thing::Answers", 0x00402440, 0x20),
-           ("Thing::AnswerCaller", 0x00402480, 0x20)]
+           ("Thing::AnswerCaller", 0x00402480, 0x20), ("Thing::BranchEcx", 0x004024C0, 0x20)]
 
 
 def flatten():
@@ -297,6 +307,7 @@ DEMO_DEF = '''// The demo domain.
 WXL_SEAM(Demo, Plain, "Thing::Plain", void, cdecl, (int32_t a, int32_t b))
 WXL_SEAM(Demo, Owned, "Thing::Owned", void, stdcall, (int32_t a, int32_t b))
 WXL_SEAM(Demo, Member, "Thing::Member", void, thiscall, (void* self, int32_t a))
+WXL_SEAM(Demo, BranchEcx, "Thing::BranchEcx", void, thiscall, (void* self, int32_t a))
 WXL_SEAM(Demo, Fast, "Thing::Fast", void, regparm, (void* context, int32_t a))
 WXL_SEAM(Demo, Switch, "Thing::Switch", void, regparm, (void* object, const void* create, uint32_t time))
 WXL_SEAM(Demo, AllOnes, "Thing::AllOnes", void, cdecl, (int32_t* out))
@@ -391,6 +402,10 @@ CASES = [
      DEMO_DEF.replace('"Thing::Member", void, thiscall, (void* self, int32_t a)',
                       '"Thing::Member", void, cdecl, (int32_t a)'),
      THUNKS, 1, "declared cdecl, but 0x00401200 is thiscall (ECX) + 1 stack dword(s)", ()),
+    ("a member reading this only past a branch, declared stdcall",
+     DEMO_DEF.replace('"Thing::BranchEcx", void, thiscall, (void* self, int32_t a)',
+                      '"Thing::BranchEcx", void, stdcall, (int32_t a)'),
+     THUNKS, 1, "declared stdcall, but 0x004024C0 is thiscall (ECX) + 1 stack dword(s)", ()),
     ("a stdcall function declared cdecl",
      DEMO_DEF.replace('"Thing::Owned", void, stdcall,', '"Thing::Owned", void, cdecl,'),
      THUNKS, 1, "declared cdecl, but 0x00401100 is stdcall, 2 stack dword(s)", ()),
@@ -1152,7 +1167,7 @@ GROUND_TRUTH = {
     "GxCall.ShaderConstantsClear":           ("0x006833A0", "cdecl", [], 0),
     "GxCall.IRsSync":                        ("0x00685B50", "thiscall", ["ecx"], 1),
     "GxCall.ITexMarkAsUpdated":              ("0x00684900", "stdcall", [], 1),
-    "GxCall.ITexWHDStartEnd":                ("0x006A5EF0", "stdcall", [], 5),
+    "GxCall.ITexWHDStartEnd":                ("0x006A5EF0", "thiscall", ["ecx"], 5),
     "GxCall.TexMarkForUpdate":               ("0x006848A0", "thiscall", ["ecx"], 3),
     "GxCall.TexDestroy":                     ("0x00687980", "stdcall", [], 1),
     "GxCall.PoolDestroy":                    ("0x00688340", "thiscall", ["ecx"], 1),
