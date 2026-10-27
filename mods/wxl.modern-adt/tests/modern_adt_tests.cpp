@@ -8,16 +8,19 @@
 // rewritten pixel program run by a small ps_3_0 interpreter against the blend's formula worked out
 // apart: the Direct3D 9 path's CPU reference (the Vulkan renderer's is held on lavapipe). Tiles
 // split by file name: the files read beside a root without MCIN, handed to the tile provider, and
-// the textures a split tile's layers name, read from its _tex0.
+// the textures a split tile's layers name, read from its _tex0; FileDataIDs named from a listfile
+// and its index, MDID's textures, a WDT's MAID.
 
 #include "Options.hpp"
 #include "adt/Reader.hpp"
 #include "adt/Survey.hpp"
 #include "features/ExtraLayers.hpp"
+#include "features/FileNames.hpp"
 #include "features/HeightBlend.hpp"
 #include "features/SplitTiles.hpp"
 #include "features/TextureScale.hpp"
 #include "shader/Ps3.hpp"
+#include "store/Listfile.hpp"
 #include "store/Store.hpp"
 #include "store/TileSet.hpp"
 
@@ -27,6 +30,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1139,6 +1143,85 @@ namespace
               "a tile asked before it was read has its files read then; none found, none answered");
     }
 
+    void ListfileCases()
+    {
+        const std::string csv = "id;path\r\n189077;Tileset/Elwynn/Grass.blp\r\n12;world/a.m2\n\nbad line\n12;world/b.m2\n7;x/y.wmo";
+        const auto*       bytes = reinterpret_cast<const uint8_t*>(csv.data());
+        const uint64_t    hash  = Listfile::Hash(bytes, csv.size());
+        Listfile          list;
+        Check(list.Use(Listfile::BuildIndex(bytes, csv.size(), hash), hash) && list.Count() == 3, "a listfile's lines indexed: a header, a blank and a bad line skipped, an id named twice once");
+        std::string name;
+        Check(list.Name(189077, name) && name == "Tileset\\Elwynn\\Grass.blp" && list.Name(12, name) && name == "world\\a.m2" &&
+                  list.Name(7, name) && name == "x\\y.wmo" && !list.Name(8, name) && !list.Name(0, name) && !list.Name(999999, name),
+              "names found by id (the first of a twice-named one), '/' read as '\\', CR left out; ids it has not refused");
+        Listfile other;
+        Check(!other.Use(Listfile::BuildIndex(bytes, csv.size(), hash), hash + 1) && other.Empty(), "an index of another CSV is refused");
+        std::vector<uint8_t> bad = Listfile::BuildIndex(bytes, csv.size(), hash);
+        bad.resize(30);
+        Check(!other.Use(bad, hash), "an index cut short is refused");
+
+        // FileNames: the map's listfile before the mod's, the index kept and used again.
+        std::map<std::string, std::vector<uint8_t>> disk, archives;
+        archives["World\\Maps\\M\\listfile.csv"] = std::vector<uint8_t>({'5', ';', 'm', 'a', 'p', '.', 'b', 'l', 'p', '\n'});
+        disk["Mods\\wxl.modern-adt\\listfile.csv"] = std::vector<uint8_t>(csv.begin(), csv.end());
+        int writes = 0;
+        auto read = [](std::map<std::string, std::vector<uint8_t>>& from) {
+            return [&from](const std::string& path, std::vector<uint8_t>& out) {
+                const auto at = from.find(path);
+                if (at == from.end()) return false;
+                out = at->second;
+                return true;
+            };
+        };
+        auto write = [&](const std::string& path, const std::vector<uint8_t>& bytes) {
+            ++writes;
+            disk[path] = bytes;
+            return true;
+        };
+        FileNames names("Mods\\wxl.modern-adt", read(archives), read(disk), write);
+        names.MapOf("World\\Maps\\M\\M_1_2.adt");
+        Check(names.Name(5, name) && name == "map.blp" && names.Name(12, name) && name == "world\\a.m2" && !names.Name(9, name) &&
+                  names.Named() == 2 && names.Unknown() == 1,
+              "an id named by the map's listfile, else the mod's; one neither knows is unknown");
+        Check(names.Indexed() == 2 && writes == 2, "each CSV indexed once and its index written to the cache");
+        FileNames again("Mods\\wxl.modern-adt", read(archives), read(disk), write);
+        again.MapOf("World\\Maps\\M\\M_1_2.adt");
+        Check(again.Name(189077, name) && again.Name(5, name) && again.Indexed() == 0 && writes == 2,
+              "the next launch reads the indexes from the cache, by the CSV's hash");
+
+        // A _tex0 of 8.1 naming its textures by FileDataID, and a WDT listing a tile's files.
+        Adt tex0;
+        tex0.Chunk(adt::kMVER, Words({18}));
+        tex0.Chunk(adt::Id("MDID"), Words({189077, 4242}));
+        Adt root;
+        root.Chunk(adt::kMVER, Words({18}));
+        root.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
+        root.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
+        std::vector<uint8_t> maid(64 * 64 * 32, 0);
+        const uint32_t       ids[4] = {100, 101, 102, 103}; // root, obj0, obj1, tex0 of tile (2, 3)
+        std::memcpy(&maid[(3 * 64 + 2) * 32], ids, sizeof ids);
+        Adt wdt;
+        wdt.Chunk(adt::kMVER, Words({18}));
+        wdt.Chunk(adt::kMPHD, Words({0x200, 0, 0, 0, 0, 0, 0, 0}));
+        wdt.Chunk(adt::Id("MAID"), maid);
+        std::map<std::string, std::vector<uint8_t>> files;
+        files["x\\tex.adt"] = tex0.bytes;
+        files["x\\obj.adt"] = Words({1});
+        TileSet tiles(read(files), [&](uint32_t id, std::string& out) {
+            if (id == 103) out = "x\\tex.adt";
+            else if (id == 101) out = "x\\obj.adt";
+            else return names.Name(id, out);
+            return true;
+        });
+        tiles.Loaded("World\\Maps\\M\\M_2_3.adt", 2, 3, root.bytes.data(), static_cast<uint32_t>(root.bytes.size()));
+        Check(tiles.Of(2, 3)->tex0.empty(), "a tile whose files are not under their usual names has none read");
+        tiles.ReadMissingByIds(2, 3, wdt.bytes.data(), static_cast<uint32_t>(wdt.bytes.size()));
+        const TileSet::Files* f = tiles.Of(2, 3);
+        Check(f->tex0 == tex0.bytes && f->obj0.size() == 4 && f->obj1.empty(), "MAID's ids named: _tex0 and _obj0 read under the names they are given");
+        Check(f->textureNames.size() == 2 && f->textureNames[0] == "Tileset\\Elwynn\\Grass.blp" && f->textureNames[1] == "FileDataID_4242.blp",
+              "MDID's textures named, one unknown given the runtime's placeholder");
+    }
+
     void OptionCases()
     {
         Options o = ParseOptions("; comment\n[texture_scale]\nenabled = 0\nsource = MTXF\n");
@@ -1168,6 +1251,7 @@ int main()
     EightLayerCases();
     OptionCases();
     TileSetCases();
+    ListfileCases();
     std::printf("%d check(s), %d failure(s)\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
