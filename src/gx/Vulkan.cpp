@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The renderer inside the runtime: the table the recompiled client's CGxDeviceVk calls
-// (wxl/core/gx_vk.h), the Vulkan device made from WarcraftXL.ini's [gx] section, and on the stock
-// client, which has no Vulkan adapter, the same device made once its own D3D9 device is up.
+// The renderer inside the runtime: the table both clients' adapters call (wxl/core/gx_vk.h): the
+// recompiled client's CGxDeviceVk, and on the stock client the vtable copy of gx/x86/Adapter.cpp.
+// The Vulkan device is made from WarcraftXL.ini's [gx] section.
 //
-// On the recompiled client the device renders: frames are cleared to the engine's colour, the
-// engine's interface is drawn into them (its textures, pools and programs on the device), Dear
-// ImGui over it, and they are shown through the present pass. The world is not drawn yet: its
-// draws are counted and left out (gxfront/Engine.hpp says which). The stock client's device is
-// made, checked and released: it keeps rendering through D3D9.
+// The device renders the frame: the engine's world and interface (its textures, pools, targets
+// and translated programs on the device), Dear ImGui over it, shown through the present pass; the
+// draws it cannot make are counted and left out (gxfront/Engine.hpp says which).
 //
 // The runtime's part around the device lives here: the log, the events a device's resources going
 // raises (SwapchainLost; SwapchainRestored comes from the engine's own NotifyOnDeviceRestored), how
@@ -19,9 +17,11 @@
 
 #include "common/Log.hpp"
 #include "gx/Events.hpp"
+#include "gx/Memory.hpp"
 #include "gx/Select.hpp"
 #include "gx/vk/Log.hpp"
 #include "gx/vk/gxfront/Front.hpp"
+#include "binding/Binding.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Session.hpp"
 #include "services/HighlightService.hpp"
@@ -310,6 +310,7 @@ namespace
         WLOG_INFO(kTag, "Vulkan: the client renders through it (%u frames in flight, %s scaling): the interface and the world, "
                         "the client's shaders translated as it creates them; the draws it cannot make are left out and counted",
                   s.gx_frames, s.gx_nearest ? "nearest" : "bilinear");
+        wxl::core::gx::memory::Report("with the device made");
         return WXL_OK;
     }
 
@@ -611,20 +612,17 @@ namespace wxl::core::gx
 {
     Outcome DeviceReady(const settings::Settings& settings, char* why, uint32_t why_size)
     {
-        // The recompiled client asked through its adapter already; the stock one has none, so
-        // the device is made here, beside its own, checked with a frame, and released.
+        // Each client asks through its adapter while it makes its device: the recompiled one's
+        // CGxDeviceVk, the stock one's vtable copy (gx/x86/Adapter.cpp), which the D3D9 and D3D9Ex
+        // factories hand every device they make. A device made without it is one of another API.
         if (g_tried || settings.gx_api != settings::GxApi::vulkan) return Outcome::not_asked;
-        char reason[512] = {};
-        if (!Start(nullptr, nullptr, settings, reason, sizeof reason))
-        {
-            WLOG_WARN(kTag, "Vulkan not started: %s; the client stays on D3D9", reason);
-            if (why && why_size) std::snprintf(why, why_size, "%s", reason);
-            return Outcome::failed;
-        }
-        WLOG_INFO(kTag, "Vulkan: this runtime does not draw the stock client through Vulkan yet, so the device is released "
-                        "and the client keeps its D3D9 device");
-        Stop(false);
-        return Outcome::released;
+        const int32_t api = binding::gx_device_api();
+        char          reason[256];
+        std::snprintf(reason, sizeof reason, "the client made its %s device without the renderer (only D3D9 and D3D9Ex requests "
+                                             "are taken to Vulkan)", ApiName(api));
+        WLOG_INFO(kTag, "Vulkan was asked for ([gx] api = vulkan), but %s", reason);
+        if (why && why_size) std::snprintf(why, why_size, "%s", reason);
+        return Outcome::missed;
     }
 
     bool VulkanActive() { return g_front && g_renders; }

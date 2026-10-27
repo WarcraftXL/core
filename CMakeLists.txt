@@ -167,6 +167,7 @@ set(WXL_VK_IMGUI_TARGET wxl::imgui)
 set(WXL_VK_IMGUI_DIR "${WXL_IMGUI_DIR}")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/wxl_vk.cmake")
 set(WXL_CORE_GX_SOURCES
+    src/gx/Memory.cpp
     src/gx/Select.cpp
     src/gx/Vulkan.cpp
     src/gx/vk/gxfront/Front.cpp)
@@ -196,6 +197,8 @@ if(WXL_CORE_X86)
         COMMENT "Compiling the runtime's Direct3D 9 programs"
         VERBATIM)
     list(APPEND WXL_CORE_GX_SOURCES src/gx/d3d9/Highlight.cpp "${WXL_D3D9_SHADERS}")
+    # The stock client's device drawn by the Vulkan renderer: the slots of include/wxl/gx/slots.def.
+    list(APPEND WXL_CORE_GX_SOURCES src/gx/x86/Adapter.cpp)
 endif()
 
 # The launch's log (its settings file, its header and its end, the crash report, the client's fatal

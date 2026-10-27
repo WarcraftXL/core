@@ -425,6 +425,9 @@ namespace wxl::vk::draw
         static constexpr uint32_t kZeroBinding = 15;
 
         const Stats&            Counters() const { return stats_; }
+        /// The staging ring's and the draw data ring's chunks: mapped memory, address space on x86.
+        const resources::Ring::Stats& StagingCounters() const { return staging_.Counters(); }
+        const resources::Ring::Stats& DataCounters() const { return data_.Counters(); }
         pipelines::Pipelines&   PipelineCache() { return pipelines_; }
         resources::Bindless&    Table() { return bindless_; }
         const Formats&          TextureFormats() const { return formats_; }

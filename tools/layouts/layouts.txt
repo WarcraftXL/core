@@ -258,6 +258,12 @@ type CGxVertexAttrib Engine/Source/Gx/CGxDevice/Types.h CGxVertexAttrib
 
 type EmergencyMem Engine/Source/Gx/CGxDevice/EmergencyMem.h EmergencyMem
   sizeof                                  engine/GxDevice:kEmergencyLockStride
+  m_lock                                  -                                            # the x86 Vulkan adapter: memory handed out in the pool's place
+
+type CGxQuery Engine/Source/Gx/Types.h CGxQuery
+  sizeof                                  -
+  m_apiSpecific                           -                                            # the x86 Vulkan adapter: the renderer's query handle
+  m_type                                  -
 
 type CGxAppRenderState Engine/Source/Gx/CGxDevice/CGxDevice.h CGxAppRenderState
   sizeof                                  engine/GxDevice:kRsStride

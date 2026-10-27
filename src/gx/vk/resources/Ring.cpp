@@ -37,7 +37,22 @@ namespace wxl::vk::resources
     {
         slot_    = slot % (slot_count_ ? slot_count_ : 1);
         current_ = 0;
-        for (Chunk& c : slots_[slot_]) c.used = 0;
+        std::vector<Chunk>& chunks = slots_[slot_];
+        for (Chunk& c : chunks)
+        {
+            c.idle = c.used ? 0 : c.idle + 1;
+            c.used = 0;
+        }
+        // The slot's previous frame has completed: its chunks past the first that went unused long
+        // enough go, the last first, so the chunks kept stay in front.
+        while (chunks.size() > 1 && chunks.back().idle >= kIdleFrames)
+        {
+            stats_.mapped -= chunks.back().buffer.size;
+            allocator_->Destroy(chunks.back().buffer);
+            chunks.pop_back();
+            --stats_.chunks;
+            ++stats_.trimmed;
+        }
         stats_.bytes = 0;
     }
 
@@ -71,6 +86,7 @@ namespace wxl::vk::resources
         }
         chunks.push_back(fresh);
         ++stats_.chunks;
+        stats_.mapped += fresh.buffer.size;
         current_ = chunks.size() - 1;
         return Allocate(size, align, out);
     }

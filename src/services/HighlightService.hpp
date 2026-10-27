@@ -11,7 +11,6 @@
 #include "wxl/events.h"
 #include "wxl/services/highlight.h"
 
-#if !defined(_M_IX86)
 namespace wxl::vk
 {
     namespace render
@@ -23,7 +22,6 @@ namespace wxl::vk
         class Renderer;
     }
 }
-#endif
 
 namespace wxl::core::services
 {
@@ -84,7 +82,6 @@ namespace wxl::core::services
         /// shutting down.
         void Clear();
 
-#if !defined(_M_IX86)
         /// What the Vulkan passes draw with, and the renderer whose draws they keep.
         struct VulkanTarget
         {
@@ -94,6 +91,5 @@ namespace wxl::core::services
 
         /// Tests: @p target in place of the Vulkan device's (null: the device's again).
         void UseVulkanTarget(const VulkanTarget* target);
-#endif
     }
 }

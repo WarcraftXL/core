@@ -359,6 +359,209 @@ def read_call_rows(path, problems):
     return rows
 
 
+# --- The D3D9 devices' vtable slots (include/wxl/gx/slots.def) --------------------------------
+
+SLOT_ROW = re.compile(r"^\s*WXL_GX_SLOT\s*\(", re.M)
+VTABLE_ROW = re.compile(r'^\s*WXL_GX_VTABLE\s*\(\s*(\w+)\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*(\d+)\s*,\s*"([^"]+)"\s*\)', re.M)
+SLOT_APIS = ("d3d9", "d3d9ex")
+
+# The stock CGxDevice's size on x86: a member at or past it belongs to a device of one API.
+CGXDEVICE_SIZE = 0x3968
+
+
+class Slot:
+    """One WXL_GX_SLOT row: a slot of both D3D9 vtables."""
+
+    def __init__(self, index, name, returns, params, pops, kind, symbols, entries, origin):
+        self.index = index
+        self.name = name
+        self.returns = returns
+        self.params = params
+        self.pops = pops
+        self.kind = kind
+        self.symbols = symbols        # api -> symbol column ("" when the fork tags nothing there)
+        self.entries = entries        # api -> the entry's address, as the row writes it
+        self.origin = origin
+
+    def row(self, api):
+        """The row's function in one vtable, as a seam row check_row reads."""
+        return Row("Slot", "%s.%s" % (self.name, api), self.symbols[api], self.returns, "thiscall",
+                   self.params, self.origin, False)
+
+
+def read_slot_rows(path, problems):
+    """The vtables and the slots of slots.def."""
+    if not path.is_file():
+        problems.append("the slot table is missing: %s" % path)
+        return [], []
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    text = table.strip_cxx(raw, keep_strings=True)
+    vtables = [(m.group(1), int(m.group(2), 16), int(m.group(3)), m.group(4)) for m in VTABLE_ROW.finditer(text)]
+    slots = []
+    for match in SLOT_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = [c.strip() for c in table.split_top_level(text[open_at + 1:close - 1])]
+        if len(columns) == 8 and columns[0] == "index":
+            continue                  # the shape's own #define
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        if len(columns) != 10:
+            problems.append("%s: a WXL_GX_SLOT row without its ten columns" % origin)
+            continue
+        index, name, returns, params, pops, kind, d3d9, d3d9_at, d3d9ex, d3d9ex_at = columns
+        inner = params[1:-1].strip()
+        slots.append(Slot(int(index), name, returns, [] if not inner else table.split_top_level(inner),
+                          int(pops), kind, {"d3d9": d3d9.strip('"'), "d3d9ex": d3d9ex.strip('"')},
+                          {"d3d9": int(d3d9_at, 16), "d3d9ex": int(d3d9ex_at, 16)}, origin))
+    return vtables, slots
+
+
+MEMBER = re.compile(r"\[\s*(e[abcd]x|e[sd]i)\s*\+\s*(0x[0-9A-Fa-f]+|\d+)\s*\]")
+
+
+def reaches_past_cgxdevice(insns):
+    """The instructions that address memory at CGxDevice's size or more from a register other than
+    the stack's: a member of a device of one API (D3D9's start right after CGxDevice's)."""
+    out = []
+    for insn in insns:
+        for match in MEMBER.finditer(insn.ops):
+            if int(match.group(2), 0) >= CGXDEVICE_SIZE:
+                out.append(insn)
+                break
+    return out
+
+
+def check_slots(binary, functions, vtables, slots, max_callers, problems):
+    """Every slot against both vtables of Wow.exe: the entry the row names is the one there, a slot
+    the runtime takes over is __thiscall and pops what the row says, an empty body is `ret n`, and
+    a slot it keeps reaches no member past CGxDevice's. The findings of the functions' rows."""
+    findings = []
+    image = getattr(binary, "image", None)
+    tables = {}
+    for api, address, count, factory in vtables:
+        # The factory: the runtime's detour on it reads its answer, the new device.
+        finding = check_row(binary, functions, Row("Slot", "Factory.%s" % api, factory, "void*", "cdecl", [],
+                                                   "slots.def", False), max_callers)
+        findings.append(finding)
+        if image is None:
+            problems.append("slots.def: the vtables are read from Wow.exe's bytes, which only the local "
+                            "backend has")
+            return findings
+        data = image_read(image, address, 4 * count)
+        if data is None:
+            problems.append("slots.def: the %s vtable at 0x%08X is outside Wow.exe's sections" % (api, address))
+            continue
+        tables[api] = struct.unpack("<%dI" % count, data)
+    if len(slots) != max((c for _, _, c, _ in vtables), default=0):
+        problems.append("slots.def: %d slot rows for %s" % (len(slots), ", ".join("%d %s slots" % (c, a) for a, _, c, _ in vtables)))
+    for slot in slots:
+        expected = 4 * (len(slot.params) - 1)
+        if slot.pops != expected:
+            problems.append("Slot.%s (%s): its parameters fill %d byte(s) of stack, but it pops %d"
+                            % (slot.name, slot.origin, expected, slot.pops))
+        if slot.kind == "keep" and slot.entries["d3d9"] != slot.entries["d3d9ex"]:
+            problems.append("Slot.%s (%s): kept, but the two devices hold different functions there"
+                            % (slot.name, slot.origin))
+        for api in SLOT_APIS:
+            if api not in tables:
+                continue
+            at = slot.entries[api]
+            held = tables[api][slot.index]
+            if held != at:
+                problems.append("Slot.%s (%s): the %s vtable holds 0x%08X at slot %d, not 0x%08X"
+                                % (slot.name, slot.origin, api, held, slot.index, at))
+                continue
+            symbol = slot.symbols[api]
+            if symbol:
+                resolved, trouble = functions.resolve(symbol)
+                if resolved is None:
+                    problems.append("Slot.%s (%s): %s" % (slot.name, slot.origin, trouble))
+                    continue
+                if resolved[0] != at:
+                    problems.append("Slot.%s (%s): %s is 0x%08X, not the 0x%08X the row writes"
+                                    % (slot.name, slot.origin, symbol, resolved[0], at))
+                    continue
+                findings.append(read_slot(binary, functions, slot, api, at, resolved[1]))
+                if slot.kind == "keep" and not symbol.startswith("CGxDevice::"):
+                    extent = resolved[1]
+                    insns = trim_tables(disassemble(binary, at, at + extent), at, at + extent)
+                    past = reaches_past_cgxdevice(insns)
+                    if past:
+                        problems.append("Slot.%s (%s): kept, but %s reaches past CGxDevice's members at %s"
+                                        % (slot.name, slot.origin, symbol,
+                                           ", ".join("0x%08X (%s)" % (i.addr, i.text) for i in past[:3])))
+                    for insn in insns:
+                        target = branch_target(insn) if insn.mn == "call" else None
+                        owner = functions.containing(target) if target is not None else None
+                        names = [n for n, hits in functions.by_name.items() if owner and owner[0] in hits]
+                        if any(n.startswith(("CGxDeviceD3d::", "CGxDeviceD3d9Ex::")) for n in names):
+                            problems.append("Slot.%s (%s): kept, but %s calls %s at 0x%08X"
+                                            % (slot.name, slot.origin, symbol, names[0], insn.addr))
+            elif slot.name == "Destructor":
+                # The D3D9Ex device's deleting destructor, untagged: read from its own code.
+                insns = disassemble(binary, at, at + 0x40)
+                rets = [i for i in insns if i.mn in ("ret", "retn")]
+                pops = int(rets[0].ops, 0) if rets and IMMEDIATE.match(rets[0].ops.strip()) else 0
+                if not rets or pops != slot.pops:
+                    problems.append("Slot.%s (%s): the %s destructor at 0x%08X pops %s, the row %d"
+                                    % (slot.name, slot.origin, api, at, pops if rets else "nothing read", slot.pops))
+            else:
+                code = image_read(image, at, 3)
+                pops = 0 if code and code[0] == 0xC3 else (struct.unpack_from("<H", code, 1)[0]
+                                                           if code and code[0] == 0xC2 else None)
+                if pops != slot.pops:
+                    problems.append("Slot.%s (%s): the untagged %s entry 0x%08X is not an empty body popping %d"
+                                    % (slot.name, slot.origin, api, at, slot.pops))
+    return findings
+
+
+def read_slot(binary, functions, slot, api, address, extent):
+    """One slot's function, read as a vtable calls it: `this` in ECX (read, or handed on to what it
+    calls in ECX), the rest on the stack, popped by the callee. A body that ends in a jump to
+    another function (a base class's, an empty one's) is read through to it."""
+    finding = Finding(slot.row(api))
+    finding.address = address
+    insns = trim_tables(disassemble(binary, address, address + extent), address, address + extent)
+    callee = read_callee(insns)
+    through = None
+    if not callee.rets and insns and insns[-1].mn == "jmp" and branch_target(insns[-1]) is not None:
+        through = branch_target(insns[-1])
+        target_extent = functions.starting_at(through)
+        if target_extent:
+            callee = read_callee(trim_tables(disassemble(binary, through, through + target_extent), through,
+                                             through + target_extent))
+            finding.notes.append("it jumps to 0x%08X, read in its place" % through)
+    finding.callee = callee
+    finding.notes.extend(callee.notes)
+    finding.convention = "thiscall"
+    where = "0x%08X" % address + (" (through 0x%08X)" % through if through else "")
+    if [r for r in callee.reg_args if r != "ecx"]:
+        finding.problems.append("Slot.%s.%s (%s): %s reads %s before it writes them: not a member a vtable calls"
+                                % (slot.name, api, slot.origin, where,
+                                   ", ".join(r.upper() for r in callee.reg_args if r != "ecx")))
+    if callee.cleans is None:
+        finding.problems.append("Slot.%s.%s (%s): who cleans the stack at %s is not settled%s"
+                                % (slot.name, api, slot.origin, where, evidence(callee, [])))
+    elif callee.cleans != slot.pops:
+        finding.problems.append("Slot.%s.%s (%s): %s pops %d byte(s), the row %d%s"
+                                % (slot.name, api, slot.origin, where, callee.cleans, slot.pops, evidence(callee, [])))
+    if callee.stack_dwords > len(slot.params) - 1:
+        finding.problems.append("Slot.%s.%s (%s): %s reads %d stack dword(s), more than the row's %d"
+                                % (slot.name, api, slot.origin, where, callee.stack_dwords, len(slot.params) - 1))
+    return finding
+
+
+def image_read(image, address, size):
+    """`size` bytes of the image at a virtual address, or None outside its sections."""
+    for section in image.sections:
+        if section.holds(address) and address + size <= section.va + section.size:
+            body = image.contents(section)
+            return body[address - section.va:address - section.va + size]
+    return None
+
+
 # --- The offsets table ------------------------------------------------------------------------
 
 OFFSET_ROW = re.compile(r'WXL_OFFSET_FUNCTION\(\s*"([^"]*)"\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*'
@@ -1574,6 +1777,9 @@ def main(argv=None):
                         help="the runtime's recompiled parent bodies, whose stock calls are checked like the "
                              "seams' and whose calls and globals are held to Wow.exe's own parents; default "
                              "core's own src/deinlined, read when --seams is core's own")
+    parser.add_argument("--slots", type=Path, default=None,
+                        help="the D3D9 devices' vtable slots the Vulkan renderer takes over (include/wxl/gx/slots.def); "
+                             "default core's own, read when --seams is core's own")
     parser.add_argument("--thunks", type=Path, default=core / "src" / "seams" / "RegparmX86.cpp",
                         help="the hand-written regparm thunks")
     parser.add_argument("--backend", choices=("local", "mcp"), default="local",
@@ -1621,6 +1827,12 @@ def main(argv=None):
     if calls is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
         calls = core / "include" / "wxl" / "core" / "binding" / "calls_x86.def"
     rows += read_call_rows(calls.resolve(), problems) if calls else []
+    slots_path = args.slots
+    if slots_path is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        slots_path = core / "include" / "wxl" / "gx" / "slots.def"
+    vtables, slots = read_slot_rows(slots_path.resolve(), problems) if slots_path else ([], [])
+    if args.point:
+        slots = [s for s in slots if "Slot.%s" % s.name in set(args.point)]
     if not rows:
         print("check_conventions: no seam row was read from %s" % args.seams, file=sys.stderr)
         for problem in problems:
@@ -1629,7 +1841,7 @@ def main(argv=None):
     if args.point:
         wanted = set(args.point)
         rows = [row for row in rows if row.point in wanted]
-        missing = wanted - {row.point for row in rows}
+        missing = wanted - {row.point for row in rows} - {"Slot.%s" % s.name for s in slots}
         if missing:
             print("check_conventions: no such row: %s" % ", ".join(sorted(missing)),
                   file=sys.stderr)
@@ -1654,6 +1866,8 @@ def main(argv=None):
             findings.append(check_row(binary, functions, row, args.max_callers))
         if bodies and not args.point:
             check_bodies(binary, functions, bodies, problems)
+        if slots:
+            findings.extend(check_slots(binary, functions, vtables, slots, args.max_callers, problems))
     except Unusable as trouble:
         hint = binary.hint if binary else (McpBinary.hint if args.backend == "mcp"
                                            else LocalBinary.hint)
@@ -1694,9 +1908,10 @@ def main(argv=None):
 
     if not args.json:
         print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d recompiled body(ies) "
-              "calling %d stock function(s) as Wow.exe's own do, %d regparm thunk(s), %d witness(es), %s, %d "
-              "undetermined point(s), %.1fs)"
-              % (len(rows), len(point_rows), len(bodies), len(shim_rows), len(thunks),
+              "calling %d stock function(s) as Wow.exe's own do, %d D3D9 vtable slot(s) (%d taken by the Vulkan front, "
+              "%d kept), %d regparm thunk(s), %d witness(es), %s, %d undetermined point(s), %.1fs)"
+              % (len(rows), len(point_rows), len(bodies), len(shim_rows), len(slots),
+                 sum(1 for s in slots if s.kind == "front"), sum(1 for s in slots if s.kind == "keep"), len(thunks),
                  sum(len(r.witnesses) for r in rows), binary.describe(), notes, elapsed))
     return 0
 

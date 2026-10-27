@@ -66,7 +66,12 @@ namespace wxl::vk::resources
     {
         uint64_t budget = 0; ///< bytes the driver lets the process use, over the device-local heaps
         uint64_t usage = 0;  ///< bytes it uses now
+        uint64_t host_usage = 0; ///< bytes it uses of the other heaps (system memory the GPU reads)
     };
+
+    /// The size of VMA's blocks of memory: 32 MiB in a 32-bit process, where a mapped block costs
+    /// its size in address space; VMA's own 256 MiB otherwise.
+    constexpr VkDeviceSize kBlockSize = sizeof(void*) == 4 ? VkDeviceSize{32} << 20 : VkDeviceSize{256} << 20;
 
     class Allocator
     {

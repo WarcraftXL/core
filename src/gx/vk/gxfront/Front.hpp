@@ -144,6 +144,20 @@ namespace wxl::vk::gxfront
         void SimulateLoss();
         void Describe(char* out, uint32_t size) const;
 
+        /// What the device holds of the process's memory and its GPU's, for the memory report.
+        struct Memory
+        {
+            uint64_t staging = 0;       ///< the staging ring's mapped chunks
+            uint64_t data = 0;          ///< the draw data ring's mapped chunks (registers, palettes, mods' buffers' writes)
+            uint64_t stream = 0;        ///< the stream pools' mapped buffers, renamed ones included
+            uint64_t pool_copies = 0;   ///< the static and dynamic pools' copies the engine writes into
+            uint64_t device_usage = 0;  ///< device-local memory in use
+            uint64_t device_budget = 0; ///< what the driver lets the process use of it
+            uint64_t host_usage = 0;    ///< system memory the GPU reads (mapped where the CPU writes it)
+            uint64_t trimmed = 0;       ///< ring chunks given back after going unused
+        };
+        Memory MemoryUse() const;
+
         // --- For the runtime around it ---------------------------------------------------------------
         device::Context&      Context() { return context_; }
         resources::Allocator& Allocator() { return allocator_; }

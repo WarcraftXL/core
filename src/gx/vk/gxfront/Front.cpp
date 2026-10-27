@@ -319,9 +319,15 @@ namespace wxl::vk::gxfront
         caps.unk_0134                = 0;
         caps.unk_0138                = 0;
         // The recompiled client's own caps (wxl/core/gx_vk.h): a bone palette of 256 bones, and
-        // index pools of 32-bit indices (fullDrawIndexUint32 is part of the floor).
+        // index pools of 32-bit indices (fullDrawIndexUint32 is part of the floor). The stock
+        // client has neither entry point: its limits are compiled into Wow.exe, and its words stay zero.
+#if defined(_M_IX86)
+        caps.unused_0114[WXL_GX_VK_CAP_BONE_PALETTE] = 0;
+        caps.unused_0114[WXL_GX_VK_CAP_INDEX32]      = 0;
+#else
         caps.unused_0114[WXL_GX_VK_CAP_BONE_PALETTE] = shaders::kPaletteBones;
         caps.unused_0114[WXL_GX_VK_CAP_INDEX32]      = 1;
+#endif
     }
 
     void Front::WindowSize(uint32_t width, uint32_t height, bool minimized)
@@ -747,6 +753,30 @@ namespace wxl::vk::gxfront
     void Front::SimulateLoss()
     {
         if (context_.Ready()) context_.MarkLost("the console command gxVkSimulateLoss");
+    }
+
+    Front::Memory Front::MemoryUse() const
+    {
+        Memory m;
+        if (!context_.Ready()) return m;
+        const resources::Ring::Stats& staging = renderer_.StagingCounters();
+        const resources::Ring::Stats& data    = renderer_.DataCounters();
+        m.staging = staging.mapped;
+        m.data    = data.mapped;
+        m.trimmed = staging.trimmed + data.trimmed;
+        for (void* pool : pools_)
+        {
+            const auto* p = static_cast<const draw::Pool*>(static_cast<engine::CGxPool*>(pool)->m_apiSpecific);
+            if (!p) continue;
+            m.pool_copies += p->shadow.capacity();
+            m.stream += p->current.mapped ? p->current.size : 0;
+            for (const draw::Pool::Retired& r : p->retired) m.stream += r.buffer.mapped ? r.buffer.size : 0;
+        }
+        const resources::Budget budget = allocator_.CurrentBudget();
+        m.device_usage  = budget.usage;
+        m.device_budget = budget.budget;
+        m.host_usage    = budget.host_usage;
+        return m;
     }
 
     void Front::Describe(char* out, uint32_t size) const

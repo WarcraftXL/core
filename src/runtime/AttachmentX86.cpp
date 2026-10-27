@@ -8,6 +8,7 @@
 #include "binding/BindingX86.hpp"
 #include "common/Log.hpp"
 #include "gx/d3d9/Highlight.hpp"
+#include "gx/x86/Adapter.hpp"
 #include "hook/Engine.hpp"
 #include "objects/Objects.hpp"
 #include "points/Points.hpp"
@@ -119,7 +120,11 @@ namespace wxl::core::attachment
                             "seams are unavailable; no world event will be raised and wxl.object "
                             "sees no object",
                       static_cast<unsigned>(image::kBuild));
-        else if (!seams::Install())
-            WLOG_ERROR(kTag, "a seam is not attached; its events will not be raised");
+        else
+        {
+            if (!seams::Install()) WLOG_ERROR(kTag, "a seam is not attached; its events will not be raised");
+            // [gx] api = vulkan: the devices the client makes are the Vulkan renderer's to draw with.
+            gx::x86::Install();
+        }
     }
 }

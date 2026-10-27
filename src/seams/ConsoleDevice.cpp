@@ -6,6 +6,7 @@
 #include "wxl/seams/seams.h"
 
 #include "binding/Binding.hpp"
+#include "gx/Memory.hpp"
 #include "gx/Vulkan.hpp"
 #include "runtime/Session.hpp"
 #include "runtime/Stages.hpp"
@@ -18,6 +19,8 @@ namespace wxl::seam::ConsoleDevice::Initialize
         // stage means a device exists, so that is what is asked rather than assumed.
         if (!wxl::core::binding::gx_device_exists()) return;
         wxl::core::gx::DeviceReady(wxl::core::session::CurrentSettings());
+        // On Direct3D 9 the same report the Vulkan device gives when it is made, to read beside it.
+        if (!wxl::core::gx::VulkanActive()) wxl::core::gx::memory::Report("with the device made");
         wxl::core::stages::Reach(WXL_STAGE_GRAPHICS);
     }
 }

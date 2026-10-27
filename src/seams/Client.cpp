@@ -5,6 +5,8 @@
 
 #include "wxl/seams/seams.h"
 
+#include "gx/Memory.hpp"
+
 #include "common/Log.hpp"
 #include "objects/Objects.hpp"
 #include "runtime/Attachment.hpp"
@@ -36,6 +38,9 @@ namespace wxl::seam::Client::Destroy
     {
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;
+
+        // The graphics memory as the session leaves it, the device still up.
+        wxl::core::gx::memory::Report("at exit");
 
         // The last thing a mod is told, and the only chance it has to put something away. It
         // runs here rather than at DLL_PROCESS_DETACH because by then the loader lock is held,

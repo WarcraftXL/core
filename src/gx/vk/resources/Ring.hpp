@@ -5,7 +5,9 @@
 // and buffers on their way to the device (staging), and each draw's data (its address pushed to
 // the shaders). One list of mapped chunks per frame in flight; a frame takes its slot's list
 // back once the slot's previous frame has completed, and grows it with a chunk when it needs
-// more. Nothing waits, nothing is freed while the GPU may read it.
+// more. Nothing waits, nothing is freed while the GPU may read it. A chunk past a slot's first
+// that no frame of the slot has used for a while (a zone's load is over) is given back: every
+// mapped byte costs the 32-bit client address space.
 
 #pragma once
 
@@ -32,7 +34,12 @@ namespace wxl::vk::resources
             uint64_t bytes = 0;  ///< handed out in the current frame
             uint64_t chunks = 0; ///< alive, over every slot
             uint64_t peak = 0;   ///< the most one frame took
+            uint64_t mapped = 0; ///< bytes of the chunks alive, over every slot (all mapped)
+            uint64_t trimmed = 0; ///< chunks given back after going unused
         };
+
+        /// Frames of a slot a chunk past its first may go unused before it is given back.
+        static constexpr uint32_t kIdleFrames = 600;
 
         Ring() = default;
         Ring(const Ring&)            = delete;
@@ -61,6 +68,7 @@ namespace wxl::vk::resources
         {
             Buffer       buffer;
             VkDeviceSize used = 0;
+            uint32_t     idle = 0; ///< the slot's frames since it was last used
         };
 
         Allocator*         allocator_ = nullptr;

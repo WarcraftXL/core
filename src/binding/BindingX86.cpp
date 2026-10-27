@@ -5,6 +5,7 @@
 
 #include "binding/Binding.hpp"
 #include "binding/BindingX86.hpp"
+#include "gx/Vulkan.hpp"
 #include "binding/CallX86.hpp"
 #include "binding/HighlightDrawX86.hpp"
 #include "binding/ModelDrawX86.hpp"
@@ -689,7 +690,9 @@ namespace wxl::core::binding
 
     void* gx_d3d9_device()
     {
-        const void* device = IsClient() ? GxDevice() : nullptr;
+        // Under Vulkan the device keeps D3D9's EGxApi (so the engine takes D3D9's paths), but no
+        // IDirect3DDevice9 behind it.
+        const void* device = IsClient() && !gx::VulkanActive() ? GxDevice() : nullptr;
         if (!device) return nullptr;
         switch (Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api")))
         {
@@ -722,7 +725,7 @@ namespace wxl::core::binding
 
     void gx_invalidate_state()
     {
-        void* device = IsClient() ? const_cast<void*>(GxDevice()) : nullptr;
+        void* device = IsClient() && !gx::VulkanActive() ? const_cast<void*>(GxDevice()) : nullptr;
         if (!device) return;
         const uint32_t api = Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
         if (api != 1 && api != 2) return;
@@ -2003,7 +2006,9 @@ namespace wxl::core::binding
         if (!IsClient() || !fn) return 0;
         const uint8_t* device = static_cast<const uint8_t*>(GxDevice());
         if (!device) return 0;
-        // EGxApi: 1 is Direct3D 9, 2 Direct3D 9Ex; the others hold no IDirect3D resources.
+        // EGxApi: 1 is Direct3D 9, 2 Direct3D 9Ex; the others hold no IDirect3D resources, nor
+        // does a D3D9 device the Vulkan renderer draws (its records are the renderer's).
+        if (gx::VulkanActive()) return 0;
         const int32_t api = Read<int32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
         if (api != 1 && api != 2) return 0;
 

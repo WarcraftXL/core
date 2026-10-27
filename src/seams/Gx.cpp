@@ -9,6 +9,7 @@
 
 #include "binding/Binding.hpp"
 #include "gx/Events.hpp"
+#include "gx/Memory.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
@@ -40,6 +41,9 @@ namespace wxl::seam::Gx::ScenePresent
     {
         // Every present ends a frame on the profiler's timeline, the loading screen's included.
         wxl::core::profile::Present();
+
+        // The graphics memory report, a minute into the frames then every five minutes.
+        wxl::core::gx::memory::Present();
 
         // A pointer a mod captured is held at the centre, and hidden, before the frame shows.
         wxl::core::services::input::Present();

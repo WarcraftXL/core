@@ -82,11 +82,11 @@ namespace
     const char* Refusal()
     {
         if (Front()) return nullptr;
-#if defined(_M_IX86)
-        return "the stock client draws through Direct3D 9, and wxl.render draws on the runtime's Vulkan renderer, which does not run "
-               "the stock client yet";
-#else
         if (gx::VulkanActive()) return "the Vulkan device is being made again";
+#if defined(_M_IX86)
+        return "the stock client runs on Direct3D 9: wxl.render draws on the runtime's Vulkan renderer ([gx] api = vulkan in "
+               "WarcraftXL.ini)";
+#else
         return "the recompiled client runs on Direct3D 9: wxl.render draws on its Vulkan renderer ([gx] api = vulkan in WarcraftXL.ini)";
 #endif
     }

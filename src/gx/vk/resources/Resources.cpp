@@ -23,6 +23,9 @@ namespace wxl::vk::resources
         info.device           = context.Device();
         info.instance         = context.Instance();
         info.vulkanApiVersion = kFloorApi;
+        // VMA maps a whole block of memory to hand out a mapped part of it: in a 32-bit process each
+        // mapped block costs its size in address space, so blocks are smaller there.
+        info.preferredLargeHeapBlockSize = kBlockSize;
 
         VmaVulkanFunctions functions{};
         VkResult           result = vmaImportVulkanFunctionsFromVolk(&info, &functions);
@@ -259,7 +262,11 @@ namespace wxl::vk::resources
         vmaGetMemoryProperties(vma_, &memory);
         for (uint32_t h = 0; memory && h < memory->memoryHeapCount; ++h)
         {
-            if (!(memory->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) continue;
+            if (!(memory->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+            {
+                budget.host_usage += heaps[h].usage;
+                continue;
+            }
             budget.budget += heaps[h].budget;
             budget.usage += heaps[h].usage;
         }

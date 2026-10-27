@@ -3,10 +3,10 @@
 //
 // wxl.highlight: the highlights mods set, one per mod and object, kept here; each world pass finds
 // their objects' top models and hands them to the renderer, which keeps the batches drawn of
-// them and draws the highlights after the world. On the stock client the renderer is the D3D9
-// one (gx/d3d9/Highlight.cpp); on the recompiled client the Vulkan one's (gx/vk/render/
-// Highlight.cpp, made of wxl.render's pieces), the same passes; the recompiled client on D3D9
-// has none, and says so through the contract.
+// them and draws the highlights after the world. Under Vulkan the renderer is the Vulkan one's
+// (gx/vk/render/Highlight.cpp, made of wxl.render's pieces), on both clients; the stock client on
+// Direct3D 9 has the same passes made on its D3D9 device (gx/d3d9/Highlight.cpp); the recompiled
+// client on D3D9 has none, and says so through the contract.
 //
 // While a highlight is set the runtime holds up the client's flag of ModelBatchDrawn: the x64
 // client calls M2.DrawBatch, where the batches are kept, only while that flag is up. What each
@@ -23,15 +23,15 @@
 
 #include "wxl/host/mod_host.hpp"
 
+#include "gx/Vulkan.hpp"
+#include "gx/vk/gxfront/Front.hpp"
+#include "gx/vk/render/Highlight.hpp"
 #if defined(_M_IX86)
     #include "gx/d3d9/Highlight.hpp"
-#else
-    #include "gx/Vulkan.hpp"
-    #include "gx/vk/gxfront/Front.hpp"
-    #include "gx/vk/render/Highlight.hpp"
 #endif
 
 #include <algorithm>
+#include <cstddef>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -66,10 +66,16 @@ namespace
     bool                            g_summarized = false; ///< a second is being summarized: highlights are set
     std::vector<std::string>        g_said;          ///< the reasons logged already, each once
 
-#if !defined(_M_IX86)
     wxl::vk::render::Highlight g_vulkan; ///< the Vulkan renderer's passes, attached to its device's wxl.render
     wxl::vk::render::Render*   g_attached = nullptr;
     const services::highlight::VulkanTarget* g_target = nullptr; ///< the tests' in place of the device's
+
+    /// Whether the highlights are drawn on the stock client's Direct3D 9 device rather than on the
+    /// Vulkan renderer: the stock client not drawn by Vulkan.
+#if defined(_M_IX86)
+    bool D3d9() { return !g_target && !gx::VulkanActive(); }
+#else
+    constexpr bool D3d9() { return false; }
 #endif
 
     /// The client calls M2.DrawBatch while a highlight is set, whether or not a mod listens to
@@ -87,7 +93,6 @@ namespace
         WLOG_INFO(kHighlightTag, "wxl.highlight: nothing drawn for a highlight: %s", reason.c_str());
     }
 
-#if !defined(_M_IX86)
     /// What the Vulkan passes draw with and whose draws they keep: the device's, or the tests'.
     bool Target(wxl::vk::render::Render*& render, wxl::vk::draw::Renderer*& engine)
     {
@@ -110,19 +115,17 @@ namespace
         if (!g_target) gx::UpdateBatchKeeping();
         else if (g_target->engine) g_target->engine->KeepBatches(services::highlight::Capturing());
     }
-#endif
 
     const char* Refusal()
     {
 #if defined(_M_IX86)
-        return gx::d3d9::highlight::Unsupported();
-#else
+        if (D3d9()) return gx::d3d9::highlight::Unsupported();
+#endif
         if (g_target) return g_target->render ? nullptr : "no Vulkan renderer";
         if (gx::VulkanFront()) return nullptr;
         if (gx::VulkanActive()) return "the Vulkan device is being made again";
         return "the recompiled client draws highlights on its Vulkan renderer, and it runs on Direct3D 9 (set [gx] api = vulkan in "
                "WarcraftXL.ini)";
-#endif
     }
 
     uint32_t Caller()
@@ -220,11 +223,12 @@ namespace wxl::core::services
     namespace highlight
     {
         /// The styles of this pass, one per top model in view, in the order handed to the renderer.
+        using Style = wxl::vk::render::Highlight::Style;
 #if defined(_M_IX86)
         namespace renderer = gx::d3d9::highlight;
-        using Style        = renderer::Style;
-#else
-        using Style = wxl::vk::render::Highlight::Style;
+        static_assert(sizeof(renderer::Style) == sizeof(Style) && offsetof(renderer::Style, strength) == offsetof(Style, strength),
+                      "one style for both renderers");
+        const renderer::Style* D3d9Styles(const std::vector<Style>& styles) { return reinterpret_cast<const renderer::Style*>(styles.data()); }
 #endif
         std::vector<Style>       g_styles;
         std::vector<const void*> g_roots; ///< the highlighted top models of this pass, counted against each batch
@@ -284,8 +288,13 @@ namespace wxl::core::services
                 return;
             }
 #if defined(_M_IX86)
-            renderer::Begin(roots.data(), styleOf.data(), static_cast<uint32_t>(roots.size()));
-#else
+            if (D3d9())
+            {
+                renderer::Begin(roots.data(), styleOf.data(), static_cast<uint32_t>(roots.size()));
+                g_capturing = true;
+                return;
+            }
+#endif
             wxl::vk::render::Render*  render = nullptr;
             wxl::vk::draw::Renderer*  engine = nullptr;
             if (!Target(render, engine)) return;
@@ -298,11 +307,8 @@ namespace wxl::core::services
             std::vector<wxl::vk::render::Highlight::Root> pass(roots.size());
             for (size_t i = 0; i < roots.size(); ++i) pass[i] = {roots[i], styleOf[i]};
             g_vulkan.World(pass.data(), static_cast<uint32_t>(pass.size()));
-#endif
             g_capturing = true;
-#if !defined(_M_IX86)
             KeepDraws(); // the renderer keeps each draw from here
-#endif
         }
 
         void WorldBegin()
@@ -314,10 +320,8 @@ namespace wxl::core::services
             g_pass.entries = static_cast<uint32_t>(g_entries.size());
             g_pass.open    = true;
             ++g_passes;
-#if !defined(_M_IX86)
             // The renderer keeps the world's draws from its first one, a highlighted model's first batch included.
-            KeepDraws();
-#endif
+            if (!D3d9()) KeepDraws();
         }
 
         bool WantsBatch() { return g_resolve || g_capturing; }
@@ -332,15 +336,18 @@ namespace wxl::core::services
             const bool highlighted = std::find(g_roots.begin(), g_roots.end(), args.root_model) != g_roots.end();
             if (highlighted) ++g_pass.seen;
 #if defined(_M_IX86)
-            if (renderer::Batch(render, args)) ++g_pass.kept;
-#else
+            if (D3d9())
+            {
+                if (renderer::Batch(render, args)) ++g_pass.kept;
+                return;
+            }
+#endif
             (void)render;
             if (!highlighted) return;
             wxl::vk::render::Render* target = nullptr;
             wxl::vk::draw::Renderer* engine = nullptr;
             const wxl::vk::draw::Batch* last = Target(target, engine) && engine ? engine->LastBatch() : nullptr;
             if (g_vulkan.Batch(args.root_model, args.blend_mode, last)) ++g_pass.kept;
-#endif
         }
 
         void WorldEnd()
@@ -353,19 +360,21 @@ namespace wxl::core::services
                 Refused("no model batch reached wxl.highlight in a world pass (the M2.DrawBatch seam was not called)");
             if (!g_capturing)
             {
-#if !defined(_M_IX86)
-                KeepDraws();
-#endif
+                if (!D3d9()) KeepDraws();
                 g_drawn = 0;
                 return;
             }
             g_capturing = false;
 #if defined(_M_IX86)
-            g_drawn            = renderer::Draw(g_styles.data(), static_cast<uint32_t>(g_styles.size()));
-            g_pass.drawn       = g_drawn;
-            g_pass.composited  = g_drawn > 0;
-            if (g_pass.kept && !g_drawn) Refused("the Direct3D 9 device drew none of the kept batches again");
-#else
+            if (D3d9())
+            {
+                g_drawn           = renderer::Draw(D3d9Styles(g_styles), static_cast<uint32_t>(g_styles.size()));
+                g_pass.drawn      = g_drawn;
+                g_pass.composited = g_drawn > 0;
+                if (g_pass.kept && !g_drawn) Refused("the Direct3D 9 device drew none of the kept batches again");
+                return;
+            }
+#endif
             KeepDraws();
             if (const char* why = Refusal())
             {
@@ -379,7 +388,6 @@ namespace wxl::core::services
             g_pass.drawn      = counts.drawn;
             g_pass.composited = counts.composited;
             if (!counts.refusal.empty()) Refused(counts.refusal);
-#endif
         }
 
         void Present()
@@ -424,22 +432,23 @@ namespace wxl::core::services
             g_resolve   = false;
             g_pass.open = false;
 #if defined(_M_IX86)
-            renderer::DeviceLost();
-#else
+            if (D3d9())
+            {
+                renderer::DeviceLost();
+                return;
+            }
+#endif
             // The Vulkan passes' images and pipelines are wxl.render's: made again with the device.
             g_vulkan.Begin();
             KeepDraws();
-#endif
         }
 
         void DeviceGone()
         {
-#if !defined(_M_IX86)
             g_vulkan.Forget();
             g_attached  = nullptr;
             g_capturing = false;
             g_pass.open = false;
-#endif
         }
 
         void Clear()
@@ -454,10 +463,9 @@ namespace wxl::core::services
             g_said.clear();
 #if defined(_M_IX86)
             renderer::Shutdown();
-#else
+#endif
             g_vulkan.Detach();
             g_attached = nullptr;
-#endif
         }
 
         void ForgetMod(uint32_t mod)
@@ -468,13 +476,11 @@ namespace wxl::core::services
             Demand();
         }
 
-#if !defined(_M_IX86)
         void UseVulkanTarget(const VulkanTarget* target)
         {
             g_target = target;
             g_vulkan.Forget();
             g_attached = nullptr;
         }
-#endif
     }
 }
