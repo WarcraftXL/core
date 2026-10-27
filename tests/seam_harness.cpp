@@ -68,6 +68,8 @@
 #include "services/ShaderCode.hpp"
 #include "services/TerrainLayers.hpp"
 #include "services/TerrainTiles.hpp"
+#include "services/SplitTile.hpp"
+#include "services/TerrainLowDetail.hpp"
 #include "services/ModelGate.hpp"
 #include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
@@ -2644,6 +2646,28 @@ namespace
         return WXL_TRUE;
     }
 
+    /// CMapLowDetail as the WDL rows fill it.
+    struct FakeLowDetail
+    {
+        std::vector<char>                      data;
+        uint32_t                               areaOffsets = 0;
+        std::map<uint32_t, wxl_core_area_low>  areas;
+    };
+
+    void* WXL_CALL FakeLowDetailSet(void* detail, const void* bytes, uint32_t size, uint32_t areaOffsets)
+    {
+        FakeLowDetail& d = *static_cast<FakeLowDetail*>(detail);
+        d.data.assign(static_cast<const char*>(bytes), static_cast<const char*>(bytes) + size);
+        d.areaOffsets = areaOffsets;
+        return d.data.data();
+    }
+
+    wxl_bool WXL_CALL FakeAreaLowAdd(void* detail, const wxl_core_area_low* area)
+    {
+        static_cast<FakeLowDetail*>(detail)->areas[area->index] = *area;
+        return WXL_TRUE;
+    }
+
     wxl_bool WXL_CALL FakeAreaPlacements(const void* area, wxl_core_area_split* out)
     {
         const SplitFakeArea& a = *static_cast<const SplitFakeArea*>(area);
@@ -2944,6 +2968,8 @@ namespace
         init.map_area_chunk         = &FakeMapAreaChunk;
         init.map_area_split_set     = &FakeAreaSplitSet;
         init.map_area_placements    = &FakeAreaPlacements;
+        init.map_low_detail_set     = &FakeLowDetailSet;
+        init.map_area_low_add       = &FakeAreaLowAdd;
         init.map_chunk_parts        = &FakeChunkParts;
         init.map_chunk_split_set    = &FakeChunkSplitSet;
         init.map_chunk_create_refs  = &FakeChunkCreateRefs;
@@ -5018,7 +5044,10 @@ namespace
         Check(g_splitAsked == 1 && g_splitPath == "World\\Maps\\T\\T_30_40.adt" && tiles::Held() == 1,
               "a root without MCIN: the provider is asked once, by the tile's name, and the tile held");
 
-        Check(split.textures == mono.textures && split.textures.size() == 5, "its textures are _tex0's MTEX, loaded by LoadTextures in order");
+        const std::string placeholder = wxl::core::services::split_tile::kPlaceholderTexture;
+        Check(split.textures.size() == 6 && std::equal(mono.textures.begin(), mono.textures.end(), split.textures.begin()) &&
+                  split.textures[5] == placeholder,
+              "its textures are _tex0's MTEX, loaded by LoadTextures in order, then the placeholder its chunks without layers need");
         bool flags = split.textureFlags && mono.textureFlags;
         for (size_t k = 0; flags && k < 5; ++k) flags = split.textureFlags[k] == mono.textureFlags[k];
         Check(flags, "its texture flags are _tex0's MTXF");
@@ -5045,7 +5074,13 @@ namespace
             heights = heights && SplitSpan(s.height, 145 * 4) == SplitSpan(o.height, 145 * 4) && SplitSpan(s.normals, 448) == SplitSpan(o.normals, 448) &&
                       SplitU32(s.header + 0x34) == SplitU32(o.header + 0x34);
             const uint32_t n = SplitU32(s.header + 0x0C);
-            layers = layers && n == SplitU32(o.header + 0x0C) && SplitSpan(s.layers, 16 * n) == SplitSpan(o.layers, 16 * n) && (n || !s.layers);
+            const uint32_t on = SplitU32(o.header + 0x0C);
+            // A chunk without layers gets one of the placeholder (texture 5); every chunk has four readable entries.
+            if (on)
+                layers = layers && n == on && SplitSpan(s.layers, 16 * n) == SplitSpan(o.layers, 16 * n);
+            else
+                layers = layers && n == 1 && s.layers && SplitU32(s.layers) == 5 && SplitU32(s.layers + 4) == 0 && SplitU32(s.layers + 48) == 5 &&
+                         SplitU32(s.layers + 60) == 0;
             const uint32_t sizeAlpha = SplitU32(s.header + 0x28);
             alpha = alpha && sizeAlpha == SplitU32(o.header + 0x28) && SplitSpan(s.alpha, sizeAlpha ? sizeAlpha - 8 : 0) == SplitSpan(o.alpha, sizeAlpha ? sizeAlpha - 8 : 0);
             shadow = shadow && (SplitU32(s.header) & 1) == (SplitU32(o.header) & 1) && SplitSpan(s.shadow, s.shadow ? 512 : 0) == SplitSpan(o.shadow, o.shadow ? 512 : 0);
@@ -5057,7 +5092,8 @@ namespace
             counts = counts && SplitU32(s.header + 0x10) == SplitU32(o.header + 0x10) && SplitU32(s.header + 0x38) == SplitU32(o.header + 0x38);
         }
         Check(heights, "every chunk's heights, normals and header are the root's own");
-        Check(layers, "every chunk's layers are its _tex0 MCLY, its count the client's (at most 4: a chunk naming 6 keeps its first 4)");
+        Check(layers, "every chunk's layers are its _tex0 MCLY, its count the client's (at most 4: a chunk naming 6 keeps its first 4); one "
+                      "without gets the placeholder, four entries the ground query can read");
         Check(alpha, "its alpha maps are its _tex0 MCAL, sizeAlpha as one file says it");
         Check(shadow, "its shadow its _tex0 MCSH, under the root's flag");
         Check(holes && (SplitU32(splitChunks[5].header) & 0x10000) && splitChunks[5].header[0x3C], "64 holes folded into the client's 16 (the 2 x 2 under each)");
@@ -5108,11 +5144,12 @@ namespace
         bare.bytes = twin.root.bytes;
         std::vector<SplitFakeChunk> bareChunks;
         SplitLoad(bare, bareChunks, true);
-        bool empty = bare.textures.empty() && bare.doodadCount == 0 && bare.mapObjCount == 0;
+        bool empty = bare.textures.size() == 1 && bare.textures[0] == placeholder && bare.doodadCount == 0 && bare.mapObjCount == 0;
         for (size_t i = 0; i < 256; ++i)
-            empty = empty && SplitU32(bareChunks[i].header + 0x0C) == 0 && bareChunks[i].placed.empty() &&
+            empty = empty && SplitU32(bareChunks[i].header + 0x0C) == 1 && bareChunks[i].layers && SplitU32(bareChunks[i].layers) == 0 &&
+                    bareChunks[i].placed.empty() &&
                     SplitSpan(bareChunks[i].height, 145 * 4) == SplitSpan(monoChunks[i].height, 145 * 4);
-        Check(empty, "without a provider a split tile loads its ground, no layers, no placements");
+        Check(empty, "without a provider a split tile loads its ground, one layer of the placeholder, no placements");
 
         // The client frees the tiles: what was kept goes.
         wxl::seam::Map::FreeArea::Before(&split);
@@ -5131,7 +5168,8 @@ namespace
         ids.bytes = byId.root.bytes;
         std::vector<SplitFakeChunk> idChunks;
         SplitLoad(ids, idChunks, true);
-        Check(ids.textures.size() == 5 && ids.textures[0] == "t\\a.blp" && ids.textures[3] == "t\\d.blp" && ids.textures[4] == "FileDataID_1005.blp",
+        Check(ids.textures.size() == 6 && ids.textures[0] == "t\\a.blp" && ids.textures[3] == "t\\d.blp" && ids.textures[4] == "FileDataID_1005.blp" &&
+                  ids.textures[5] == placeholder,
               "MDID's textures loaded by the names the provider gives, in order; one it does not name a placeholder");
         bool idSame = SplitSpan(ids.doodadDef, 36 * 3) == SplitSpan(mono.doodadDef, 36 * 3) &&
                       SplitSpan(ids.mapObjDef, 64 * 2) == SplitSpan(mono.mapObjDef, 64 * 2);
@@ -5148,7 +5186,7 @@ namespace
                     stop = k;
                     break;
                 }
-            idLayers = idLayers && SplitU32(idChunks[i].header + 0x0C) == stop;
+            idLayers = idLayers && SplitU32(idChunks[i].header + 0x0C) == (stop ? stop : 1u) && idChunks[i].layers;
         }
         Check(idSame, "placements by FileDataID become placements by name, as in one file");
         Check(idPlaced, "their models placed by the names the provider gives, in the client's order");
@@ -5168,6 +5206,13 @@ namespace
                   gate::Judge(md20, 8, false) == gate::Verdict::loadable && gate::Judge(wmo18, 12, true) == gate::Verdict::newer &&
                   gate::Judge(wmo17, 12, true) == gate::Verdict::loadable && gate::Judge(nullptr, 0, false) == gate::Verdict::loadable,
               "an M2 of MD21 or past version 264, a WMO root past 17, cannot be loaded; MD20 264 and WMO 17 can");
+        {
+            std::string later("REVM\4\0\0\0\x11\0\0\0DHOM\0\0\0\0DIFG\0\0\0\0", 28);
+            std::string stockRoot("REVM\4\0\0\0\x11\0\0\0DHOM\0\0\0\0XTOM\0\0\0\0", 28);
+            Check(gate::Judge(reinterpret_cast<const uint8_t*>(later.data()), later.size(), true) == gate::Verdict::later &&
+                      gate::Judge(reinterpret_cast<const uint8_t*>(stockRoot.data()), stockRoot.size(), true) == gate::Verdict::loadable,
+                  "a WMO root of version 17 with a chunk of later clients (GFID) cannot be loaded; 3.3.5a's chunks can");
+        }
         gate::Clear();
         g_files.back().bytes[8] = 18; // w\a.wmo, now of version 18
         g_files.push_back(FakeFile{"m\\bb.m2", std::string("MD21\0\0\0\0", 8)});
@@ -5209,6 +5254,133 @@ namespace
         }
         Check(noWmo && m2s, "a map object root the client's files do not have is left out (it would end the client), the doodads made");
         gate::Clear();
+
+        // Every split chunk keeps four layer entries CMap::QueryGroundTypeTerrain can read (it takes
+        // m_layers[k] for the k its low-quality map names, whatever nLayers says).
+        bool queryable = true;
+        for (const std::vector<SplitFakeChunk>* set : {&splitChunks, &idChunks})
+            for (const SplitFakeChunk& c : *set)
+            {
+                queryable = queryable && c.layers && SplitU32(c.header + 0x0C) >= 1 && SplitU32(c.header + 0x0C) <= 4;
+                for (uint32_t row = 0; queryable && row < 8; ++row)
+                {
+                    uint16_t bits;
+                    std::memcpy(&bits, c.header + 0x40 + 2 * row, 2);
+                    for (uint32_t col = 0; col < 8; ++col) queryable = queryable && ((bits >> (2 * col)) & 3) < 4;
+                }
+            }
+        Check(queryable, "every chunk of a split tile has a layer and four entries the ground-type query reads");
+    }
+
+    // --- Liquids and far terrain of later clients ----------------------------------------------
+
+    void CheckRetailLiquids()
+    {
+        namespace st = wxl::core::services::split_tile;
+        // A split root: MVER, MHDR (MH2O's slot), 256 MCNKs, MH2O with three chunks of liquid.
+        SplitIff root;
+        root.Chunk("MVER", SplitWords({18}));
+        const size_t mhdr = root.Chunk("MHDR", std::string(64, '\0'));
+        std::string mh2o(256 * 12, '\0');
+        auto add = [&](uint32_t chunk, uint16_t type, uint16_t format, uint8_t x, uint8_t w, uint32_t vertexBytes) {
+            const uint32_t at = static_cast<uint32_t>(mh2o.size());
+            std::string ins(24, '\0');
+            std::memcpy(&ins[0], &type, 2);
+            std::memcpy(&ins[2], &format, 2);
+            ins[12] = static_cast<char>(x), ins[13] = 0, ins[14] = static_cast<char>(w), ins[15] = 2;
+            mh2o += ins;
+            if (vertexBytes)
+            {
+                const uint32_t v = static_cast<uint32_t>(mh2o.size());
+                std::memcpy(&mh2o[at + 20], &v, 4);
+                mh2o.append(vertexBytes, '\x01');
+            }
+            const uint32_t one = 1;
+            std::memcpy(&mh2o[12 * chunk], &at, 4);
+            std::memcpy(&mh2o[12 * chunk + 4], &one, 4);
+        };
+        const uint32_t v = (2 + 1) * (2 + 1);
+        add(0, 2, 42, 0, 2, 0);          // ocean by LiquidObject id, no vertex data
+        add(1, 1222, 427, 0, 2, 5 * v);  // a river by LiquidObject id, heights and depths, a type 3.3.5a has not
+        add(2, 1, 3, 0, 2, 9 * v);       // format 3: heights, coordinates, depths
+        add(3, 1, 0, 7, 2, 5 * v);       // past the chunk's 8 cells
+        const size_t at = root.Chunk("MH2O", mh2o);
+        const uint32_t slot = static_cast<uint32_t>(at - (mhdr + 8));
+        std::memcpy(&root.bytes[mhdr + 8 + 0x28], &slot, 4);
+        for (int i = 0; i < 256; ++i) root.Chunk("MCNK", std::string(128, '\0'));
+        std::vector<uint8_t> bytes(root.bytes.begin(), root.bytes.end());
+        const std::vector<uint8_t> known = {0, 1, 1, 1, 1};
+        const st::LiquidFixes fixes = st::FixLiquids(bytes.data(), static_cast<uint32_t>(bytes.size()), known);
+        const uint8_t* data = bytes.data() + at + 8;
+        auto field = [&](uint32_t chunk, uint32_t off) {
+            uint16_t value;
+            std::memcpy(&value, data + SplitU32(data + 12 * chunk) + off, 2);
+            return value;
+        };
+        Check(field(0, 2) == 2 && field(0, 0) == 2, "an ocean by LiquidObject id without vertex data: depths only (format 2), Ocean kept");
+        Check(field(1, 2) == 0 && field(1, 0) == 1, "a river by LiquidObject id: format 0 from its 5 bytes a vertex, its unknown type made Water");
+        Check(field(2, 2) == 1, "format 3 read as 1, whose heights and coordinates it starts with");
+        Check(SplitU32(data + 12 * 3 + 4) == 0 && fixes.dropped == 1, "a chunk whose liquid lies past its 8 cells is left dry");
+        Check(fixes.formats == 3 && fixes.types == 1, "the fixes counted");
+    }
+
+    void CheckRetailWdl()
+    {
+        namespace ld = wxl::core::services::low_detail;
+        // Stock: MVER, MAOF at once.
+        SplitIff stock;
+        stock.Chunk("MVER", SplitWords({18}));
+        stock.Chunk("MAOF", std::string(4096 * 4, '\0'));
+        Check(ld::Read(reinterpret_cast<const uint8_t*>(stock.bytes.data()), static_cast<uint32_t>(stock.bytes.size())).clientReads,
+              "a WDL laid out as 3.3.5a's (MAOF or MWMO after MVER) is left to the client");
+        // Retail: MVER, MLDD, MSSN, MAOF, then MARE, MAOE, MAHO for area 65; MARE alone for area 70.
+        SplitIff wdl;
+        wdl.Chunk("MVER", SplitWords({18}));
+        wdl.Chunk("MLDD", std::string(40, '\x7f'));
+        wdl.Chunk("MSSN", std::string(12, '\0'));
+        const size_t maof = wdl.Chunk("MAOF", std::string(4096 * 4, '\0'));
+        std::string heights(1090, '\0');
+        int16_t hi = 120, lo = -30;
+        std::memcpy(&heights[0], &hi, 2);
+        std::memcpy(&heights[2 * 544], &lo, 2);
+        const uint32_t mare65 = static_cast<uint32_t>(wdl.Chunk("MARE", heights));
+        wdl.Chunk("MAOE", std::string(32, '\0'));
+        std::string holes(32, '\0');
+        holes[0] = 1; // one hole of 256
+        wdl.Chunk("MAHO", holes);
+        const uint32_t mare70 = static_cast<uint32_t>(wdl.Chunk("MARE", heights));
+        const uint32_t bad = 1u << 30;
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 65], &mare65, 4);
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 70], &mare70, 4);
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 71], &bad, 4);
+        const ld::Plan plan = ld::Read(reinterpret_cast<const uint8_t*>(wdl.bytes.data()), static_cast<uint32_t>(wdl.bytes.size()));
+        Check(!plan.clientReads && plan.maof == maof + 8 && plan.areas.size() == 2 && plan.skipped == 1,
+              "a WDL of later clients: MAOF found by its id past MLDD and MSSN, an offset past the file left out");
+        const wxl_core_area_low& a = plan.areas[0];
+        Check(a.index == 65 && a.column == 1 && a.row == 1 && a.heights == mare65 + 8 && a.holes && a.index_count == 3060 &&
+                  a.box_max[2] == 120.0f && a.box_min[2] == -30.0f && std::fabs(a.top_left[0] - (17066.666f - 16 * 33.333332f)) < 0.01f,
+              "an area: MARE's heights and bounds, its MAHO found past MAOE, 12 indices a cell not a hole");
+        Check(plan.areas[1].holes == 0 && plan.areas[1].index_count == 3072, "an area without MAHO: no holes, 3072 indices, as the client");
+        // The gate: the client's own loop would read MLDD as MAOF; the runtime reads the file and fills the far terrain.
+        g_files.push_back(FakeFile{"World\\Maps\\T\\T.wdl", wdl.bytes});
+        g_files.push_back(FakeFile{"World\\Maps\\S\\S.wdl", stock.bytes});
+        FakeLowDetail detail;
+        void*         self = &detail;
+        const char*   path = "World\\Maps\\T";
+        const char*   name = "T";
+        Check(wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name) && detail.data.size() == wdl.bytes.size() &&
+                  detail.areaOffsets == maof + 8 && detail.areas.size() == 2 && detail.areas.count(70),
+              "MapLowDetail.Load takes a later client's WDL: its bytes the client's, its areas made");
+        FakeLowDetail other;
+        self = &other;
+        path = "World\\Maps\\S";
+        name = "S";
+        Check(!wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name) && other.data.empty(), "and leaves a 3.3.5a one to the client");
+        path = "World\\Maps\\None";
+        name = "None";
+        Check(!wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name), "and a missing one (the client loads nothing)");
+        g_files.pop_back();
+        g_files.pop_back();
     }
 
     void CheckTerrainLayerLimit()
@@ -16534,6 +16706,8 @@ int main(int argc, char** argv)
     CheckTerrainLayerExtras();
     CheckTerrainLayerLimit();
     CheckSplitTiles();
+    CheckRetailLiquids();
+    CheckRetailWdl();
     CheckTerrainExtraLayers();
     CheckShaderCode();
     CheckDraw();

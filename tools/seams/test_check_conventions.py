@@ -755,6 +755,9 @@ GROUND_TRUTH = {
     "MapChunk.ProcessIffChunks":       ("0x007C3A10", "thiscall", ["ecx"], 1),
     "MapChunk.CreateRefs":             ("0x007C6150", "thiscall", ["ecx"], 4),
     "Map.FreeArea":                    ("0x007C00A0", "cdecl", [], 1),
+    # CMapLowDetail::Load reads [ebp+8] and [ebp+0xc] (0x007CC319, 0x007CC321), moves ECX to EDI
+    # (0x007CC31F) and ends `ret 8` (0x007CC361).
+    "MapLowDetail.Load":               ("0x007CC310", "thiscall", ["ecx"], 2),
     "FrameScript.Initialize":          ("0x00819BB0", "cdecl", [], 1),
     "FrameScript.Destroy":             ("0x0081A9A0", "cdecl", [], 0),
     "FrameScript.CreateEvents":        ("0x0081B5F0", "cdecl", [], 2),
@@ -1130,6 +1133,11 @@ GROUND_TRUTH = {
     # (0x007C647A).
     "TerrainCall.LoadTextures":        ("0x007D6D20", "thiscall", ["ecx"], 2),
     "TerrainCall.CreateRefs":          ("0x007C6150", "thiscall", ["ecx"], 4),
+    # The far terrain's calls, read by hand: SMemAlloc reads [ebp+8] (0x0076E545) and [ebp+0x14]
+    # (0x0076E54E) and ends `ret 0x10` (0x0076E586, 0x0076E597); CMap::AllocAreaLow reads no stack
+    # and ends in bare `ret`s (0x007C0ABF).
+    "TerrainCall.SMemAlloc":           ("0x0076E540", "stdcall", [], 4),
+    "TerrainCall.AllocAreaLow":        ("0x007C0A90", "cdecl", [], 0),
     # wxl.animation's calls (calls_x86.def), read by hand: PlayBaseAnimation moves ECX to EBX
     # (0x007385CA) and ends `ret 8` (0x0073880C); UpdateBaseAnimation moves ECX to ESI
     # (0x0073AC34) and ends `ret 8` (0x0073ACF9); GetCurrentTorsoAnimId moves ECX to ESI

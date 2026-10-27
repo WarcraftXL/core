@@ -1178,12 +1178,21 @@ namespace
             disk[path] = bytes;
             return true;
         };
-        FileNames names("Mods\\wxl.modern-adt", read(archives), read(disk), write);
+        std::vector<std::string> said;
+        FileNames names("Mods\\wxl.modern-adt", read(archives), read(disk), write, [&](const std::string& line) { said.push_back(line); });
         names.MapOf("World\\Maps\\M\\M_1_2.adt");
         Check(names.Name(5, name) && name == "map.blp" && names.Name(12, name) && name == "world\\a.m2" && !names.Name(9, name) &&
                   names.Named() == 2 && names.Unknown() == 1,
               "an id named by the map's listfile, else the mod's; one neither knows is unknown");
         Check(names.Indexed() == 2 && writes == 2, "each CSV indexed once and its index written to the cache");
+        Check(said.size() == 2 && said[0].find("World\\Maps\\M\\listfile.csv: 1 name(s) indexed") == 0 &&
+                  said[1].find("Mods\\wxl.modern-adt\\listfile.csv: 3 name(s) indexed") == 0,
+              "each listfile found is said once, with its rows");
+        FileNames none("Mods\\x", read(archives), read(disk), write, [&](const std::string& line) { said.push_back(line); });
+        none.MapOf("World\\Maps\\N\\N_1_2.adt");
+        Check(!none.Name(5, name) && said.size() == 4 && said[2].find("not found") != std::string::npos &&
+                  said[3].find("not found") != std::string::npos && !none.Name(6, name) && said.size() == 4,
+              "and each one not found, once");
         FileNames again("Mods\\wxl.modern-adt", read(archives), read(disk), write);
         again.MapOf("World\\Maps\\M\\M_1_2.adt");
         Check(again.Name(189077, name) && again.Name(5, name) && again.Indexed() == 0 && writes == 2,
