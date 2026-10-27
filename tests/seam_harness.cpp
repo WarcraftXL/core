@@ -4739,8 +4739,10 @@ namespace
         SplitIff mono, root, tex0, obj0;
     };
 
-    /// One tile, written once in one file (3.3.5a) and once split by name (retail).
-    SplitTwin MakeSplitTwin()
+    /// One tile, written once in one file (3.3.5a) and once split by name (retail); @p byId: the
+    /// split one names its textures and models by FileDataID (8.1 and later): MDID 1001 to 1005,
+    /// models 2001 and 2002, the map object 3001.
+    SplitTwin MakeSplitTwin(bool byId = false)
     {
         const std::string mtex("t\\a.blp\0t\\b.blp\0t\\c.blp\0t\\d.blp\0t\\e.blp\0", 40);
         const std::string mtxf = SplitWords({0, 1, 0x10, 0, 0x20});
@@ -4854,16 +4856,40 @@ namespace
         std::memcpy(&r.bytes[rh + 8], rslots, sizeof rslots);
         SplitIff& t = twin.tex0;
         t.Chunk("MVER", SplitWords({18}));
-        t.Chunk("MTEX", mtex);
+        if (byId) t.Chunk("MDID", SplitWords({1001, 1002, 1003, 1004, 1005}));
+        else t.Chunk("MTEX", mtex);
         t.Chunk("MTXF", mtxf);
         SplitIff& o = twin.obj0;
         o.Chunk("MVER", SplitWords({18}));
-        o.Chunk("MMDX", mmdx);
-        o.Chunk("MMID", mmid);
-        o.Chunk("MWMO", mwmo);
-        o.Chunk("MWID", mwid);
-        o.Chunk("MDDF", mddf);
-        o.Chunk("MODF", modf);
+        if (byId)
+        {
+            std::string ddf = mddf, odf = modf;
+            for (uint32_t i = 0; i < 3; ++i)
+            {
+                const uint32_t id = 2001 + i % 2;
+                const uint16_t flag = 0x40;
+                std::memcpy(&ddf[36 * i], &id, 4);
+                std::memcpy(&ddf[36 * i + 34], &flag, 2);
+            }
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                const uint32_t id = 3001;
+                const uint16_t flag = 0x8;
+                std::memcpy(&odf[64 * i], &id, 4);
+                std::memcpy(&odf[64 * i + 56], &flag, 2);
+            }
+            o.Chunk("MDDF", ddf);
+            o.Chunk("MODF", odf);
+        }
+        else
+        {
+            o.Chunk("MMDX", mmdx);
+            o.Chunk("MMID", mmid);
+            o.Chunk("MWMO", mwmo);
+            o.Chunk("MWID", mwid);
+            o.Chunk("MDDF", mddf);
+            o.Chunk("MODF", modf);
+        }
         for (uint32_t i = 0; i < 256; ++i)
         {
             const SplitChunkData& c = chunks[i];
@@ -4908,6 +4934,25 @@ namespace
     const SplitTwin* g_splitFiles = nullptr;
     uint32_t         g_splitAsked = 0;
     std::string      g_splitPath;
+
+    /// The listfile the test's provider knows: the by-FileDataID twin's ids, and not 1005.
+    wxl_bool WXL_CALL SplitName(void*, uint32_t id, char* out, uint32_t capacity)
+    {
+        const char* name = nullptr;
+        switch (id)
+        {
+        case 1001: name = "t\\a.blp"; break;
+        case 1002: name = "t\\b.blp"; break;
+        case 1003: name = "t\\c.blp"; break;
+        case 1004: name = "t\\d.blp"; break;
+        case 2001: name = "m\\a.m2"; break;
+        case 2002: name = "m\\bb.m2"; break;
+        case 3001: name = "w\\a.wmo"; break;
+        default: return WXL_FALSE;
+        }
+        std::snprintf(out, capacity, "%s", name);
+        return WXL_TRUE;
+    }
 
     void WXL_CALL SplitProvide(void*, const wxl_terrain_tile* tile, wxl_terrain_tile_files* out)
     {
@@ -5071,6 +5116,44 @@ namespace
         wxl::seam::Map::FreeArea::Before(&oddArea);
         wxl::seam::Map::FreeArea::Before(&bare);
         Check(tiles::Held() == 0, "Map.FreeArea lets go of a split tile's files and index");
+
+        // 8.1 and later: textures and models by FileDataID, named by the provider's name function.
+        const SplitTwin byId = MakeSplitTwin(true);
+        g_splitFiles         = &byId;
+        provider.name_fn     = &SplitName;
+        tiles::SetProvider(0, &provider);
+        SplitFakeArea ids;
+        ids.x = 33, ids.y = 40;
+        ids.file  = "World\\Maps\\T\\T_33_40.adt";
+        ids.bytes = byId.root.bytes;
+        std::vector<SplitFakeChunk> idChunks;
+        SplitLoad(ids, idChunks, true);
+        Check(ids.textures.size() == 5 && ids.textures[0] == "t\\a.blp" && ids.textures[3] == "t\\d.blp" && ids.textures[4] == "FileDataID_1005.blp",
+              "MDID's textures loaded by the names the provider gives, in order; one it does not name a placeholder");
+        bool idSame = SplitSpan(ids.doodadDef, 36 * 3) == SplitSpan(mono.doodadDef, 36 * 3) &&
+                      SplitSpan(ids.mapObjDef, 64 * 2) == SplitSpan(mono.mapObjDef, 64 * 2);
+        bool idPlaced = true, idLayers = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            idPlaced = idPlaced && idChunks[i].placed == monoChunks[i].placed;
+            // A layer naming texture 4 (FileDataID 1005, not named) ends the chunk's layers there.
+            const uint32_t want = SplitU32(monoChunks[i].header + 0x0C);
+            uint32_t       stop = want;
+            for (uint32_t k = 0; k < want; ++k)
+                if (SplitU32(monoChunks[i].layers + 16 * k) == 4)
+                {
+                    stop = k;
+                    break;
+                }
+            idLayers = idLayers && SplitU32(idChunks[i].header + 0x0C) == stop;
+        }
+        Check(idSame, "placements by FileDataID become placements by name, as in one file");
+        Check(idPlaced, "their models placed by the names the provider gives, in the client's order");
+        Check(idLayers, "a layer of a texture no one named, and those over it, are left out");
+        Check(tiles::Count().named >= 7 && tiles::Count().unnamed >= 1, "the ids named and not named are counted");
+        wxl::seam::Map::FreeArea::Before(&ids);
+        provider.name_fn = nullptr;
+        tiles::SetProvider(0, nullptr);
         g_splitFiles = nullptr;
 
         // Models the client cannot load: their placements are left out, on any tile.
