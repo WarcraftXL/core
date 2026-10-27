@@ -350,6 +350,20 @@ its own steps, since that function takes an argument in ESI).
 `CGUnit_C::PreAnimate` (`Unit.PreAnimate`), where the game sets its own twist, the head moves on
 towards its target and is written as the head key bone's procedural transform.
 
+`wxl.animation` (`src/services/AnimationService.cpp`) plays animations on units through the
+client's own animation of units, as an emote is played: `CGUnit_C::PlayBaseAnimation` (binding
+`unit_play_animation`), which chooses the bones (the torso key bone over a moving unit's legs), the
+model's fallback and the blend, and may refuse. The runtime keeps one play per unit with what the
+model showed right after it (`CGUnit_C::GetCurrentTorsoAnimId`, `unit_shown_animation`) and one
+play's length (`CM2Model::GetSequenceInfo` on the unit's own model), and follows it after each
+`Unit.PreAnimate` of its unit: a one-shot ends when it played its length (the unit handed back with
+`CGUnit_C::UpdateBaseAnimation(0, -1)`, what the client does at an animation's end) or when the
+model shows something else; a loop is played again once the model shows an idle animation (Stand,
+SwimIdle, StealthStand, Hover), or at once under override unless the unit is dead. A speed is set
+with `CGUnit_C::SetKeyBoneSequenceSpeed` on the root and the torso key bone where they play it.
+Ends are queued and raised as `UnitAnimationEnded` by the seam after the follow-up; at the active
+player's `PreAnimate` the plays on units gone from view end too. Nothing is sent to the server.
+
 `wxl.imgui` (`src/services/ImGuiService.cpp`) owns one Dear ImGui and one ImPlot context, built
 from the SDK's copy (`sdk/deps/imgui`, `sdk/deps/implot`) with its Win32 and Direct3D 9
 backends. At every present of a painted frame, while a mod listens to `ImGuiFrame`, it opens a
@@ -472,7 +486,15 @@ keeps copies of the ground's triangles in `s_queryBox`/`s_moveFacets` (Movement.
 them while a move stays inside the box (`CMovement_C::ValidateTestVsFacetQuery`): every edit empties
 the box (`terrain_forget_collision`). A unit standing still runs no collision at all, so a player
 standing on terrain that went down is made to fall as the client does when its transport goes
-(`CMovement_C::OnFallLocal`).
+(`CMovement_C::OnFallLocal`). Ground raised over the feet of the player on it (standing or
+walking; the highest ground under their bounding radius, as the collision box rests) puts them on
+it: `CMovement_C::m_position.z` written (binding `unit_lift_local`, what `AttemptStepUp` does on a
+step), the facet query forgotten, and for one standing still `OnFallLocal`, so the client lands them
+and sends what a landing sends (`MSG_MOVE_HEARTBEAT` with the falling flag, then
+`MSG_MOVE_FALL_LAND`); a walking one is carried by its next message. A rise up to 0.6 yd is put at
+once; a higher one is lifted 8 yd/s at each `Unit.PreAnimate` of the active player, ended by a
+move, a jump or a fall. Nobody is lifted when `World::Intersect` with the line of sight's mask
+without the terrain (0x100011) meets anything between their feet and two yards over the new ground.
 
 Edits are kept by chunk (column and row on the map) and vertex, each with its owner (the mod's
 token and a layer it names; wxl.lua gives each Lua mod one) and a serial: the newest shows. An
@@ -489,7 +511,8 @@ over whatever chunks are loaded. `vertices_in` walks the map's global grid insid
 starts, and reading its heights from any loaded chunk holding it. `MapChunk.Purge` raises `TerrainChunkUnloaded`; `Map.Unload`
 drops every edit and raises `TerrainEditsCleared`. Main thread only. No new call into Wow.exe for
 the reads; the x86 binding calls `CreateBounds`, `AddBatch`, `FreeInst` and `OnFallLocal`
-(`calls_x86.def`) and writes `s_queryBox` at its address.
+(`calls_x86.def`), writes `s_queryBox` at its address and the active mover's height in its
+movement.
 
 ### Shapes in the world
 
@@ -803,7 +826,7 @@ first lines of the `Errors\` file written during it (the message and the `Curren
   reaching a stage of a `WXL_MOD` mod -- disables itself the same way, through `wxl_host.disable`.
 - **What a mod holds goes with it.** Its open files, its search folders, its asset providers, served
   names and transforms, its field watches, its
-  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its edits of the ground, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
+  memory reports and pressure threshold, its camera view, its hold on the pointer, its block of the mouse look, its heads, its highlights, its `wxl.render` images, buffers, pipelines and shader replacements, its looks of the selection circles, its edits of the ground, its animations on units, its hooks and its patches are given back when it is disabled or unloaded (`OnModDisabled` in
   `src/runtime/Core.cpp`, the shutdown in `src/seams/Client.cpp`). The host sees every Lua mod as
   `wxl.lua`, so `sdk/lua/` keeps which Lua mod holds what and gives it back when that mod closes,
   reloads or is disabled.
