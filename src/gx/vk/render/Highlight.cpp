@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 namespace wxl::vk::render
 {
@@ -69,6 +70,7 @@ namespace wxl::vk::render
     void Highlight::Detach()
     {
         kept_.clear();
+        roots_.clear();
         if (!render_) return;
         for (Image** image : {&color_, &extra_, &glow_a_, &glow_b_})
         {
@@ -86,12 +88,49 @@ namespace wxl::vk::render
     void Highlight::Forget()
     {
         kept_.clear();
+        roots_.clear();
         color_ = extra_ = glow_a_ = glow_b_ = nullptr;
         mask_ = blur_ = composite_ = nullptr;
         render_ = nullptr;
     }
 
-    bool Highlight::Make(const char** why)
+    bool Highlight::Refuse(const char* reason)
+    {
+        if (counts_.refusal.empty() && reason) counts_.refusal = reason;
+        return false;
+    }
+
+    void Highlight::Begin()
+    {
+        kept_.clear();
+        roots_.clear();
+    }
+
+    void Highlight::World(const Root* roots, uint32_t count)
+    {
+        kept_.clear();
+        roots_.assign(roots, roots + (roots ? count : 0));
+        counts_       = Counts{};
+        counts_.roots = static_cast<uint32_t>(roots_.size());
+    }
+
+    bool Highlight::Batch(const void* root, uint32_t blend, const draw::Batch* last)
+    {
+        if (roots_.empty()) return false;
+        ++counts_.models;
+        const auto at = std::find_if(roots_.begin(), roots_.end(), [&](const Root& r) { return r.model == root; });
+        if (at == roots_.end()) return false;
+        ++counts_.seen;
+        // Translucent parts (blended: a weapon's enchant, a ghost) are not the object's silhouette.
+        if (blend > 1) return false;
+        if (!last) return Refuse("the renderer kept no record of a highlighted model's draw (it was not drawn)");
+        // As on Direct3D 9: a model drawn by the fixed function has no program of its own.
+        if (last->vertex < static_cast<uint16_t>(pipelines::VertexProgram::Count))
+            return Refuse("a highlighted model is drawn without a vertex program of the client's (fixed function), which is not highlighted");
+        return Keep(*last, at->style);
+    }
+
+    bool Highlight::Make()
     {
         if (composite_) return true;
         std::string refusal;
@@ -128,7 +167,7 @@ namespace wxl::vk::render
         glow_a_    = render_->CreateImage(ImageSpec{0, 0, 2, kRgba8, 1});
         glow_b_    = render_->CreateImage(ImageSpec{0, 0, 2, kRgba8, 1});
         if (mask_ && blur_ && composite_ && color_ && extra_ && glow_a_ && glow_b_) return true;
-        if (why) *why = "the device refused the highlight's programs or images";
+        Refuse(("the device refused the highlight's programs or images" + (refusal.empty() ? std::string() : ": " + refusal)).c_str());
         Render* render = render_;
         Detach();
         render_ = render;
@@ -138,19 +177,26 @@ namespace wxl::vk::render
     bool Highlight::Keep(const draw::Batch& batch, uint32_t style)
     {
         // A batch drawn into a texture (a portrait, the minimap) is no part of the scene.
-        if (!batch.scene || kept_.size() >= kMaxBatches) return false;
+        if (!batch.scene) return Refuse("a highlighted model's batch was drawn into a texture, not into the scene");
+        if (kept_.size() >= kMaxBatches) return Refuse("more batches of highlighted models than are kept in a frame (512)");
         kept_.push_back(KeptBatch{batch, style});
+        ++counts_.kept;
         return true;
     }
 
     uint32_t Highlight::Draw(const Style* styles, uint32_t count, const char** why)
     {
-        if (kept_.empty() || !render_ || !render_->Ready()) return 0;
-        if (!Make(why))
-        {
-            kept_.clear();
-            return 0;
-        }
+        const uint32_t drawn = DrawPasses(styles, count);
+        if (why) *why = counts_.refusal.empty() ? nullptr : counts_.refusal.c_str();
+        kept_.clear();
+        return drawn;
+    }
+
+    uint32_t Highlight::DrawPasses(const Style* styles, uint32_t count)
+    {
+        if (kept_.empty()) return 0;
+        if (!render_ || !render_->Ready()) return Refuse("the Vulkan device's wxl.render is not up"), 0;
+        if (!Make()) return 0;
         Render& r = *render_;
 
         // Widths are given for a render 1080 lines high, and drawn the same at any height.
@@ -170,12 +216,8 @@ namespace wxl::vk::render
         masks.colors[1]   = extra_;
         masks.clear       = 0x3;
         masks.scene_depth = true;
-        if (!r.Begin(masks))
-        {
-            if (why) *why = "the masks' pass could not begin";
-            kept_.clear();
-            return 0;
-        }
+        std::string refusal;
+        if (!r.Begin(masks, &refusal)) return Refuse(("the masks' pass could not begin: " + refusal).c_str()), 0;
         const uint32_t texture = r.Sampler(kSamplerLinear | kSamplerWrap | kSamplerMips);
         uint32_t       drawn   = 0;
         for (const KeptBatch& kept : kept_)
@@ -189,9 +231,14 @@ namespace wxl::vk::render
                                     red * style.strength, green * style.strength, blue * style.strength, style.outline / kWidthCode,
                                     alpha, Bits(texture), 0.0f, 0.0f};
             if (r.DrawBatch(kept.batch, mask_, rows, sizeof rows)) ++drawn;
+            else if (kept.batch.frame != r.Screen().FrameNumber()) Refuse("a kept batch is of another frame");
+            else
+                Refuse("the renderer refused to draw a kept batch again (the masks' pipeline for the client's vertex program, or the "
+                       "frame's memory; the gx log may say more)");
         }
         r.End();
-        kept_.clear();
+        counts_.drawn = drawn;
+        if (!drawn) return 0;
 
         // The blur reaches past the widest outline, which the composite searches only where the
         // blurred mask reaches.
@@ -211,7 +258,7 @@ namespace wxl::vk::render
         PassSpec across;
         across.color_count = 1;
         across.colors[0]   = glow_a_;
-        if (!r.Begin(across)) return drawn;
+        if (!r.Begin(across, &refusal)) return Refuse(("the glow's pass could not begin: " + refusal).c_str()), 0;
         const BlurPush a{{step / static_cast<float>(full.width), 0.0f}, r.Slot(extra_), linear};
         r.Fullscreen(blur_, &a, sizeof a);
         r.End();
@@ -219,7 +266,7 @@ namespace wxl::vk::render
         PassSpec down;
         down.color_count = 1;
         down.colors[0]   = glow_b_;
-        if (!r.Begin(down)) return drawn;
+        if (!r.Begin(down, &refusal)) return Refuse(("the glow's pass could not begin: " + refusal).c_str()), 0;
         const BlurPush b{{0.0f, step / static_cast<float>(full.height)}, r.Slot(glow_a_), linear};
         r.Fullscreen(blur_, &b, sizeof b);
         r.End();
@@ -228,7 +275,7 @@ namespace wxl::vk::render
         PassSpec onto;
         onto.color_count    = 1;
         onto.scene_color[0] = true;
-        if (!r.Begin(onto)) return drawn;
+        if (!r.Begin(onto, &refusal)) return Refuse(("the composite's pass could not begin: " + refusal).c_str()), 0;
         const CompositePush c{{1.0f / static_cast<float>(full.width), 1.0f / static_cast<float>(full.height), widest, glow ? 1.0f : 0.0f},
                               {kGlowGain, 0.0f, 0.0f, 0.0f},
                               r.Slot(color_),
@@ -236,8 +283,10 @@ namespace wxl::vk::render
                               r.Slot(glow_b_),
                               nearest,
                               linear};
-        r.Fullscreen(composite_, &c, sizeof c);
+        const bool composited = r.Fullscreen(composite_, &c, sizeof c);
         r.End();
+        if (!composited) return Refuse("the renderer refused the composite onto the scene"), 0;
+        counts_.composited = true;
         return drawn;
     }
 }

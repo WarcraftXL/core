@@ -44,6 +44,9 @@ namespace wxl::seam::Gx::ScenePresent
         // A pointer a mod captured is held at the centre, and hidden, before the frame shows.
         wxl::core::services::input::Present();
 
+        // What the highlights' last world pass did, about once a second while some are set.
+        wxl::core::services::highlight::Present();
+
         // Only the frame Scrn.OnPaint opened ends here. The loading screen presents frames of
         // its own, and a paint with nothing to draw into presents anyway; neither opened one.
         wxl::host::ModHost* host = wxl::core::Host();

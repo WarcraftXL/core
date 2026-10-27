@@ -216,6 +216,7 @@ target_include_directories(wxl-core-imaging PUBLIC src PRIVATE deps/nanosvg deps
 
 add_library(wxl-core SHARED
     src/runtime/Core.cpp
+    src/runtime/Listening.cpp
     src/points/Points.cpp
     ${WXL_CORE_SESSION_SOURCES}
     src/runtime/Stages.cpp
@@ -270,6 +271,7 @@ target_compile_definitions(wxl-core PRIVATE
 # carry an architecture's entry point. Built for both, run by hand or by ctest.
 add_executable(wxl-core-seam-harness
     tests/seam_harness.cpp
+    src/runtime/Listening.cpp
     src/points/Points.cpp
     ${WXL_CORE_SESSION_SOURCES}
     src/common/Log.cpp

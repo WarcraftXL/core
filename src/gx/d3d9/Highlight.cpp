@@ -466,30 +466,31 @@ namespace wxl::core::gx::d3d9::highlight
         g_styleOf.assign(styles, styles + count);
     }
 
-    void Batch(const void* render, const wxl_model_batch_args& args)
+    bool Batch(const void* render, const wxl_model_batch_args& args)
     {
-        if (g_roots.empty() || !render || !g_source.device || g_kept.size() >= kMaxBatches) return;
+        if (g_roots.empty() || !render || !g_source.device || g_kept.size() >= kMaxBatches) return false;
         const auto at = std::find(g_roots.begin(), g_roots.end(), args.root_model);
-        if (at == g_roots.end()) return;
+        if (at == g_roots.end()) return false;
         // Translucent parts (blended: a weapon's enchant, a ghost) are not the object's silhouette.
-        if (args.blend_mode > 1) return;
+        if (args.blend_mode > 1) return false;
         const void* device = g_source.device();
-        if (!device || draw::IntoTexture(device)) return;
+        if (!device || draw::IntoTexture(device)) return false;
 
         Kept kept{};
         kept.draw  = args;
         kept.style = g_styleOf[static_cast<size_t>(at - g_roots.begin())];
-        if (!draw::ReadState(device, kept.state)) return;
+        if (!draw::ReadState(device, kept.state)) return false;
         if (!kept.state.vertexShader)
         {
             if (!g_fixedSaid) WLOG_INFO(kTag, "wxl.highlight: a model drawn without a vertex program is not highlighted");
             g_fixedSaid = true;
-            return;
+            return false;
         }
-        if (!g_source.vertexShadow) return;
+        if (!g_source.vertexShadow) return false;
         g_kept.push_back(kept);
         const float* shadow = reinterpret_cast<const float*>(g_source.vertexShadow);
         g_constants.insert(g_constants.end(), shadow, shadow + draw::kRows * 4);
+        return true;
     }
 
     uint32_t Draw(const Style* styles, uint32_t count)

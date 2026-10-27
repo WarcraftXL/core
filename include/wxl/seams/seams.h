@@ -150,11 +150,12 @@ namespace wxl::seam::detail
 namespace wxl::seam
 {
     /**
-     * @brief Whether some mod listens to @p event: the flag the runtime keeps per event
+     * @brief Whether the seam that raises @p event is wanted: some mod listens to it, or the
+     *        runtime's own work rides on that seam. The flag the runtime keeps per event
      *        (wxl_core_listening).
      *
-     * A call site in the client tests it before a seam whose body would only raise that event,
-     * so the seam costs a load and a branch while nobody listens, not a call into the runtime:
+     * A call site in the client tests it before a busy seam that raises that event, so the seam
+     * costs a load and a branch while nobody needs it, not a call into the runtime:
      * `if (wxl::seam::Listening(WXL_EV_TextureLoad)) wxl::seam::Texture::Create::Before(...)`.
      * The seam bodies ask the same question of the host themselves, so a call made anyway is
      * still correct.

@@ -176,13 +176,15 @@ typedef struct wxl_core_init
 
 /**
  * @brief One byte per event of wxl/events.h, nonzero while at least one handler is subscribed
- *        to it.
+ *        to it, or while the runtime's own work rides on the seam that raises it.
  *
- * The runtime writes it whenever an event gains its first handler or loses its last; the client
- * reads it, through wxl::seam::Listening (wxl/seams/seams.h), before calling a seam whose body
- * would only raise that event, so a seam nobody listens to costs a load and a branch instead of
- * a call into the runtime. All zero until WarcraftXLInit has loaded the mods. Indexed by
- * wxl_event; the client and the runtime come from one tree, so they agree on the count.
+ * The runtime writes it whenever an event gains its first handler or loses its last, and holds
+ * it up while one of its services needs the seam called (wxl.highlight keeps the model batches of
+ * M2.DrawBatch while a highlight is set); the client reads it, through wxl::seam::Listening
+ * (wxl/seams/seams.h), before calling a busy seam that raises that event, so a seam nobody needs
+ * costs a load and a branch instead of a call into the runtime. All zero until WarcraftXLInit has
+ * loaded the mods. Indexed by wxl_event; the client and the runtime come from one tree, so they
+ * agree on the count.
  */
 WXL_CORE_API extern volatile uint8_t wxl_core_listening[];
 

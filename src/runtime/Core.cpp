@@ -13,6 +13,7 @@
 #include "profile/Profile.hpp"
 #include "runtime/Attachment.hpp"
 #include "runtime/Code.hpp"
+#include "runtime/Listening.hpp"
 #include "runtime/Session.hpp"
 #include "services/DataService.hpp"
 #include "services/M2Service.hpp"
@@ -140,12 +141,8 @@ namespace
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a
-    /// seam whose body would only raise it.
-    void OnListenChanged(void*, wxl_event event, bool listening)
-    {
-        if (static_cast<uint32_t>(event) < static_cast<uint32_t>(WXL_EV_COUNT))
-            wxl_core_listening[event] = listening ? 1 : 0;
-    }
+    /// busy seam that raises it (runtime/Listening.hpp).
+    void OnListenChanged(void*, wxl_event event, bool listening) { wxl::core::listening::ModsListen(event, listening); }
 
     // Heap-allocated and never freed: the wxl_host table points into it, and a mod disabled
     // rather than unloaded stays mapped with that pointer to the end of the process.

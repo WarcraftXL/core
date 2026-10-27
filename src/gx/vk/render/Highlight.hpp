@@ -16,12 +16,18 @@
 // Nothing is kept, drawn or made while nothing is highlighted; the images and the pipelines are
 // made at the first highlight and kept (made again with the device after a loss, as every
 // wxl.render resource).
+//
+// A world pass, as the service drives it: World (the highlighted top models and their styles),
+// then Batch for each model batch the engine draws (with the renderer's record of that draw), then
+// Draw after the world. Pass() counts what each step took and keeps the first reason something
+// was left out, for the runtime's log.
 
 #pragma once
 
 #include "gx/vk/render/Render.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace wxl::vk::render
@@ -38,6 +44,25 @@ namespace wxl::vk::render
             float    strength; ///< 0 to 1
         };
 
+        /// A highlighted top model of this world pass and the index of its style.
+        struct Root
+        {
+            const void* model;
+            uint32_t    style;
+        };
+
+        /// What one world pass did.
+        struct Counts
+        {
+            uint32_t    roots = 0;     ///< highlighted top models
+            uint32_t    models = 0;    ///< model batches the engine drew
+            uint32_t    seen = 0;      ///< of those, the highlighted models'
+            uint32_t    kept = 0;      ///< of those, kept to be drawn again
+            uint32_t    drawn = 0;     ///< drawn again into the masks
+            bool        composited = false; ///< the outline and the glow went onto the scene
+            std::string refusal;       ///< the first reason something was left out; empty when nothing was
+        };
+
         static constexpr uint32_t kMaxBatches = 512; ///< kept per frame, as on Direct3D 9
 
         Highlight() = default;
@@ -52,19 +77,35 @@ namespace wxl::vk::render
         /// Its images and pipelines forgotten: the render they were made on is gone with them.
         void Forget();
 
-        /// A world pass starts: nothing kept yet.
-        void Begin() { kept_.clear(); }
-        /// A batch of a highlighted model, its style's index: kept when it is the world's, drawn into
-        /// the scene (not into a texture), with a vertex program of the client's.
+        /// Nothing kept, nothing counted: no world pass is open.
+        void Begin();
+        /// A world pass starts with @p count highlighted top models (none: nothing is kept in it).
+        void World(const Root* roots, uint32_t count);
+        /// Whether the open world pass has highlighted models: the renderer keeps each draw.
+        bool Capturing() const { return !roots_.empty(); }
+        /// The engine drew a model batch of top model @p root in blend mode @p blend; @p last is the
+        /// renderer's record of that draw (null when it kept none). Kept when the model is
+        /// highlighted, the batch opaque (blend 0 or 1) and drawn with a vertex program of the
+        /// client's into the scene.
+        bool Batch(const void* root, uint32_t blend, const draw::Batch* last);
+        /// A batch of a highlighted model, its style's index: kept when it is drawn into the scene
+        /// (not into a texture) and fewer than kMaxBatches are.
         bool Keep(const draw::Batch& batch, uint32_t style);
         size_t Kept() const { return kept_.size(); }
 
         /// After the world: the kept batches drawn again and the highlights onto the scene. Answers
-        /// how many batches were drawn again; @p why says what failed when nothing could be.
+        /// how many batches were drawn again into the masks, 0 when the highlights did not reach the
+        /// scene; @p why says what failed first (valid until the next pass).
         uint32_t Draw(const Style* styles, uint32_t count, const char** why = nullptr);
 
+        /// The open or the last world pass's counts.
+        const Counts& Pass() const { return counts_; }
+
     private:
-        bool Make(const char** why);
+        bool     Make();
+        uint32_t DrawPasses(const Style* styles, uint32_t count);
+        /// Notes @p reason as the pass's first when it has none; answers false, for a refusal's return.
+        bool Refuse(const char* reason);
 
         struct KeptBatch
         {
@@ -74,6 +115,8 @@ namespace wxl::vk::render
 
         Render*                render_ = nullptr;
         std::vector<KeptBatch> kept_;
+        std::vector<Root>      roots_;
+        Counts                 counts_;
         Image*                 color_ = nullptr; ///< masks, the scene's samples, resolved
         Image*                 extra_ = nullptr;
         Image*                 glow_a_ = nullptr; ///< half the size

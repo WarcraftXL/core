@@ -364,6 +364,9 @@ namespace wxl::vk::gxfront
     void Front::Draw(const wxl_gx_batch* batch, int32_t count, bool world)
     {
         ++stats_.draws;
+        // The batch a mod may draw again is this draw's, or none: never an earlier draw's, when
+        // this one is left out.
+        renderer_.ForgetLastBatch();
         if (!batch || !display_.InFrame() || !renderer_.Ready()) return;
         engine::CGxDevice* dev = Engine(device_);
         EngineView         view;
@@ -381,8 +384,6 @@ namespace wxl::vk::gxfront
             ++stats_.left_out[static_cast<int>(Verdict::Target)];
             return;
         }
-        // The batch a mod may draw again is this draw's, or none.
-        renderer_.ForgetLastBatch();
         if (verdict == Verdict::Draw && renderer_.Draw(packet) && world) ++stats_.world;
     }
 

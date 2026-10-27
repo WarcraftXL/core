@@ -59,8 +59,8 @@ namespace wxl::core::gx::d3d9::highlight
     void Begin(const void* const* roots, const uint32_t* styles, uint32_t count);
 
     /// The game drew a batch (CM2SceneRender*, its numbers @p args): kept when its model hangs on
-    /// a highlighted top.
-    void Batch(const void* render, const wxl_model_batch_args& args);
+    /// a highlighted top. Answers whether it was kept.
+    bool Batch(const void* render, const wxl_model_batch_args& args);
 
     /// After the world: the kept batches drawn again and the highlights onto the scene. Answers
     /// how many batches were drawn again.
