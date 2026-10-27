@@ -14723,6 +14723,141 @@ namespace
         badXray.occluded_alpha = 1.5f;
         Check(api.draw(&crate, &badXray) == WXL_E_INVALID, "an occluded opacity past 1 is refused");
 
+        // abi 0.1.40: particles. A burst thrown and forgotten, a kept emitter at a rate, both
+        // simulated each frame and drawn in a run of their own; budgets, refusals, ownership.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        wxl_draw_emitter clods{};
+        clods.struct_size = sizeof clods;
+        clods.spawn       = WXL_DRAW_SPAWN_POINT;
+        clods.center      = wxl_vec3{110.0f, 210.0f, 5.5f};
+        clods.burst       = 20;
+        clods.spread      = 0.6f;
+        clods.speed_min   = 3.0f;
+        clods.speed_max   = 5.0f;
+        clods.life_min    = clods.life_max = 0.5f;
+        clods.size_min    = clods.size_max = 0.2f;
+        clods.gravity     = 19.29f;
+        clods.ground      = WXL_DRAW_GROUND_BOUNCE;
+        clods.restitution = 0.4f;
+        wxl_draw_particles earth{};
+        earth.struct_size = sizeof earth;
+        earth.texture     = "SPELLS\\CrackedGround.blp";
+        earth.flags       = WXL_DRAW_PARTICLES_MASK;
+        earth.softness    = 0.2f;
+        earth.key_count   = 2;
+        earth.keys[0]     = wxl_draw_particle_key{0.0f, 1.0f, 0x806040u, 1.0f};
+        earth.keys[1]     = wxl_draw_particle_key{1.0f, 0.5f, 0x806040u, 0.0f};
+        Check(api.emit(&clods, &earth) == WXL_OK, "a burst of clods is thrown");
+        wxl_draw_emitter puff = clods;
+        puff.burst            = 0;
+        puff.rate             = 120.0f;
+        puff.ground           = WXL_DRAW_GROUND_NONE;
+        puff.gravity          = 0.0f;
+        wxl_draw_particles dust{};
+        dust.struct_size    = sizeof dust;
+        dust.blend          = WXL_DRAW_BLEND_ADD;
+        dust.occluded_alpha = 0.3f;
+        const wxl_handle fountain = api.add_emitter(&puff, &dust);
+        Check(fountain != WXL_HANDLE_NONE, "a kept emitter at a rate");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == 20 && stats.emitters == 2 && stats.particles_culled == 0, "the burst alive, both emitters held");
+        size_t particleRuns = 0, particleBehind = 0, sixes = 0;
+        for (const auto& run : device.runs)
+            if (run.vertices && device.vertices[run.first].side == 1 && run.vertices % 6 == 0 && run.surface[2][3] == 1.0f && run.surface[5][2] == 1.0f)
+            {
+                ++particleRuns;
+                sixes += run.vertices / 6;
+            }
+        Check(particleRuns == 1 && sixes == 20 && stats.particle_draws >= 1, "the clods drawn as one run of masked pictures, six corners each");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        device.runs.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        for (const auto& run : device.runs) particleBehind += run.zFunc == D3DCMP_GREATER && run.alpha > 0.29f && run.alpha < 0.31f ? 1 : 0;
+        Check(stats.particles > 20 && stats.particles_emitted > 0 && particleBehind == 1, "the rate throws more, and its dust is drawn behind the scene too");
+        Check(api.burst(fountain, 10) == WXL_OK && api.place(fountain, wxl_vec3{120.0f, 200.0f, 6.0f}, 0.0f) == WXL_OK &&
+                  api.update_emitter(fountain, &puff) == WXL_OK && api.set_emitter_style(fountain, &earth) == WXL_OK,
+              "Burst, Place, UpdateEmitter and SetEmitterStyle reach the emitter");
+        // Their lives run out: the thrown burst goes with them; the kept one stays until stopped.
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        for (int i = 0; i < 8; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            wxl::seam::WorldScene::RenderLiquidPass::After();
+        }
+        api.stats(&stats);
+        Check(stats.emitters == 1, "a thrown burst goes once its particles have lived");
+        api.stop(fountain);
+        Check(api.burst(fountain, 1) == WXL_E_NOT_FOUND, "a stopped emitter is not found");
+        for (int i = 0; i < 8; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            wxl::seam::WorldScene::RenderLiquidPass::After();
+        }
+        api.stats(&stats);
+        Check(stats.emitters == 0 && stats.particles == 0, "its particles live out their lives, then it goes");
+        // Budgets and refusals.
+        wxl_draw_emitter big = clods;
+        big.burst            = WXL_DRAW_MAX_BURST + 1;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a burst past WXL_DRAW_MAX_BURST is refused");
+        big.burst = 0;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a burst of nothing is refused");
+        big.burst    = 10;
+        big.life_min = 0.0f;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a life of 0 is refused");
+        wxl_draw_particles badLook = earth;
+        badLook.key_count          = 2;
+        badLook.keys[1].t          = -1.0f;
+        Check(api.emit(&clods, &badLook) == WXL_E_INVALID, "keys out of order are refused");
+        big          = clods;
+        big.burst    = WXL_DRAW_MAX_BURST;
+        big.life_min = big.life_max = 30.0f;
+        for (int i = 0; i < 5; ++i) api.emit(&big, nullptr);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == WXL_DRAW_MAX_MOD_PARTICLES && stats.particles_culled == 5 * WXL_DRAW_MAX_BURST - WXL_DRAW_MAX_MOD_PARTICLES,
+              "past a mod's particles, the rest are not thrown and are counted");
+        draw::ForgetMod(0);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == 0 && stats.emitters == 0, "a mod's emitters and particles go with it");
+
+        // Beams: a quad strip turned to the eye each frame; soft or textured, a surface.
+        device.vertices.clear();
+        device.runs.clear();
+        const std::vector<wxl_vec3> ends = {{108.0f, 205.0f, 5.0f}, {110.0f, 207.0f, 15.0f}};
+        wxl_draw_shape ray{};
+        ray.struct_size = sizeof ray;
+        ray.kind        = WXL_DRAW_BEAM;
+        ray.points      = ends.data();
+        ray.point_count = 2;
+        ray.size        = wxl_vec3{1.5f, 0.5f, 0.0f};
+        wxl_draw_style light = style;
+        light.alpha          = 0.0f;
+        light.fill_alpha     = 0.8f;
+        light.feather        = 1.0f;
+        light.blend          = WXL_DRAW_BLEND_ADD;
+        light.occluded_alpha = 0.25f;
+        const wxl_handle kept3 = api.add(&ray, &light, 0.0f);
+        Check(kept3 != WXL_HANDLE_NONE && api.draw(&ray, &light) == WXL_OK, "a soft beam, kept and immediate");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        size_t beamRuns = 0, beamBehind = 0;
+        for (const auto& run : device.runs)
+            if (run.vertices == 48 && run.surface[4][2] == 1.0f && run.surface[3][3] == 1.0f)
+            {
+                beamRuns += run.zFunc == D3DCMP_LESSEQUAL ? 1 : 0;
+                beamBehind += run.zFunc == D3DCMP_GREATER ? 1 : 0;
+            }
+        Check(beamRuns == 2 && beamBehind == 2 && stats.textured == 2, "each a surface of 48 corners, soft to its sides, drawn behind the scene too");
+        wxl_draw_shape oneEnd = ray;
+        oneEnd.point_count    = 1;
+        Check(api.draw(&oneEnd, &light) == WXL_E_INVALID, "a beam of one point is refused");
+        api.remove(kept3);
+
         // A device without shader model 3 says so.
         device.caps.VertexShaderVersion = D3DVS_VERSION(2, 0);
         d9::UseDevice(&device);

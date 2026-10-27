@@ -13,6 +13,7 @@
 // copy of the pixel programs (Shade), and a soft line over its shadow.
 
 #include "gx/shapes/Geometry.hpp"
+#include "gx/shapes/Particles.hpp"
 #include "gx/vk/render/Shapes.hpp"
 
 #include "Check.hpp"
@@ -613,6 +614,191 @@ namespace
         Check(v[2].side == 2 && v[2].end == 1 && v[2].flags == 0, "a plain line's corner bytes are unchanged");
     }
 
+    // --- Particles (abi 0.1.40) ------------------------------------------------------------------------
+
+    /// Flat ground at a height, everywhere.
+    struct Floor final : sh::Ground
+    {
+        float heights[145];
+        explicit Floor(float z) { std::fill(std::begin(heights), std::end(heights), z); }
+        bool Present() override { return true; }
+        bool Chunk(int32_t, int32_t, const float*& h, uint16_t& holes) override
+        {
+            h     = heights;
+            holes = 0;
+            return true;
+        }
+    };
+
+    /// PixelView seen from @p eye: positions are written from it, the picture stays where it was.
+    sh::View PixelViewAt(uint32_t w, uint32_t h, sh::V3 eye)
+    {
+        sh::View v = PixelView(w, h);
+        v.vp[12]   = -1.0f + 2.0f * eye.x / static_cast<float>(w);
+        v.vp[13]   = 1.0f - 2.0f * eye.y / static_cast<float>(h);
+        v.vp[14]   = eye.z;
+        v.eye      = eye;
+        return v;
+    }
+
+    void BeamCases()
+    {
+        sh::Desc beam;
+        beam.kind   = sh::kBeam;
+        beam.center = sh::V3{0, 0, 0};
+        beam.points = {{0, 0, 0}, {0, 10, 0}};
+        beam.size   = sh::V3{2.0f, 1.0f, 0.0f};
+        sh::Mesh mesh;
+        Check(sh::Build(beam, sh::Parts{false, true}, nullptr, mesh) && mesh.beam.on && mesh.triangles.empty(), "a beam is built as its two ends");
+        std::vector<sh::Vertex> v;
+        sh::WriteBeam(mesh, sh::V3{20, 5, 0}, 0xFFFFFFFFu, false, v);
+        Check(v.size() == sh::kBeamSegments * 6, "its quad strip: six corners a segment");
+        // Seen from +x: it faces the eye, spread along z; its width at each end; bright at a, gone at b.
+        Check(Near(std::fabs(v[0].pos[2] - v[1].pos[2]), 2.0f, 1e-3f) && Near(v[0].pos[0], -20.0f, 1e-3f), "turned around its axis to face the eye, 2 yards wide at a");
+        const sh::Vertex& endB = v[v.size() - 4]; // the last segment's b side: corners -4 and -1
+        Check(Near(std::fabs(endB.pos[2] - v[v.size() - 1].pos[2]), 1.0f, 1e-3f), "and 1 at b");
+        Check((v[0].color >> 24) == 255 && (endB.color >> 24) == 0, "its opacity from 1 at a to 0 at b");
+        Check(Near(v[0].other[1], -1.0f) && Near(v[1].other[1], 1.0f) && Near(v[2].other[0], 10.0f / 8.0f), "its plane: along in yards, across -1 to 1");
+        // End-on: gone; near the eye: gone.
+        v.clear();
+        sh::WriteBeam(mesh, sh::V3{0, 30, 0}, 0xFFFFFFFFu, false, v);
+        bool none = true;
+        for (const auto& x : v) none = none && (x.color >> 24) == 0;
+        Check(none, "seen along its axis it fades out instead of flashing");
+        Check(sh::BeamSideways(sh::V3{0, 1, 0}, sh::V3{1, 0, 0}) == 1.0f && sh::BeamSideways(sh::V3{0, 1, 0}, sh::V3{0.1f, 1, 0}) < 1.0f,
+              "the fade as it turns end-on is smooth");
+        v.clear();
+        sh::WriteBeam(mesh, sh::V3{0.5f, 0, 0}, 0xFFFFFFFFu, false, v);
+        Check((v[0].color >> 24) < 60, "where it nears the eye it fades");
+        // Its soft sides: feather is a part of its half width.
+        sh::SurfaceLook look;
+        look.feather = 1.0f;
+        const sh::SurfaceConstants k = sh::MakeBeamSurface(mesh, look);
+        float out[4];
+        const float white[4] = {1, 1, 1, 1};
+        sh::Shade(k, sh::V3{3.0f, 0.5f, 0.0f}, white, white, out);
+        const float half = out[3];
+        sh::Shade(k, sh::V3{9.0f, 0.0f, 0.0f}, white, white, out);
+        Check(Near(half, 0.5f) && Near(out[3], 1.0f), "soft to its sides, whole along its middle, all along it");
+        beam.points = {{0, 0, 0}};
+        Check(!sh::Validate(beam).empty(), "a beam needs two points");
+    }
+
+    void ParticleCases()
+    {
+        const sh::V3 c = ChunkMiddle(511, 511);
+        Floor        floor(c.z);
+        // A burst of clods thrown up, falling, bouncing once and settling, never under the ground.
+        sh::Emitter clods;
+        clods.center      = sh::V3{c.x, c.y, c.z + 0.1f};
+        clods.spread      = 0.5f;
+        clods.speed_min   = 4.0f;
+        clods.speed_max   = 6.0f;
+        clods.life_min    = clods.life_max = 5.0f;
+        clods.gravity     = 19.29f;
+        clods.ground      = sh::kGroundBounce;
+        clods.restitution = 0.4f;
+        clods.friction    = 0.5f;
+        sh::Pool   pool;
+        sh::Random random(7);
+        pool.Spawn(clods, clods.center, 0.0f, 50, random);
+        Check(pool.Size() == 50, "a burst throws its count");
+        bool above = true, up = true, bounced = false, settled = true;
+        for (size_t i = 0; i < pool.Size(); ++i) up = up && pool.vz[i] > 0.0f;
+        for (int frame = 0; frame < 240; ++frame)
+        {
+            pool.Step(clods, 1.0f / 60.0f, &floor, c.z, false);
+            for (size_t i = 0; i < pool.Size(); ++i)
+            {
+                above   = above && pool.z[i] >= c.z - 1e-4f;
+                bounced = bounced || pool.state[i] == 1;
+            }
+        }
+        for (size_t i = 0; i < pool.Size(); ++i) settled = settled && pool.state[i] == 2 && std::fabs(pool.z[i] - c.z) < 1e-4f;
+        Check(up && above && bounced && settled, "thrown up within the cone, they fall, bounce once, settle on the ground and never go under it");
+        float slid = 0.0f;
+        for (size_t i = 0; i < pool.Size(); ++i) slid = std::max(slid, std::fabs(pool.vx[i]) + std::fabs(pool.vy[i]));
+        Check(slid < 0.5f, "settled, they slide to a stop");
+        // Their lives run out.
+        for (int frame = 0; frame < 120; ++frame) pool.Step(clods, 1.0f / 30.0f, &floor, c.z, false);
+        Check(pool.Size() == 0, "their lives run out and they go");
+        // The same seed, the same particles.
+        sh::Pool   a, b;
+        sh::Random ra(42), rb(42);
+        a.Spawn(clods, clods.center, 0.3f, 20, ra);
+        b.Spawn(clods, clods.center, 0.3f, 20, rb);
+        Check(a.vx == b.vx && a.life == b.life && a.angle == b.angle, "a seed throws the same particles");
+        // Grains on a disc pulled into its middle, going as they reach it.
+        sh::Emitter grains;
+        grains.spawn          = sh::kSpawnDisc;
+        grains.center         = c;
+        grains.extent         = sh::V3{3.0f, 0, 0};
+        grains.speed_min      = grains.speed_max = 0.0f;
+        grains.life_min       = grains.life_max = 10.0f;
+        grains.attractor      = c;
+        grains.attraction     = 12.0f;
+        grains.attract_radius = 0.25f;
+        grains.drag           = 1.0f;
+        sh::Pool sand;
+        sand.Spawn(grains, c, 0.0f, 40, random);
+        bool onDisc = true;
+        for (size_t i = 0; i < sand.Size(); ++i) onDisc = onDisc && std::hypot(sand.x[i] - c.x, sand.y[i] - c.y) <= 3.0f + 1e-3f && sand.z[i] == c.z;
+        for (int frame = 0; frame < 300 && sand.Size(); ++frame) sand.Step(grains, 1.0f / 60.0f, nullptr, c.z, false);
+        Check(onDisc && sand.Size() == 0, "grains thrown on a disc converge on the attractor and go there");
+        // Keys: size, colour and opacity in lines between them; none: white, fading out.
+        sh::Look look;
+        float    size, alpha;
+        uint32_t rgb;
+        sh::Sample(look, 0.25f, size, rgb, alpha);
+        Check(size == 1.0f && rgb == 0xFFFFFFu && Near(alpha, 0.75f), "no keys: white, its own size, fading out");
+        look.key_count = 3;
+        look.keys[0]   = sh::Key{0.0f, 0.5f, 0x000000u, 0.0f};
+        look.keys[1]   = sh::Key{0.2f, 1.0f, 0xFF0000u, 1.0f};
+        look.keys[2]   = sh::Key{1.0f, 3.0f, 0x0000FFu, 0.0f};
+        sh::Sample(look, 0.1f, size, rgb, alpha);
+        Check(Near(size, 0.75f) && rgb == 0x800000u && Near(alpha, 0.5f), "half way between two keys");
+        sh::Sample(look, 0.6f, size, rgb, alpha);
+        const auto close = [](uint32_t a, uint32_t b) {
+            for (int shift : {0, 8, 16})
+                if (std::abs(static_cast<int>((a >> shift) & 0xFF) - static_cast<int>((b >> shift) & 0xFF)) > 1) return false;
+            return true;
+        };
+        Check(Near(size, 2.0f, 1e-3f) && close(rgb, 0x800080u) && Near(alpha, 0.5f, 1e-3f), "and between the next two");
+        // Written: six corners each, far to near, their frame of the sheet, their height over the softness.
+        sh::Emitter still;
+        still.speed_min = still.speed_max = 0.0f;
+        still.life_min = still.life_max = 4.0f;
+        still.size_min = still.size_max = 2.0f;
+        sh::Pool   two;
+        sh::Random r(3);
+        two.Spawn(still, sh::V3{0, 10, 0}, 0.0f, 1, r);
+        two.Spawn(still, sh::V3{0, 30, 0}, 0.0f, 1, r);
+        two.angle[0] = two.angle[1] = 0.0f;
+        sh::Camera camera; // right +x, up +z, looking along +y
+        sh::Look   sheet;
+        sheet.textured  = true;
+        sheet.frames_x  = 4;
+        sheet.frames_y  = 2;
+        sheet.softness  = 1.0f;
+        two.gz[0] = two.gz[1] = -0.5f; // the ground half a yard under them
+        two.age[0] = two.age[1] = 2.1f; // past half of its life: the fifth frame of eight
+        std::vector<sh::Vertex> v;
+        two.Write(v, sheet, camera, sh::V3{0, 0, 0}, true);
+        Check(v.size() == 12 && Near(v[0].pos[1], 30.0f), "six corners a particle, the far one first");
+        Check(Near(v[0].other[0], 0.0f) && Near(v[0].other[1], 0.5f) && Near(v[1].other[0], 0.25f) && Near(v[2].other[1], 1.0f),
+              "the frame of the sheet at its age, once over its life");
+        Check(Near(v[0].other[2], 1.5f) && Near(v[2].other[2], -0.5f), "each corner's height above the ground over the softness");
+        Check(Near(v[1].pos[0] - v[0].pos[0], 2.0f) && Near(v[0].pos[2] - v[2].pos[2], 2.0f), "facing the camera, its size across");
+        float out[4];
+        const float white[4] = {1, 1, 1, 1}, texel[4] = {0.1f, 0.2f, 0.3f, 0.5f};
+        sh::ParticleShade(false, false, false, 0.5f, 0.5f, 1.0f, white, texel, out);
+        const float centre = out[3];
+        sh::ParticleShade(false, false, false, 0.0f, 0.5f, 1.0f, white, texel, out);
+        Check(Near(centre, 1.0f) && Near(out[3], 0.0f), "no texture: a soft round blot, whole in its middle, nothing at its edge");
+        sh::ParticleShade(true, false, true, 0.5f, 0.5f, 0.5f, white, texel, out);
+        Check(Near(out[0], 1.0f) && Near(out[3], 0.25f), "a mask: the colour its own, the texture's opacity, half faded near the ground");
+    }
+
     /// What building costs: an immediate grid under the aim each frame, a telegraph, a volume.
     void CostCases()
     {
@@ -761,6 +947,74 @@ namespace
         can.kind     = sh::kCylinder;
         can.radius   = 3.0f;
         faces("a textured cylinder, outlined (every face written)", can);
+
+        // Particles: a thousand simulated (gravity, drag, a bounce on the terrain's own heights),
+        // then written facing the camera, sorted far to near or not.
+        sh::Emitter dust;
+        dust.spawn     = sh::kSpawnDisc;
+        dust.center    = c;
+        dust.extent    = sh::V3{2.0f, 0, 0};
+        dust.spread    = 1.0f;
+        dust.speed_min = 1.0f;
+        dust.speed_max = 4.0f;
+        dust.life_min  = dust.life_max = 30.0f;
+        dust.gravity   = 19.29f;
+        dust.drag      = 0.5f;
+        dust.ground    = sh::kGroundBounce;
+        dust.restitution = 0.3f;
+        sh::Pool   thousand;
+        sh::Random random(11);
+        thousand.Spawn(dust, c, 0.0f, 1000, random);
+        const int  rounds = 200;
+        const auto s0     = std::chrono::steady_clock::now();
+        for (int i = 0; i < rounds; ++i) thousand.Step(dust, 1.0f / 600.0f, &ground, c.z, true);
+        const double step = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - s0).count() / rounds;
+        sh::Look     soft;
+        soft.softness = 0.3f;
+        sh::Camera   camera;
+        std::vector<sh::Vertex> stream;
+        const auto w0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < rounds; ++i)
+        {
+            stream.clear();
+            thousand.Write(stream, soft, camera, c, false);
+        }
+        const double write = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - w0).count() / rounds;
+        const auto   o0    = std::chrono::steady_clock::now();
+        for (int i = 0; i < rounds; ++i)
+        {
+            stream.clear();
+            thousand.Write(stream, soft, camera, c, true);
+        }
+        const double sorted = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - o0).count() / rounds;
+        {
+            sh::Desc ray;
+            ray.kind   = sh::kBeam;
+            ray.center = c;
+            ray.points = {{0, 0, 0}, {2, 3, 12}};
+            ray.size   = sh::V3{1.5f, 0.5f, 0.0f};
+            sh::Mesh rayMesh;
+            sh::Build(ray, sh::Parts{false, true}, nullptr, rayMesh);
+            std::vector<sh::Vertex> rays;
+            sh::SurfaceLook         rayLook;
+            rayLook.textured = true;
+            rayLook.feather  = 1.0f;
+            const auto b0    = std::chrono::steady_clock::now();
+            for (int i = 0; i < rounds; ++i)
+            {
+                rays.clear();
+                for (int k = 0; k < 20; ++k)
+                {
+                    const sh::SurfaceConstants rk = sh::MakeBeamSurface(rayMesh, rayLook);
+                    (void)rk;
+                    sh::WriteBeam(rayMesh, sh::V3{c.x + 15.0f, c.y + static_cast<float>(k), c.z + 2.0f}, 0xFFFFE0A0u, false, rays);
+                }
+            }
+            const double beams = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - b0).count() / rounds;
+            std::printf("  cost: 20 beams turned to the eye, with their numbers: %.1f us, %zu vertices\n", beams, rays.size());
+        }
+        std::printf("  cost: 1000 particles: simulated in %.1f us, written in %.1f us (%.1f us sorted far to near), %zu vertices, %zu KiB to upload\n",
+                    step, write, sorted, stream.size(), stream.size() * sizeof(sh::Vertex) / 1024);
     }
 
     void ExpandCases()
@@ -1219,6 +1473,258 @@ namespace
         if (tex) s.live.renderer.DestroyTexture(tex);
     }
 
+    /// Particles on the driver: soft blots blended by their opacity and masked pictures added,
+    /// every pixel held to the CPU's copy (ParticleShade).
+    void LiveParticles(Setup& s)
+    {
+        const uint32_t W = 128, H = 96;
+        const sh::View view = PixelView(W, H);
+        float          k[24];
+        sh::Constants(view, k);
+        render::Shapes shapes;
+        shapes.Attach(s.render);
+        const int             TW = 8, TH = 8;
+        std::vector<uint32_t> texels(TW * TH);
+        for (int y = 0; y < TH; ++y)
+            for (int x = 0; x < TW; ++x)
+                texels[static_cast<size_t>(y) * TW + x] = Argb(20u, 10u, 5u, static_cast<uint32_t>(std::min(255, 64 + 24 * (x + y))));
+        Check(s.Begin(), "a frame begins");
+        draw::TextureDesc desc;
+        desc.format         = draw::kTexArgb8888;
+        desc.width          = TW;
+        desc.height         = TH;
+        draw::Texture* tex  = s.live.renderer.CreateTexture(desc);
+        uint32_t       pitch = 0;
+        uint8_t*       to    = tex ? s.live.renderer.LockTexture(tex, 0, 0, 0, 0, TW, TH, pitch) : nullptr;
+        if (to)
+        {
+            for (int y = 0; y < TH; ++y) std::memcpy(to + static_cast<size_t>(y) * pitch, &texels[static_cast<size_t>(y) * TW], TW * 4u);
+            s.live.renderer.UnlockTexture(tex);
+        }
+        // The picture's camera: right +x, up -y (the screen's), looking into the depth.
+        sh::Camera camera;
+        camera.right   = sh::V3{1, 0, 0};
+        camera.up      = sh::V3{0, -1, 0};
+        camera.forward = sh::V3{0, 0, 1};
+        sh::Emitter still;
+        still.speed_min = still.speed_max = 0.0f;
+        still.life_min = still.life_max = 10.0f;
+        still.size_min = still.size_max = 40.0f;
+        sh::Pool   blots, glows;
+        sh::Random r(5);
+        blots.Spawn(still, sh::V3{32, 48, 0.5f}, 0.0f, 1, r);
+        glows.Spawn(still, sh::V3{96, 48, 0.5f}, 0.0f, 1, r);
+        blots.angle[0] = glows.angle[0] = 0.0f;
+        sh::Look plain, masked;
+        plain.key_count  = 1;
+        plain.keys[0]    = sh::Key{0.0f, 1.0f, 0x40C0FFu, 0.8f};
+        masked.textured  = true;
+        masked.mask      = true;
+        masked.key_count = 1;
+        masked.keys[0]   = sh::Key{0.0f, 1.0f, 0xFFE0A0u, 1.0f};
+        std::vector<sh::Vertex> v;
+        const uint32_t          background = 0xFF204060u;
+        sh::PushTriangle(v, {-1, -1, 0.5f}, {300, -1, 0.5f}, {-1, 300, 0.5f}, sh::V3{}, background, false);
+        sh::Run back;
+        back.count = static_cast<uint32_t>(v.size());
+        sh::Run one;
+        one.first   = static_cast<uint32_t>(v.size());
+        one.program = sh::kParticle;
+        one.surface = 0;
+        blots.Write(v, plain, camera, sh::V3{}, true);
+        one.count = static_cast<uint32_t>(v.size()) - one.first;
+        sh::Run two;
+        two.first   = static_cast<uint32_t>(v.size());
+        two.program = sh::kParticle;
+        two.blend   = sh::kBlendAdd;
+        two.surface = 1;
+        glows.Write(v, masked, camera, sh::V3{}, false);
+        two.count = static_cast<uint32_t>(v.size()) - two.first;
+        sh::Surface surfaces[2];
+        surfaces[0].constants = sh::ParticleConstants(false, false);
+        surfaces[1].constants = sh::ParticleConstants(true, false, true);
+        surfaces[1].texture   = tex;
+        const sh::Run runs[3] = {back, one, two};
+        std::string    why;
+        const uint32_t drawn = shapes.Draw(v.data(), runs, 3, surfaces, k, view.viewport, &why);
+        if (!drawn) std::printf("  refused: %s\n", why.c_str());
+        Check(drawn == v.size(), "the particles are drawn");
+        const std::vector<uint32_t> px = s.live.End();
+        if (px.size() != W * H) return;
+        const float bg[3] = {0x20 / 255.0f, 0x40 / 255.0f, 0x60 / 255.0f};
+        float worst[2] = {0, 0};
+        int   seen[2]  = {0, 0};
+        for (int which = 0; which < 2; ++which)
+        {
+            const float cx = which ? 96.0f : 32.0f;
+            const sh::Key& key = which ? masked.keys[0] : plain.keys[0];
+            const float color[4] = {((key.color >> 16) & 0xFF) / 255.0f, ((key.color >> 8) & 0xFF) / 255.0f, (key.color & 0xFF) / 255.0f, key.alpha};
+            for (int y = 30; y < 66; ++y)
+                for (int x = static_cast<int>(cx) - 18; x < static_cast<int>(cx) + 18; ++x)
+                {
+                    const float u = (static_cast<float>(x) - (cx - 20.0f)) / 40.0f, vv = (static_cast<float>(y) - 28.0f) / 40.0f;
+                    float       texel[4] = {1, 1, 1, 1}, out[4];
+                    if (which) Bilinear(texels, TW, TH, u, vv, false, texel);
+                    sh::ParticleShade(which == 1, false, which == 1, u, vv, 1000.0f, color, texel, out);
+                    float expect[3];
+                    for (int ch = 0; ch < 3; ++ch) expect[ch] = which ? bg[ch] + out[ch] * out[3] : out[ch] * out[3] + bg[ch] * (1.0f - out[3]);
+                    const uint32_t got = px[static_cast<size_t>(y) * W + x];
+                    const float have[3] = {R(got) / 255.0f, G(got) / 255.0f, B(got) / 255.0f};
+                    for (int ch = 0; ch < 3; ++ch) worst[which] = std::max(worst[which], std::fabs(std::min(have[ch], 1.0f) - std::min(expect[ch], 1.0f)));
+                    ++seen[which];
+                }
+        }
+        if (worst[0] > 4.0f / 255.0f || worst[1] > 4.0f / 255.0f) std::printf("  particles: worst %.1f/255 blot, %.1f/255 masked glow\n", worst[0] * 255, worst[1] * 255);
+        Check(seen[0] > 1000 && worst[0] <= 4.0f / 255.0f, "a soft round blot blended by its opacity matches the CPU's picture");
+        Check(seen[1] > 1000 && worst[1] <= 4.0f / 255.0f, "a masked picture added in its own colour matches it");
+        shapes.Detach();
+        if (tex) s.live.renderer.DestroyTexture(tex);
+    }
+
+    /// Beams on the driver: soft to their sides, one plain blended by its opacity, one a masked
+    /// picture repeated along it and added; every pixel held to the CPU's copy.
+    void LiveBeams(Setup& s)
+    {
+        const uint32_t W = 128, H = 96;
+        const sh::V3   eye{64, 48, -10000}; // far: the beams lie flat on the picture
+        const sh::View view = PixelViewAt(W, H, eye);
+        float          k[24];
+        sh::Constants(view, k);
+        render::Shapes shapes;
+        shapes.Attach(s.render);
+        const int             TW = 8, TH = 8;
+        std::vector<uint32_t> texels(TW * TH);
+        for (int y = 0; y < TH; ++y)
+            for (int x = 0; x < TW; ++x)
+                texels[static_cast<size_t>(y) * TW + x] = Argb(10u, 10u, 10u, static_cast<uint32_t>(40 + 27 * ((x * 3 + y * 5) % 8)));
+        Check(s.Begin(), "a frame begins");
+        draw::TextureDesc desc;
+        desc.format         = draw::kTexArgb8888;
+        desc.width          = TW;
+        desc.height         = TH;
+        draw::Texture* tex  = s.live.renderer.CreateTexture(desc);
+        uint32_t       pitch = 0;
+        uint8_t*       to    = tex ? s.live.renderer.LockTexture(tex, 0, 0, 0, 0, TW, TH, pitch) : nullptr;
+        if (to)
+        {
+            for (int y = 0; y < TH; ++y) std::memcpy(to + static_cast<size_t>(y) * pitch, &texels[static_cast<size_t>(y) * TW], TW * 4u);
+            s.live.renderer.UnlockTexture(tex);
+        }
+        struct Ray
+        {
+            sh::Desc        desc;
+            sh::Mesh        mesh;
+            sh::SurfaceLook look;
+            uint32_t        color;
+            sh::Surface     surface;
+        } rays[2];
+        rays[0].desc.points = {{14, 24, 0.5f}, {114, 24, 0.5f}};
+        rays[0].desc.size   = sh::V3{24.0f, 12.0f, 0.0f};
+        rays[0].look.feather = 1.0f;
+        rays[0].color        = 0xFFFFD060u;
+        rays[1].desc.points  = {{14, 70, 0.5f}, {114, 70, 0.5f}};
+        rays[1].desc.size    = sh::V3{20.0f, 20.0f, 0.0f};
+        rays[1].look.feather = 0.5f;
+        rays[1].look.textured = true;
+        rays[1].look.mask     = true;
+        rays[1].look.uv       = sh::kUvTile;
+        rays[1].look.size_y   = 0.25f;
+        rays[1].look.offset_y = 0.1f;
+        rays[1].look.blend    = sh::kBlendAdd;
+        rays[1].color         = 0xFF80C0FFu;
+        std::vector<sh::Vertex> v;
+        const uint32_t          background = 0xFF203040u;
+        sh::PushTriangle(v, {-1, -1, 0.5f}, {300, -1, 0.5f}, {-1, 300, 0.5f}, eye, background, false);
+        std::vector<sh::Run>     runs;
+        std::vector<sh::Surface> surfaces;
+        runs.push_back(sh::Run{0, static_cast<uint32_t>(v.size())});
+        for (Ray& r : rays)
+        {
+            r.desc.kind = sh::kBeam;
+            sh::Build(r.desc, sh::Parts{false, true}, nullptr, r.mesh);
+            r.surface.constants = sh::MakeBeamSurface(r.mesh, r.look);
+            r.surface.texture   = r.look.textured ? tex : nullptr;
+            r.surface.repeats   = true;
+            sh::Run run;
+            run.first   = static_cast<uint32_t>(v.size());
+            run.program = sh::kSurface;
+            run.blend   = static_cast<uint8_t>(r.look.blend);
+            run.surface = static_cast<uint32_t>(surfaces.size());
+            sh::WriteBeam(r.mesh, eye, r.color, false, v);
+            run.count = static_cast<uint32_t>(v.size()) - run.first;
+            runs.push_back(run);
+            surfaces.push_back(r.surface);
+        }
+        std::string    why;
+        const uint32_t drawn = shapes.Draw(v.data(), runs.data(), static_cast<uint32_t>(runs.size()), surfaces.data(), k, view.viewport, &why);
+        if (!drawn) std::printf("  refused: %s\n", why.c_str());
+        Check(drawn == v.size(), "the beams are drawn");
+        const std::vector<uint32_t> px = s.live.End();
+        if (px.size() != W * H) return;
+        const float bg[3] = {0x20 / 255.0f, 0x30 / 255.0f, 0x40 / 255.0f};
+        // The reference: each triangle of the strip projected as the program puts it, its plane and
+        // colour interpolated at each pixel centre inside it (as the rasteriser does), then shaded.
+        for (int which = 0; which < 2; ++which)
+        {
+            const Ray&     r      = rays[which];
+            const sh::Run& run    = runs[1 + which];
+            float          worst  = 0.0f;
+            int            seenPx = 0;
+            for (uint32_t t = run.first; t + 2 < run.first + run.count; t += 3)
+            {
+                float sx[3], sy[3];
+                for (int c = 0; c < 3; ++c)
+                {
+                    float clip[4];
+                    sh::Project(k, v[t + c], clip);
+                    sx[c] = (clip[0] / clip[3] + 1.0f) * 0.5f * static_cast<float>(W);
+                    sy[c] = (1.0f - clip[1] / clip[3]) * 0.5f * static_cast<float>(H);
+                }
+                const float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+                if (std::fabs(area) < 1e-6f) continue;
+                for (int y = 0; y < static_cast<int>(H); ++y)
+                    for (int x = 0; x < static_cast<int>(W); ++x)
+                    {
+                        // Pixel centres on whole coordinates (Direct3D 9's).
+                        const float px0 = static_cast<float>(x), py0 = static_cast<float>(y);
+                        const float b0  = ((sx[1] - px0) * (sy[2] - py0) - (sx[2] - px0) * (sy[1] - py0)) / area;
+                        const float b1  = ((sx[2] - px0) * (sy[0] - py0) - (sx[0] - px0) * (sy[2] - py0)) / area;
+                        const float b2  = 1.0f - b0 - b1;
+                        if (b0 < 0.02f || b1 < 0.02f || b2 < 0.02f) continue; // inside, clear of the edges
+                        const float wts[3] = {b0, b1, b2};
+                        sh::V3      plane{0, 0, 0};
+                        float       a = 0.0f;
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            plane.x += wts[c] * v[t + c].other[0];
+                            plane.y += wts[c] * v[t + c].other[1];
+                            a += wts[c] * static_cast<float>(v[t + c].color >> 24) / 255.0f;
+                        }
+                        float uv[2], texel[4] = {1, 1, 1, 1}, out[4];
+                        sh::Picture(r.surface.constants, plane.x, plane.y, uv);
+                        if (r.look.textured) Bilinear(texels, TW, TH, uv[0], uv[1], true, texel);
+                        const float color[4] = {((r.color >> 16) & 0xFF) / 255.0f, ((r.color >> 8) & 0xFF) / 255.0f, (r.color & 0xFF) / 255.0f, a};
+                        sh::Shade(r.surface.constants, plane, color, texel, out);
+                        const uint32_t got     = px[static_cast<size_t>(y) * W + x];
+                        const float    have[3] = {R(got) / 255.0f, G(got) / 255.0f, B(got) / 255.0f};
+                        for (int ch = 0; ch < 3; ++ch)
+                        {
+                            const float expect = r.look.blend == sh::kBlendAdd ? std::min(bg[ch] + out[ch] * out[3], 1.0f)
+                                                                               : out[ch] * out[3] + bg[ch] * (1.0f - out[3]);
+                            worst = std::max(worst, std::fabs(have[ch] - expect));
+                        }
+                        ++seenPx;
+                    }
+            }
+            if (worst > 4.0f / 255.0f) std::printf("  beam %d: worst %.1f/255 over %d pixels\n", which, worst * 255.0f, seenPx);
+            Check(seenPx > 400 && worst <= 4.0f / 255.0f,
+                  which ? "a beam of a masked picture repeated along it and added matches the CPU's picture"
+                        : "a soft beam fading from its start to its end matches the CPU's picture");
+        }
+        shapes.Detach();
+        if (tex) s.live.renderer.DestroyTexture(tex);
+    }
+
     void ProgramCases()
     {
 #if defined(WXL_VK_SPIRV_VAL)
@@ -1243,6 +1749,8 @@ namespace wxl::vk::test
         ShapeCases();
         ExpandCases();
         SurfaceCases();
+        ParticleCases();
+        BeamCases();
         CostCases();
     }
 
@@ -1261,9 +1769,19 @@ namespace wxl::vk::test
             if (!big.Make(128, 96)) return false;
             LiveSurfaces(big);
         }
-        Setup volumes;
-        if (!volumes.Make(128, 96)) return false;
-        LiveVolumes(volumes);
+        {
+            Setup volumes;
+            if (!volumes.Make(128, 96)) return false;
+            LiveVolumes(volumes);
+        }
+        {
+            Setup particles;
+            if (!particles.Make(128, 96)) return false;
+            LiveParticles(particles);
+        }
+        Setup beams;
+        if (!beams.Make(128, 96)) return false;
+        LiveBeams(beams);
         return true;
     }
 }
