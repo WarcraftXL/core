@@ -356,10 +356,15 @@ namespace
     // The map's WDT as the client loaded it.
     uint32_t g_wdtFlags = 0;
     int      g_shadersValidated = 0;
+    uint32_t g_wdtTiles[4096 * 2] = {}; ///< MAIN as the client holds it
+
     wxl_bool WXL_CALL FakeMapWdt(wxl_core_wdt* out)
     {
-        out->path  = "World\\Maps\\Missing\\Missing.wdt";
-        out->flags = &g_wdtFlags;
+        out->path     = "World\\Maps\\Missing\\Missing.wdt";
+        out->flags    = &g_wdtFlags;
+        out->tiles    = g_wdtTiles;
+        out->map_path = "World\\Maps\\Missing";
+        out->map_name = "Missing";
         return WXL_TRUE;
     }
     void WXL_CALL FakeValidateShaders() { ++g_shadersValidated; }
@@ -5322,6 +5327,30 @@ namespace
         Check(field(2, 2) == 1, "format 3 read as 1, whose heights and coordinates it starts with");
         Check(SplitU32(data + 12 * 3 + 4) == 0 && fixes.dropped == 1, "a chunk whose liquid lies past its 8 cells is left dry");
         Check(fixes.formats == 3 && fixes.types == 1, "the fixes counted");
+    }
+
+    void CheckMissingTiles()
+    {
+        namespace tiles = wxl::core::services::terrain_tiles;
+        const uint32_t saved = g_wdtFlags;
+        std::memset(g_wdtTiles, 0, sizeof g_wdtTiles);
+        g_wdtTiles[2 * (64 * 3 + 5)] = 1; // 5_3, in the files
+        g_wdtTiles[2 * (64 * 3 + 6)] = 1; // 6_3, not
+        g_wdtTiles[2 * (64 * 40 + 33)] = 1; // 33_40, not
+        g_files.push_back(FakeFile{"World\\Maps\\Missing\\Missing_5_3.adt", "REVM"});
+        g_wdtFlags = 0;
+        Check(tiles::WdtLoaded() == 0 && g_wdtTiles[2 * (64 * 3 + 6)] == 1,
+              "a WDT of 3.3.5a's layout keeps every tile its MAIN marks, as the client reads it");
+        g_wdtFlags = 0x84;
+        Check(tiles::WdtLoaded() == 2 && g_wdtTiles[2 * (64 * 3 + 5)] == 1 && g_wdtTiles[2 * (64 * 3 + 6)] == 0 &&
+                  g_wdtTiles[2 * (64 * 40 + 33)] == 0,
+              "a later client's WDT (0x80): tiles its files do not have are marked absent, the others kept");
+        g_wdtTiles[2 * (64 * 3 + 6)] = 1;
+        g_wdtFlags = 0x200;
+        Check(tiles::WdtLoaded() == 1 && g_wdtTiles[2 * (64 * 3 + 6)] == 0, "and one of MAID (0x200)");
+        g_files.pop_back();
+        g_wdtFlags = saved;
+        std::memset(g_wdtTiles, 0, sizeof g_wdtTiles);
     }
 
     void CheckRetailWdl()
@@ -16708,6 +16737,7 @@ int main(int argc, char** argv)
     CheckSplitTiles();
     CheckRetailLiquids();
     CheckRetailWdl();
+    CheckMissingTiles();
     CheckTerrainExtraLayers();
     CheckShaderCode();
     CheckDraw();
