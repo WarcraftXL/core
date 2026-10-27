@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.40-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.41-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -276,7 +276,8 @@ What a mod can reach **today**, by build:
 | `wxl.terrain` (the ground) | yes: the chunks' own heights and normals written in place, then `CMapChunk::CreateBounds`, `CMapRenderChunk::AddBatch`, the chunk's vertex buffer marked empty, `CDetailDoodad::FreeInst`, the movement's cached facets forgotten (`s_queryBox`), `CMovement_C::OnFallLocal` for a player standing on lowered ground, and a player under raised ground lifted onto it (`CMovement_C::m_position.z`, then `OnFallLocal` to land) unless the line of sight meets something above | the same, the calls in the fork |
 | `wxl.animation` (animations on units) | yes: `CGUnit_C::PlayBaseAnimation` as an emote is played, followed after each `CGUnit_C::PreAnimate` (`GetCurrentTorsoAnimId`), handed back with `UpdateBaseAnimation`, its speed by `SetKeyBoneSequenceSpeed` | the same, the calls in the fork |
 | `wxl.draw` (shapes in the world) | yes: shapes built into geometry in world coordinates (`src/gx/shapes/`; ground shapes cut along the terrain's own triangles and laid on their heights), drawn after the liquids through the game's D3D9 device with programs compiled at build time (`src/gx/d3d9/Shapes.cpp`), or through the Vulkan renderer when it draws (`src/gx/vk/render/Shapes.cpp`); `WxlDraw` in both script contexts of the interface | the same; on either device, chosen when it draws |
-| `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
+| `wxl.net` (opcodes of a mod's own) | yes: claimed numbers taken at the `NetClient.ProcessMessage` gate, before the client's dispatch (which drops everything from 0x51F on), and handed to the mod's handler, a compressed number inflated first (u32 size and zlib, stb's inflater); sent as the client sends its own, a `CDataStore` over the opcode and the body (`CDataStore::CDataStore(data, size)`) handed to `ClientServices::Send2`; the send gate opened by the mod's first message on a connection, closed at `HandleConnect` and `HandleDisconnect`; the session's acceptance read from the client's own `SMSG_AUTH_RESPONSE` (`src/services/NetService.cpp`) | the same, the send through the binding |
+| `wxl.ui` | not yet; the service table is not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
 
@@ -376,10 +377,10 @@ source. Everything else observes.
 | `FrameScript.Initialize` | `FrameScript_Initialize(int32_t profile)` | nothing: after, notes the new context and which one CGGameUI's state implies |
 | `FrameScript.Destroy` | `FrameScript_Destroy()` | `ScriptVmClosing` before, naming the context `CreateEvents` announced; nothing for a context never announced |
 | `FrameScript.CreateEvents` | `FrameScript_CreateEvents(const char** names, uint32_t count)` | `ScriptVmReady` after, the first time in a context, with the new `lua_State*`; the installed table is handed to `wxl.script`, which reissues it with the declared events appended |
-| `NetClient.ProcessMessage` (gated) | `NetClient::ProcessMessage(uint32_t time_received, CDataStore* message, int32_t)` | `MessageReceived` at the gate; suppressing it hides the message from the client entirely, which is how a mod serves an opcode the client does not know |
+| `NetClient.ProcessMessage` (gated) | `NetClient::ProcessMessage(uint32_t time_received, CDataStore* message, int32_t)` | `MessageReceived` at the gate; suppressing it hides the message from the client entirely; then a number a mod claimed through `wxl.net` goes to that mod's handler and no further |
 | `NetClient.Send` (gated) | `NetClient::Send(CDataStore* message)` | `MessageSent` at the gate; suppressing it stops the message being sent |
-| `NetClient.HandleConnect` | `NetClient::HandleConnect()` | `Connected` after, once the client holds itself connected |
-| `NetClient.HandleDisconnect` | `NetClient::HandleDisconnect()` | `Disconnected` before, while the connection is still the one being lost |
+| `NetClient.HandleConnect` | `NetClient::HandleConnect()` | `Connected` after, once the client holds itself connected; `wxl.net` counts a new connection, every send gate closed |
+| `NetClient.HandleDisconnect` | `NetClient::HandleDisconnect()` | `Disconnected` before, while the connection is still the one being lost; then `wxl.net` forgets it |
 | `Input.WindowProc` (gated) | `OsWindowProc(void* window, uint32_t message, uintptr_t wparam, intptr_t lparam)` | `Input` at the gate; writing `handled` answers 0 and the client's own procedure never sees the message. A message left to the client then raises `MouseMotion` (`WM_INPUT`, a raw mouse report) or `MouseWheel` (`WM_MOUSEWHEEL`, which a handler keeps from the client the same way) |
 | `Storage.OpenFile` (gated) | `SFile::OpenEx(SArchive*, const char* name, uint32_t flags, SFileImpl** result)` | `FileOpen` at the gate, `redirect` holding what a mod's `wxl.storage` redirect answers; a path written into `redirect` is what the client opens instead, then a folder of the search path that wins the name |
 | `Storage.OpenEx` | the same `SFile::OpenEx`, observed: on x86 a second link of the same chain, nearer the function than the gate | `FileOpened` after, at every return, with the name opened, whether a file came back and its size; nothing is read while nobody listens |
@@ -577,7 +578,8 @@ deps/glslang/                    glslang vulkan-sdk-1.4.357.0, BSD-3-Clause and 
                                  machine only: it compiles the renderer's GLSL, nothing of it ships
 deps/spirv-tools/                SPIRV-Tools vulkan-sdk-1.4.357.0, Apache-2.0, built by the tests only (spirv-val)
 deps/nanosvg/                    nanosvg 239e102 (2026-07-10), zlib, unmodified: SVG parsed and rasterized (wxl.texture)
-deps/stb/                        stb_image 2.30 (stb 003501f), MIT or public domain, unmodified: PNG decoded (wxl.texture)
+deps/stb/                        stb_image 2.30 (stb 003501f) and stb_image_write 1.16 (stb f58f558), MIT or public domain, unmodified: PNG decoded (wxl.texture); zlib streams inflated and deflated (wxl.net)
+src/net/                         wxl.net's zlib streams (stb's inflater and deflater)
 src/imaging/                     wxl.texture's pictures: SVG groups restyled, the resampler, the mips, the BLP2 writer
 tests/imaging_tests.cpp          src/imaging/ pixel by pixel
 tools/seams/                     check the seam table against the fork and against Wow.exe
@@ -618,8 +620,8 @@ MIT. See [LICENSE](LICENSE).
 MinHook, under `deps/minhook/`, is BSD-2-Clause and keeps its own license file. Tracy's client,
 under `deps/tracy/`, is BSD-3-Clause and keeps its own license file. SafetyHook, under
 `deps/safetyhook/`, is BSL-1.0, and Zydis with Zycore, under `deps/zydis/`, are MIT; each keeps its
-own license file. nanosvg, under `deps/nanosvg/`, is under the zlib license, and stb_image, under
-`deps/stb/`, is MIT or public domain; each keeps its license file.
+own license file. nanosvg, under `deps/nanosvg/`, is under the zlib license, and stb_image and stb_image_write, under
+`deps/stb/`, are MIT or public domain; each keeps its license file.
 
 <div align="center">
 
