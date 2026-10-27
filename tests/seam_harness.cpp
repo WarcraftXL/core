@@ -4365,14 +4365,14 @@ namespace
         namespace layers = wxl::core::services::terrain_layers;
         const wxl_terrain_api& api = wxl::core::services::TerrainApi();
         static int  asked = 0;
-        static bool differ = false;
+        static bool differ = false, bare = false;
         wxl_terrain_layer_provider provider{};
         provider.struct_size = sizeof provider;
         provider.flags       = WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW;
         provider.fn          = [](void*, const wxl_terrain_layer*, wxl_terrain_layer_look*) {};
         provider.chunk_fn    = [](void*, const wxl_terrain_chunk* chunk, wxl_terrain_extra_layers* out) {
             ++asked;
-            if (chunk->layers != 4) return;
+            if (chunk->layers != 4 || (bare && asked % 2 == 0)) return;
             out->count                   = 2;
             out->layer[0].texture        = differ && asked % 2 == 0 ? "Tileset\\Rock.blp" : "Tileset\\Moss.blp";
             out->layer[0].texture_scale  = 2.0f;
@@ -4464,7 +4464,7 @@ namespace
         wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
         Check(g_draws.empty() && fixed.size() == 17 * 4 && fixed[8 * 4 + 1] == 0.0f, "extra layers: the fixed-function single pass draws the client's four");
 
-        // Drawn with its neighbour: both answer the same layers, their maps side by side; else the four.
+        // Drawn with its neighbour: the halves' layers put together by texture, their maps side by side.
         FakeRenderChunk paired;
         paired.map_chunk  = &mapChunk;
         paired.map_chunk2 = &neighbour;
@@ -4477,9 +4477,20 @@ namespace
         differ = true;
         FakeRenderChunk other = paired;
         make(other);
-        Check(wide && layers::Count().chunks_extra == 2 && layers::Count().chunks_unpaired == 1,
-              "extra layers: a chunk drawn beside its neighbour gets 128 x 64 maps; one whose neighbour answers other layers keeps its four");
+        Check(wide && layers::Count().chunks_extra == 3 && layers::Count().chunks_trimmed == 0,
+              "extra layers: a chunk drawn beside its neighbour gets 128 x 64 maps, its layers too when its neighbour answers others (3 together)");
         differ = false;
+        bare   = true;
+        FakeRenderChunk half = paired;
+        half.pair            = 1;
+        const size_t tall    = g_openedTextures.size();
+        make(half);
+        bool high = false;
+        for (size_t i = tall; i < g_openedTextures.size(); ++i)
+            high = high || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_64x128_", 0) == 0;
+        Check(high && layers::Count().chunks_extra == 4 && layers::Count().chunks_half == 1,
+              "extra layers: a chunk below its neighbour, only one half with layers past four: 64 x 128 maps, the other half's zero");
+        bare = false;
 
         const int closed = g_texturesClosed;
         layers::MapUnloading();

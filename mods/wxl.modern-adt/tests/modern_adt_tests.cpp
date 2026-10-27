@@ -957,6 +957,68 @@ namespace
               "a program that both lerps and sums its alphas: left as it is");
     }
 
+    /// MTEX, MTXP and chunk (14, 4) of DawnlightWorld_38_19.adt as WorldGen wrote it: five layers in
+    /// the root, no _tex0 beside it, uncompressed 4096-byte alpha maps (the map's WDT says 0x84).
+    const uint8_t kDawnlightRoot[] = {
+#include "modern_adt_root_chunk.inc"
+    };
+
+    void RootExtraCases()
+    {
+        const uint32_t mtexSize = kDawnlightRoot[4] | kDawnlightRoot[5] << 8 | kDawnlightRoot[6] << 16 | kDawnlightRoot[7] << 24;
+        const size_t   mtxpAt = 8 + mtexSize;
+        const uint32_t mtxpSize = kDawnlightRoot[mtxpAt + 4] | kDawnlightRoot[mtxpAt + 5] << 8 | kDawnlightRoot[mtxpAt + 6] << 16 |
+                                  kDawnlightRoot[mtxpAt + 7] << 24;
+        const size_t   mcnkAt = mtxpAt + 8 + mtxpSize;
+        // The root: MVER, MHDR (MTEX's slot), MTEX, MTXP, chunks 0 to 77 empty, then the real chunk 78.
+        Adt root;
+        root.Chunk(adt::kMVER, Words({18}));
+        const size_t mhdr = root.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
+        const size_t mtex = root.bytes.size();
+        root.bytes.insert(root.bytes.end(), kDawnlightRoot, kDawnlightRoot + mcnkAt);
+        for (int c = 0; c < 78; ++c) root.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
+        const size_t real = root.bytes.size();
+        root.bytes.insert(root.bytes.end(), kDawnlightRoot + mcnkAt, kDawnlightRoot + sizeof kDawnlightRoot);
+        const uint32_t v = static_cast<uint32_t>(mtex - (mhdr + 8));
+        std::memcpy(&root.bytes[mhdr + 8 + adt::kSlotMtex], &v, 4);
+        // The runtime has cut the client's count to 4; MCLY still holds the five.
+        uint32_t named = 0, four = 4;
+        std::memcpy(&named, &root.bytes[real + 8 + 0x0C], 4);
+        std::memcpy(&root.bytes[real + 8 + 0x0C], &four, 4);
+        adt::SplitChunk chunk;
+        Check(named == 5 && adt::ReadRootChunk(adt::Reader(root.bytes.data(), root.bytes.size()), 78, chunk) && chunk.layers.size() == 5 &&
+                  chunk.mcalSize >= 4 * 4096,
+              "a WorldGen root chunk of five layers: MCLY read by its own size, past the cut count, with its MCAL");
+        Adt wdt;
+        wdt.Chunk(adt::kMVER, Words({18}));
+        wdt.Chunk(adt::kMPHD, Words({0x84, 0, 0, 0, 0, 0, 0, 0}));
+        Store       store;
+        HeightBlend blend(store, [](const std::string&) { return true; });
+        ExtraLayers extra(store, &blend, [](const std::string&, std::vector<uint8_t>&) { return false; });
+        extra.TileLoaded("World\\Maps\\DawnlightWorld\\DawnlightWorld_38_19.adt", 38, 19);
+        wxl_terrain_chunk info{};
+        info.struct_size = sizeof info;
+        info.tile_x = 38, info.tile_y = 19;
+        info.chunk_x = 38 * 16 + 14, info.chunk_y = 19 * 16 + 4;
+        info.layers  = 4;
+        for (uint32_t k = 0; k < 4; ++k) info.texture[k] = chunk.layers[k].texture;
+        info.file          = root.bytes.data();
+        info.file_size     = static_cast<uint32_t>(root.bytes.size());
+        info.map_file      = wdt.bytes.data();
+        info.map_file_size = static_cast<uint32_t>(wdt.bytes.size());
+        static wxl_terrain_extra_layers out;
+        out = wxl_terrain_extra_layers{};
+        extra.Answer(info, out);
+        const Area& area = store.AreaOf(38, 19, info.file, info.file_size);
+        const std::string name = area.names[chunk.layers[4].texture];
+        bool same = out.count == 1;
+        for (uint32_t t = 0; same && t < 4096; ++t) same = out.alpha[t * 4] == chunk.mcal[chunk.layers[4].offset + t] && out.alpha[t * 4 + 1] == 0;
+        Check(out.count == 1 && name == out.layer[0].texture && extra.FromRoot() == 1 && name.find("grass07") != std::string::npos,
+              "no _tex0 beside it: layer 4 answered from the root itself, its texture from the root's MTEX");
+        Check(same, "its alpha map the root's MCAL as WorldGen wrote it, 4096 bytes (MPHD 0x84)");
+        Check(out.layer[0].extra_texture && out.layer[0].params[2] == 1.0f, "its height as height_blend gives it on a map flagged 0x80");
+    }
+
     void OptionCases()
     {
         Options o = ParseOptions("; comment\n[texture_scale]\nenabled = 0\nsource = MTXF\n");
@@ -978,6 +1040,7 @@ int main()
     SplitCases();
     ExtraCases();
     MapCases();
+    RootExtraCases();
     BigAlphaCases();
     EightLayerCases();
     OptionCases();
