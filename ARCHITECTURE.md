@@ -535,6 +535,24 @@ x64. Its modules are static libraries of `cmake/wxl_vk.cmake`, each seeing only 
 | `render` | `wxl.render` beside the engine's draws (`render/Render.hpp`): images (screen-sized ones made again with the scene, a multisampled one resolved into its one-sample image when a pass ends, a bindless slot each), buffers (device memory read by address and as 32-bit indices, written through the frame's upload pass after the frames before it are done reading), pipelines of a mod's SPIR-V on the engine's layout (graphics with no vertex input, full-screen behind the runtime's triangle, batch behind an engine vertex program and its layout, a variant per target and engine program), passes (a rendering of their own between the engine's: `Display::BeginOwnRendering`), the engine's draws kept as batches (`Renderer::KeepBatches`) and drawn again, the scene's colour and depth copied for sampling, GPU zones by timestamps; and `wxl.highlight`'s passes made of them (`render/Highlight.cpp`) |
 | `capture` | the reader of a frame capture (`include/wxl/core/gx_capture.h`), which the client records under D3D9 (`gxCapture`), and its replay through the renderer (`capture/Replay.cpp`) compared with the D3D9 picture it holds |
 
+**Past the stock limits (x64, Vulkan only).** The device's caps carry two words of the
+recompiled client's own in `CGxCaps`' unused ones (`wxl/core/gx_vk.h`, `WXL_GX_VK_CAP_*`; D3D9
+leaves them zero, the layout stays stock): a bone palette of 256 bones and index pools of 32-bit
+indices. The client's three bone uploads (`CM2SceneRender::DrawBatch`, `DrawBatchDoodad`,
+`CM2Model::RenderBatchShadowMap`) then hand their bones to `GxBonePaletteSet` instead of writing
+c31 and up; `CM2Shared::Initialize` takes the 256-bone skin profile and the doodads' instancing
+budget is the palette's. The backend's `bone_palette` row keeps the palette (`Renderer::BonePalette`),
+copied into each frame's ring as the registers are; a translated vertex program that reads bones
+(a0-relative c31..c33, `ProgramInfo::palette`) reads them there, its address at `Push::data` (or
+at `Push::pixel` beside the renderer's own pixel program, `kFlagPaletteAtPixel`) and its bone count
+in the flags, and from the registers when no palette was set (a capture of D3D9). A pool of
+`GxPoolTarget_Index32` (2) is bound with 32-bit indices, its offsets read four bytes an index; the
+client's skins past 16 bits use one, and `GxDrawIndexRange`/`GxDraw32` keep their vertex range in
+32 bits. Textures load up to `min(device, 16384)` with a decode scratch that grows to the image
+and a larger read budget. `wxl.render` adds compute pipelines (`kCompute`, their own layout of the
+bindless set and 128 bytes of push constants) dispatched between passes, and mods' palettes in the
+frame's ring.
+
 None knows the runtime or the log: they hand their lines to a sink (`gx/vk/Log.hpp`) and build
 natively for Linux in `tests/vk/` from the same rules; only `engine` reads the engine, through its
 layouts. `gxfront` (`src/gx/vk/gxfront/Front.cpp`, Windows) is the Vulkan device behind one engine
