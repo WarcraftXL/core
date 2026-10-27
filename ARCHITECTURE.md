@@ -557,8 +557,10 @@ pass]`) and checks nothing: an MCNK naming more is written past the array. As a 
 (`terrain_layers::TileLoading`); the other layers stay in the file for a mod.
 
 Layers past the four (abi 0.1.44): when a render chunk's fourth layer is made, providers with a
-`chunk_fn` are asked for its map chunk (and its neighbour's, for a chunk drawn with it: both must
-answer the same layers) and answer up to four more layers with their 64 x 64 alpha maps. The maps
+`chunk_fn` are asked for its map chunk (and its neighbour's, for a chunk drawn with it: the
+halves' layers are put together by texture, alphas added, a half lacking one reading 0, and past
+four together the four covering the most are kept) and answer up to four more layers with their
+64 x 64 alpha maps. The maps
 become one texture through the texture service (`texture::ServeData`: a BLP2 of four independent
 channels under `Interface\WXL\Data\`, pinned until the map goes; 128 x 64 or 64 x 128 for a pair,
 as the client lays its own alpha maps out). On the vertex-program single pass, the first draw gets,

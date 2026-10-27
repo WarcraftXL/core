@@ -527,7 +527,7 @@ what newer ADT files carry.
 |---|---|---|
 | `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
 | `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
-| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), retail's height blend from `MTXP`'s heights and each texture's `_h.blp` on maps whose WDT flags it (`[height_blend]`), and up to 8 layers a chunk from each tile's `_tex0.adt` (`[extra_layers]`), in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan, all in `modern-adt.ini`; requires `wxl.terrain` |
+| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), retail's height blend from `MTXP`'s heights and each texture's `_h.blp` on maps whose WDT flags it (`[height_blend]`), and up to 8 layers a chunk from each tile's `_tex0.adt` or else its root ADT's own MCNK (`[extra_layers]`), in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan, all in `modern-adt.ini`; requires `wxl.terrain` |
 
 `wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
 logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it
