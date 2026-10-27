@@ -635,6 +635,14 @@ its vertex data, format 3 read as 1 (this client draws 3 flat), a liquid type it
 looks types up unchecked), and a chunk whose liquid lies outside MH2O or past its 8 x 8 cells is
 left dry.
 
+A tile a later client's WDT announces but the files do not have (`Map.LoadWdt` After,
+`terrain_tiles::WdtLoaded`): for a WDT with MPHD 0x80 or 0x200, or a MAID chunk, each tile MAIN
+marks present (`CMap::m_areaInfo`, binding `map_wdt`) whose root `<map path>\<map>_<x>_<y>.adt`
+the client's file layer does not find is marked absent, one warning listing them: the client would
+end on it (`CMapArea::Load` -> `CMap::SafeOpen`'s fatal error). A missing `_tex0`, `_obj0` or
+`_obj1` was already no harm (the tile loads with what it has). A WDT of 3.3.5a's layout is left as
+it is.
+
 The map's far terrain (`MapLowDetail.Load` gate, `src/services/TerrainLowDetail.cpp`): 3.3.5a's
 `CMapLowDetail::Load` takes MAOF to follow MVER (or MWMO/MWID/MODF); a WDL of Legion and later puts
 MLDD, MLDX, MLMD, MLMX, MSSN, MSSO, MSSF first and MAOE between MARE and MAHO. Such a file is read
