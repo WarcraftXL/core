@@ -1130,6 +1130,7 @@ class Callee:
         self.rets = []                # (address, bytes the ret pops)
         self.notes = []
         self.unsettled = None         # why who cleans is undetermined, when it is
+        self.prologue_end = None      # the first instruction past the entry run
 
     @property
     def stack_dwords(self):
@@ -1177,6 +1178,89 @@ def fills_pushed_slot(insns, position):
         if insn.mn in ("push", "pop", "call", "ret", "retn") or "esp" in insn.ops or insn.mn.startswith("j"):
             return False
     return False
+
+
+def effects(insns, position, saved):
+    """The registers the instruction at `position` reads and writes. A memory operand reads the
+    registers that address it whatever the mnemonic does with the value."""
+    insn = insns[position]
+    ops = insn.operands
+    first = ops[0] if ops else ""
+    reads, writes = set(), set()
+    for index, operand in enumerate(ops):
+        found, memory = registers(operand)
+        if memory:
+            reads |= found
+        elif index == 0 and insn.mn in WRITE_FIRST:
+            writes |= found
+        elif index == 0 and insn.mn in READ_WRITE_FIRST:
+            reads |= found
+            writes |= found
+        elif index == 0 and insn.mn.startswith("set"):
+            writes |= found
+        elif index == 0 and insn.mn.startswith("cmov"):
+            reads |= found
+            writes |= found
+        else:
+            reads |= found
+    if insn.mn == "lea" and len(ops) > 1:
+        # lea computes an address: its bracket registers are read, its first operand written.
+        reads |= registers(ops[1])[0]
+        writes |= registers(ops[0])[0]
+        reads -= writes
+    if writes_without_reading(insn, ops):
+        # The first operand's old value does not reach the result; a memory source of
+        # `imul r, [m], imm` is still read.
+        reads = registers(ops[1])[0] if len(ops) == 3 else set()
+        writes = registers(ops[0])[0]
+    if insn.mn == "push" and first in saved:
+        reads -= {first}          # a save, however late the compiler placed it
+    if insn.mn == "push" and first in VOLATILE and fills_pushed_slot(insns, position):
+        reads -= {first}          # four bytes of argument space, the value stored after
+    return reads, writes
+
+
+def path_reads(insns, start, saved):
+    """The registers read before they are written along some path through the function, from the
+    instruction at `start` (past the entry run), following its branches: a register one branch
+    writes and returns may still be read, unwritten, after the branch that skips it. Each as the
+    address of its first such read. A call writes the volatile registers: one read after it says
+    nothing about how the function was entered."""
+    at = {insn.addr: index for index, insn in enumerate(insns)}
+    tracked = frozenset(PARENT.values()) - {"esp", "ebp"}
+    unwritten = {}                    # position -> the registers no path to it has written yet
+    found = {}
+    todo = [(start, tracked)]
+    while todo:
+        position, state = todo.pop()
+        while position < len(insns):
+            before = unwritten.get(position)
+            if before is not None and state <= before:
+                break                     # nothing new reaches here
+            state = state | before if before is not None else state
+            unwritten[position] = state
+            insn = insns[position]
+            if insn.mn in ("ret", "retn", "retf"):
+                break
+            if not (insn.mn == "nop" or (insn.mn == "mov" and len(insn.operands) == 2
+                                         and insn.operands[0] == insn.operands[1])):
+                reads, writes = effects(insns, position, saved)
+                for reg in reads & state:
+                    found.setdefault(reg, insn.addr)
+                state = state - writes
+                if insn.mn == "call":
+                    state = state - set(VOLATILE)
+            if insn.mn.startswith("j"):
+                target = branch_target(insn)
+                if insn.mn == "jmp":
+                    if target is None or target not in at:
+                        break             # a tail jump, or a table: what follows is not this path
+                    position = at[target]
+                    continue
+                if target is not None and target in at:
+                    todo.append((at[target], state))
+            position += 1
+    return found
 
 
 def read_callee(insns):
@@ -1230,39 +1314,9 @@ def read_callee(insns):
         if insn.mn == "nop" or (insn.mn == "mov" and len(ops) == 2 and ops[0] == ops[1]):
             continue              # `mov edi, edi` is the padding MSVC aligns a function with
 
-        # Reads and writes, operand by operand. A memory operand reads the registers that
-        # address it whatever the mnemonic does with the value.
-        reads, writes = set(), set()
-        for index, operand in enumerate(ops):
-            found, memory = registers(operand)
-            if memory:
-                reads |= found
-            elif index == 0 and insn.mn in WRITE_FIRST:
-                writes |= found
-            elif index == 0 and insn.mn in READ_WRITE_FIRST:
-                reads |= found
-                writes |= found
-            elif index == 0 and insn.mn.startswith("set"):
-                writes |= found
-            elif index == 0 and insn.mn.startswith("cmov"):
-                reads |= found
-                writes |= found
-            else:
-                reads |= found
-        if insn.mn == "lea" and len(ops) > 1:
-            # lea computes an address: its bracket registers are read, its first operand written.
-            reads |= registers(ops[1])[0]
-            writes |= registers(ops[0])[0]
-            reads -= writes
-        if writes_without_reading(insn, ops):
-            # The first operand's old value does not reach the result; a memory source of
-            # `imul r, [m], imm` is still read.
-            reads = registers(ops[1])[0] if len(ops) == 3 else set()
-            writes = registers(ops[0])[0]
-        if insn.mn == "push" and first in saved:
-            reads -= {first}          # a save, however late the compiler placed it
-        if insn.mn == "push" and first in VOLATILE and fills_pushed_slot(insns, position):
-            reads -= {first}          # four bytes of argument space, the value stored after
+        if facts.prologue_end is None:
+            facts.prologue_end = position
+        reads, writes = effects(insns, position, saved)
 
         for reg in reads - written - {"esp", "ebp"}:
             # After a call, eax, ecx and edx hold whatever the callee left: reading one there
@@ -1293,6 +1347,16 @@ def read_callee(insns):
 
         if insn.mn == "call":
             seen_call = True
+
+    # The straight-line read misses a register one branch writes before it returns while another
+    # reads it unwritten (CGxDevice::ITexWHDStartEnd writes ECX on its early return and reads
+    # this->m_baseMipLevel through it at 0x006A5FAE): the branches are followed too.
+    for reg, addr in sorted(path_reads(insns, facts.prologue_end or 0, saved).items(), key=lambda item: item[1]):
+        if reg not in facts.reg_args:
+            facts.reg_args.append(reg)
+            facts.reg_at[reg] = addr
+            facts.notes.append("%s is read unwritten at 0x%08X on a branch the straight-line read passes "
+                               "after a write" % (reg.upper(), addr))
 
     if not facts.rets and facts.stack_dwords:
         facts.unsettled = ("no `ret` was decoded inside its extent, so who cleans its %d stack "

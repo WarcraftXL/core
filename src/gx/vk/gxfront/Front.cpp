@@ -800,7 +800,7 @@ namespace wxl::vk::gxfront
                       "%llu linked ones replaced by their whole compile, %llu compiled on the main thread in %.0f ms and %llu parts in "
                       "%.0f ms; %llu hitches of %.0f ms or more, the longest %.1f ms; %llu failed), %llu programs translated (%llu "
                       "refused; %llu translated in %.0f ms, %llu from the cache, %llu ahead), %llu target renderings, %llu copies, %llu "
-                      "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures, %llu draws with multisampling off in a "
+                      "resolves, %llu readbacks, %llu queries, %llu pass breaks, %llu textures alive (%llu made, at most %llu at once), %llu draws with multisampling off in a "
                       "multisampled scene (%llu with their samples on the pixel's centre, %llu antialiased: no sample locations), "
                       "%llu losses%s",
                       context_.Chosen().name, n(s.frames), n(s.presented), n(s.dropped), n(s.rebuilds), display_.Samples(), n(stats_.draws),
@@ -814,7 +814,7 @@ namespace wxl::vk::gxfront
                       n(p.prewarm_known), n(p.optimized), n(p.compiled_main), p.compiled_main_ms, n(p.parts_main), p.parts_main_ms,
                       n(p.hitches), pipelines::Pipelines::kHitchMs, p.longest_ms, n(p.failed), n(r.programs), n(r.programs_refused),
                       n(c.translated), c.milliseconds, n(c.from_disk), n(c.prewarmed), n(r.target_renderings), n(r.copies), n(s.resolves),
-                      n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(r.centred + r.antialiased), n(r.centred),
+                      n(s.readbacks), n(r.queries), n(r.pass_breaks), n(r.textures), n(r.textures_made), n(r.textures_peak), n(r.centred + r.antialiased), n(r.centred),
                       n(r.antialiased), n(stats_.losses),
                       context_.Lost() ? ", the device is lost" : "");
     }

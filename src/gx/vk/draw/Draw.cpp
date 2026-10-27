@@ -574,6 +574,8 @@ namespace wxl::vk::draw
             return nullptr;
         }
         ++stats_.textures;
+        ++stats_.textures_made;
+        stats_.textures_peak = std::max(stats_.textures_peak, stats_.textures);
         return t;
     }
 

@@ -76,7 +76,7 @@ WXL_BINDING_CALL_X86(GxCall, QueryCreate, "CGxDevice::QueryCreate", void, thisca
 WXL_BINDING_CALL_X86(GxCall, ShaderConstantsClear, "CGxDevice::ShaderConstantsClear", void, cdecl, ())
 WXL_BINDING_CALL_X86(GxCall, IRsSync, "CGxDevice::IRsSync", void, thiscall, (void* self, int32_t force))
 WXL_BINDING_CALL_X86(GxCall, ITexMarkAsUpdated, "CGxDevice::ITexMarkAsUpdated", void, stdcall, (void* texture))
-WXL_BINDING_CALL_X86(GxCall, ITexWHDStartEnd, "CGxDevice::ITexWHDStartEnd", void, stdcall, (void* texture, uint32_t* width, uint32_t* height, uint32_t* base_mip, uint32_t* mip_count))
+WXL_BINDING_CALL_X86(GxCall, ITexWHDStartEnd, "CGxDevice::ITexWHDStartEnd", void, thiscall, (void* self, void* texture, uint32_t* width, uint32_t* height, uint32_t* base_mip, uint32_t* mip_count))
 WXL_BINDING_CALL_X86(GxCall, TexMarkForUpdate, "CGxDevice::TexMarkForUpdate", void, thiscall, (void* self, void* texture, const void* rect, int32_t immediate))
 WXL_BINDING_CALL_X86(GxCall, TexDestroy, "CGxDevice::TexDestroy", void, stdcall, (void* texture))
 WXL_BINDING_CALL_X86(GxCall, PoolDestroy, "CGxDevice::PoolDestroy", void, thiscall, (void* self, void* pool))

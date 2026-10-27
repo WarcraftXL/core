@@ -269,6 +269,8 @@ namespace wxl::vk::draw
             uint64_t pass_breaks = 0;  ///< renderings ended for an inline copy
             uint64_t upload_bytes = 0; ///< copied to the device
             uint64_t textures = 0;     ///< alive
+            uint64_t textures_made = 0; ///< made, over the device's life (those made again after a recreation counted again)
+            uint64_t textures_peak = 0; ///< the most alive at once
             uint64_t pools = 0;        ///< alive
             uint64_t refused = 0;      ///< draws dropped for want of memory, a pipeline or a target
             uint64_t programs = 0;     ///< client programs translated and made (each record once)

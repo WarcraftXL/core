@@ -150,6 +150,16 @@ namespace
         return reinterpret_cast<Fn>((*static_cast<void* const* const*>(device))[slot])(device, nullptr, args...);
     }
 
+    /// A stdcall row (a member of CGxDevice whose own code never reads `this`) called as the engine
+    /// calls it, with `this` in ECX all the same: what it calls in turn may read ECX as its own
+    /// `this`, which no reading of the function's code alone can rule out.
+    template <class R, class... A, class... B>
+    R WithThis(R(__stdcall* fn)(A...), void* self, B... args)
+    {
+        using Fn = R(__fastcall*)(void*, void*, A...);
+        return reinterpret_cast<Fn>(fn)(self, nullptr, static_cast<A>(args)...);
+    }
+
     /// The client's gx.log (GxLog), when it is open.
     void GxLine(const char* format, ...)
     {
@@ -251,7 +261,7 @@ namespace
     void TexCreate(void* self, engine::CGxTex* tex)
     {
         uint32_t width = 0, height = 0, base = 0, count = 0;
-        S().GxCall_ITexWHDStartEnd(tex, &width, &height, &base, &count);
+        S().GxCall_ITexWHDStartEnd(self, nullptr, tex, &width, &height, &base, &count);
         if (!g.made || !g.vk->tex_create(self, tex, width, height, count - base)) return;
         tex->m_needsCreation = 0;
     }
@@ -268,7 +278,7 @@ namespace
         user(kTexLock, tex->m_width, tex->m_height, 0, 0, tex->m_userArg, &stride, &texels);
 
         uint32_t width = 0, height = 0, base = 0, count = 0;
-        S().GxCall_ITexWHDStartEnd(tex, &width, &height, &base, &count);
+        S().GxCall_ITexWHDStartEnd(self, nullptr, tex, &width, &height, &base, &count);
         const bool     compressed = tex->m_dataFormat >= kTexDxt1 && tex->m_dataFormat <= kTexDxt1 + 2;
         const uint32_t faces      = tex->m_target == kTexCubeMap ? kCubeFaces : 1;
 
@@ -812,7 +822,7 @@ namespace wxl::core::gx::x86::slots
         if (!tex->m_needsCreation && tex->m_apiSpecificData)
         {
             if (tex->m_userFunc) TexUpload(self, tex);
-            S().GxCall_ITexMarkAsUpdated(tex);
+            WithThis(S().GxCall_ITexMarkAsUpdated, self, tex);
         }
     }
 
@@ -964,7 +974,7 @@ namespace wxl::core::gx::x86::slots
     {
         engine::CGxDevice* dev = Dev(self);
         GxLine("CGxDeviceVk::DeviceSetFormat():");
-        S().GxCall_LogFormat(requested);
+        WithThis(S().GxCall_LogFormat, self, requested);
         if (!g.vk) return 0;
 
         char why[512] = {};
@@ -993,7 +1003,7 @@ namespace wxl::core::gx::x86::slots
                 dev->m_context = 1;
                 dev->m_intF5C  = 0;
                 g.vk->device_caps(self);
-                S().GxCall_LogCaps(&dev->m_caps);
+                WithThis(S().GxCall_LogCaps, self, &dev->m_caps);
                 if (S().GxCall_DeviceSetFormat(self, nullptr, &format))
                 {
                     g.vk->gamma_changed(self);
@@ -1238,7 +1248,7 @@ namespace wxl::core::gx::x86::slots
 
     void __fastcall BufData(void* self, void*, void* buf, const void* data, uint32_t size, uint32_t offset)
     {
-        S().GxCall_BufData(buf, data, size, offset);
+        WithThis(S().GxCall_BufData, self, buf, data, size, offset);
         char* dst = BufferLock(self, static_cast<engine::CGxBuf*>(buf));
         if (dst) std::memcpy(dst + offset, data, size);
         BufferUnlock(self, static_cast<engine::CGxBuf*>(buf));
@@ -1247,7 +1257,7 @@ namespace wxl::core::gx::x86::slots
     void __fastcall TexDestroy(void* self, void*, void* texture)
     {
         if (g.made && static_cast<engine::CGxTex*>(texture)->m_apiSpecificData) g.vk->tex_destroy(self, texture);
-        S().GxCall_TexDestroy(texture);
+        WithThis(S().GxCall_TexDestroy, self, texture);
     }
 
     int32_t __fastcall TexCopy(void* self, void*, void* dest, const void* destPos, const void* sourcePos, const void* size, uint32_t level,
@@ -1282,7 +1292,7 @@ namespace wxl::core::gx::x86::slots
         void* query = *static_cast<void**>(queryRef);
         if (g.made && QueryHandle(query)) g.vk->query_destroy(self, QueryHandle(query));
         At<void*>(query, WXL_FIELD("CGxQuery", "m_apiSpecific")) = nullptr;
-        S().GxCall_QueryDestroy(queryRef);
+        WithThis(S().GxCall_QueryDestroy, self, queryRef);
     }
 
     bool __fastcall QueryBegin(void* self, void*, void* query)
