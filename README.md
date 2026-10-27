@@ -190,7 +190,14 @@ cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test
    `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
    or a part of the name>` picks the device on a machine with several; `frames_in_flight = 1..3`
    (2), `present_filter = linear|nearest` (linear) and `async_pipelines = 0|1` (1: a draw whose
-   pipeline is still compiling is left out rather than waited for) serve both clients.
+   pipeline is still compiling is left out rather than waited for) serve both clients, as do
+   `vk_prewarm = 0|1` (1: the programs and pipelines of earlier launches made when the device
+   starts), `vk_rebar = 0|1` (1: the per-frame rings in the GPU's mapped device-local memory, and
+   on the 64-bit client the static pools written in place there, where the GPU has such memory) and
+   `vk_gpu_times = 0|1` (1: each pass timed on the GPU). At exit, on every device, the log says how
+   the frames came (percentiles, hitches and, under Vulkan, their causes, the uploads per frame,
+   the main thread's time per draw and the GPU's per pass); `/console gxStats <label>` in the chat
+   box writes the same lines for the stretch since the previous one.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own

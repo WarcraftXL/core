@@ -711,7 +711,20 @@ buffer, and each draw read by `engine` and recorded by `draw`. The runtime's sid
   of the slot's frames, is given back. `src/gx/Memory.cpp` logs one line, the same on every device
   (a minute into the frames, then every five minutes, with the device made, and at exit): the
   address space used and its largest free block, and under Vulkan what the renderer maps (staging,
-  draw data, stream pools), its pool copies and the GPU's memory.
+  draw data, stream pools), its pool copies and the GPU's memory. The draw data ring and the stream
+  pools are made in the BAR heap (`DEVICE_LOCAL | HOST_VISIBLE`) with `[gx] vk_rebar`, the host's
+  memory when it is full or missing; the static pools go there only in a 64-bit process with a
+  large one (resizable BAR), written in place when no frame in flight reads them.
+- **How the frames came.** `src/gx/Pacing.cpp`, at `Gx.ScenePresent` on every device: the time
+  between two painted frames (the loading screen's presents and pauses of a second left out), its
+  percentiles in buckets 2.5 % apart (`gx/vk/Stats.hpp`), and the hitches (twice the median of the
+  120 frames before and 8 ms over it). Under Vulkan the renderer's main thread charges its slow work
+  by cause (`stats::Scope`: pipelines, shaders, uploads, memory, waiting for the GPU, readbacks,
+  present) and a hitch is put down to the largest when it is half the excess, to the client's own
+  work otherwise; the Display times each pass on the GPU (timestamps read once the frame is done,
+  `[gx] vk_gpu_times`). Lines at exit, and at each set of the console variable `gxStats` for the
+  stretch since. The same zones go to Tracy while a viewer is connected (`stats::ZoneHooks`; the
+  passes through the GPU context of `gx/Vulkan.cpp`).
 
 On both clients the device renders: each frame's scene is cleared as the engine asks, the
 engine's world and interface are drawn into it (and into the textures it draws into: the minimap,
@@ -766,7 +779,7 @@ a tab or a line break, as `\xNN` before the line reaches the sink. `src/runtime/
   own level. `WXL_LOG_LEVEL` wins over the file's `level`. The log's gate is the lowest of all
   levels, which the host's `log_minimum` takes; the file sink then filters by tag. Section
   `[profile]`: `enabled`, `port`, `listen` (above). Section `[gx]`: `api`, `validation`, `gpu`,
-  `frames_in_flight`, `present_filter`, `async_pipelines` (the Vulkan renderer, above). A key or value that does not read is warned in
+  `frames_in_flight`, `present_filter`, `async_pipelines`, `vk_prewarm`, `vk_rebar`, `vk_gpu_times` (the Vulkan renderer, above). A key or value that does not read is warned in
   the header with its line number. `session::CurrentSettings` hands the file to `Core::Start`.
 - **Files.** `log::OpenSession` renames the previous `WarcraftXL.log` after its first line's
   `launch YYYY-MM-DD HH:MM:SS` (or its last write) to `WarcraftXL-<time>.log` and prunes the oldest
