@@ -8,8 +8,11 @@
 // own textures in the same order, is answered layers 4 to 7: their textures, scales (MTXP or
 // MTXF), heights (as height_blend gives them, layers 4 and 5) and alpha maps, decoded from MCAL.
 //
-// The split file is read when the tile is (TerrainTileLoad). A tile without one, a chunk of four
-// or fewer layers, or one whose first four differ from the root's is drawn as the client draws it.
+// The split file is read when the tile is (TerrainTileLoad). A tile without one has its layers past
+// four read from the root ADT itself, whose MCNK may name up to 8 (as Noggit-style tools and
+// WorldGen write them; the runtime cuts the client's count to 4, MCLY keeps them all). A chunk of
+// four or fewer layers, or a split chunk whose first four differ from the root's, is drawn as the
+// client draws it.
 
 #pragma once
 
@@ -48,6 +51,7 @@ namespace wxl::modern_adt
         uint64_t Files() const { return files_; }
         uint64_t Chunks() const { return chunks_; }
         uint64_t Mismatched() const { return mismatched_; }
+        uint64_t FromRoot() const { return fromRoot_; }
 
     private:
         struct Split
@@ -64,6 +68,6 @@ namespace wxl::modern_adt
         std::function<bool(const std::string&, std::vector<uint8_t>&)> read_;
         std::map<uint32_t, Split>                                      splits_; ///< by tile: 64 * y + x
         std::vector<std::string>                                       answered_; ///< names handed out, valid for the call
-        uint64_t files_ = 0, chunks_ = 0, mismatched_ = 0, stamp_ = 0;
+        uint64_t files_ = 0, chunks_ = 0, mismatched_ = 0, stamp_ = 0, fromRoot_ = 0;
     };
 }

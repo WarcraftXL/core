@@ -62,24 +62,43 @@ namespace wxl::modern_adt
     {
         answered_.clear();
         if (chunk.layers != 4 || chunk.chunk_x < 0 || chunk.chunk_y < 0) return;
-        const auto at = splits_.find(static_cast<uint32_t>(chunk.tile_y) * 64u + static_cast<uint32_t>(chunk.tile_x));
-        if (at == splits_.end()) return;
-        const Split&   split = at->second;
         const uint32_t index = static_cast<uint32_t>(chunk.chunk_x % 16) + 16u * static_cast<uint32_t>(chunk.chunk_y % 16);
-        if (index >= split.chunks.size() || split.chunks[index].layers.size() <= 4) return;
-        const adt::SplitChunk& c = split.chunks[index];
-        // Its first four are the root's: the client draws them, the rest go over them.
-        const Area& area = store_.AreaOf(chunk.tile_x, chunk.tile_y, chunk.file, chunk.file_size);
-        for (uint32_t k = 0; k < 4; ++k)
+        const Area&    area  = store_.AreaOf(chunk.tile_x, chunk.tile_y, chunk.file, chunk.file_size);
+        // The tile's split file when it has one; else the root itself, whose MCNK may name more
+        // layers than the client keeps (Noggit-style tools and WorldGen write them there).
+        const adt::SplitChunk*               c        = nullptr;
+        const std::vector<std::string>*      names    = nullptr;
+        const std::vector<adt::TextureInfo>* textures = nullptr;
+        adt::SplitChunk                      root;
+        const auto at = splits_.find(static_cast<uint32_t>(chunk.tile_y) * 64u + static_cast<uint32_t>(chunk.tile_x));
+        if (at != splits_.end())
         {
-            const uint32_t mine = c.layers[k].texture, root = chunk.texture[k];
-            if (mine >= split.names.size() || root >= area.names.size() || !SameName(split.names[mine], area.names[root]))
+            const Split& split = at->second;
+            if (index >= split.chunks.size()) return;
+            c        = &split.chunks[index];
+            names    = &split.names;
+            textures = &split.textures;
+            // Its first four are the root's: the client draws them, the rest go over them.
+            for (uint32_t k = 0; k < 4 && c->layers.size() > 4; ++k)
             {
-                ++mismatched_;
-                return;
+                const uint32_t mine = c->layers[k].texture, own = chunk.texture[k];
+                if (mine >= names->size() || own >= area.names.size() || !SameName((*names)[mine], area.names[own]))
+                {
+                    ++mismatched_;
+                    return;
+                }
             }
         }
-        const uint32_t count = static_cast<uint32_t>(std::min<size_t>(c.layers.size(), 4 + WXL_TERRAIN_EXTRA_LAYERS) - 4);
+        else
+        {
+            if (!adt::ReadRootChunk(adt::Reader(chunk.file, chunk.file_size), index, root)) return;
+            c        = &root;
+            names    = &area.names;
+            textures = &area.textures;
+            if (c->layers.size() > 4) ++fromRoot_;
+        }
+        if (c->layers.size() <= 4) return;
+        const uint32_t count = static_cast<uint32_t>(std::min<size_t>(c->layers.size(), 4 + WXL_TERRAIN_EXTRA_LAYERS) - 4);
         answered_.reserve(2 * count);
         uint8_t  alpha[adt::kAlphaSide * adt::kAlphaSide];
         uint32_t mapFlags = 0;
@@ -88,17 +107,17 @@ namespace wxl::modern_adt
                             : -1;
         for (uint32_t k = 0; k < count; ++k)
         {
-            const adt::LayerEntry& l = c.layers[4 + k];
-            if (l.texture >= split.names.size()) return;
-            const adt::TextureInfo info = l.texture < split.textures.size() ? split.textures[l.texture] : adt::TextureInfo{};
+            const adt::LayerEntry& l = c->layers[4 + k];
+            if (l.texture >= names->size()) return;
+            const adt::TextureInfo info = l.texture < textures->size() ? (*textures)[l.texture] : adt::TextureInfo{};
             wxl_terrain_extra_layer& e  = out.layer[k];
-            answered_.push_back(split.names[l.texture]);
+            answered_.push_back((*names)[l.texture]);
             e.texture       = answered_.back().c_str();
             e.flags         = l.flags;
             e.texture_scale = adt::ScaleOf(info.scale);
             if (blend_ && k < 2 && blend_->MapAllows(chunk.map_file, chunk.map_file_size))
-                blend_->Height(split.names[l.texture], info, &e.extra_texture, e.params);
-            if (!adt::DecodeAlpha(c, 4 + k, alpha, big)) std::memset(alpha, 0, sizeof alpha);
+                blend_->Height((*names)[l.texture], info, &e.extra_texture, e.params);
+            if (!adt::DecodeAlpha(*c, 4 + k, alpha, big)) std::memset(alpha, 0, sizeof alpha);
             for (uint32_t t = 0; t < adt::kAlphaSide * adt::kAlphaSide; ++t) out.alpha[t * 4 + k] = alpha[t];
         }
         out.count = count;

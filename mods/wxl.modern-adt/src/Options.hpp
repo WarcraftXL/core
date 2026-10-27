@@ -12,7 +12,7 @@
 //   require_wdt_flag = 1 ; only on maps whose WDT says so (MPHD 0x80), as retail; 0 for data made without it
 //
 //   [extra_layers]
-//   enabled = 1        ; up to 8 layers a chunk, from each tile's _tex0.adt (needs height_blend)
+//   enabled = 1        ; up to 8 layers a chunk, from each tile's _tex0.adt or its root (needs height_blend)
 //
 // A missing file or key keeps the default; a line not understood is logged and left out.
 

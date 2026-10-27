@@ -152,6 +152,11 @@ namespace wxl::modern_adt::adt
     /// sub-chunks from their start, as retail writes them. Fewer than 256 when the file is cut short.
     std::vector<SplitChunk> ReadSplitChunks(const Reader& file);
 
+    /// Chunk @p index (x + 16 * y) of a root ADT, its layers and alpha maps as the split form holds
+    /// them: MCLY counted by its own size (the MCNK header's count may have been cut to the
+    /// client's four), MCAL from the header's offset and size. False past the file's chunks.
+    bool ReadRootChunk(const Reader& file, uint32_t index, SplitChunk& out);
+
     /// A WDT's MPHD flags; false for a file without MPHD.
     bool MapFlags(const Reader& wdt, uint32_t* flags);
 

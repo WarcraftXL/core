@@ -126,6 +126,48 @@ namespace wxl::modern_adt::adt
         return chunks;
     }
 
+    bool ReadRootChunk(const Reader& file, uint32_t index, SplitChunk& out)
+    {
+        out = SplitChunk{};
+        uint32_t seen = 0;
+        bool     found = false;
+        file.Chunks([&](const Chunk& c) {
+            if (c.id != kMCNK) return true;
+            if (seen++ != index) return true;
+            found = true;
+            // Offsets in the 128-byte header count from the MCNK's own header (8 bytes before its data).
+            const uint8_t* base = c.data - 8;
+            const size_t   total = static_cast<size_t>(c.size) + 8;
+            if (c.size < 0x2C) return false;
+            uint32_t ofsLayer = 0, ofsAlpha = 0, sizeAlpha = 0;
+            std::memcpy(&ofsLayer, c.data + 0x1C, 4);
+            std::memcpy(&ofsAlpha, c.data + 0x24, 4);
+            std::memcpy(&sizeAlpha, c.data + 0x28, 4);
+            if (ofsLayer && ofsLayer + 8 <= total)
+            {
+                uint32_t size = 0;
+                std::memcpy(&size, base + ofsLayer + 4, 4);
+                size = static_cast<uint32_t>(std::min<size_t>(size, total - ofsLayer - 8));
+                for (uint32_t at = 0; at + 16 <= size; at += 16)
+                {
+                    LayerEntry e;
+                    std::memcpy(&e.texture, base + ofsLayer + 8 + at, 4);
+                    std::memcpy(&e.flags, base + ofsLayer + 8 + at + 4, 4);
+                    std::memcpy(&e.offset, base + ofsLayer + 8 + at + 8, 4);
+                    out.layers.push_back(e);
+                }
+            }
+            // MCAL's own size is unreliable in root files; the header's sizeAlpha counts its 8-byte header.
+            if (ofsAlpha && sizeAlpha > 8 && ofsAlpha + 8 <= total)
+            {
+                out.mcal     = base + ofsAlpha + 8;
+                out.mcalSize = static_cast<uint32_t>(std::min<size_t>(sizeAlpha - 8, total - ofsAlpha - 8));
+            }
+            return false;
+        });
+        return found;
+    }
+
     bool MapFlags(const Reader& wdt, uint32_t* flags)
     {
         const Chunk mphd = wdt.Find(kMPHD);

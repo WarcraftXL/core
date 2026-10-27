@@ -13,7 +13,8 @@
 //                  the client's single-pass terrain pixel programs rewritten through wxl.gx's
 //                  shader provider, each layer's _h texture and numbers through wxl.terrain's.
 //   extra_layers   a chunk's layers past the client's four (up to 8), from the tile's split
-//                  texture file (<tile>_tex0.adt), through wxl.terrain's chunk_fn.
+//                  texture file (<tile>_tex0.adt) or else the root ADT's own MCNK, through
+//                  wxl.terrain's chunk_fn.
 //
 // Main thread only, as wxl.terrain and wxl.gx call their providers.
 
@@ -128,7 +129,7 @@ namespace
                 wxl::Log(WXL_LOG_INFO, kTag,
                          "height_blend on: MTXP's heights and the _h textures, in the single-pass ps_3_0 terrain programs (Direct3D 9 and Vulkan)");
             if (layering_)
-                wxl::Log(WXL_LOG_INFO, kTag, "extra_layers on: up to 8 layers a chunk from each tile's _tex0.adt, drawn in a second pass");
+                wxl::Log(WXL_LOG_INFO, kTag, "extra_layers on: up to 8 layers a chunk, from each tile's _tex0.adt or else its root ADT, drawn in a second pass");
             return WXL_OK;
         }
 
@@ -140,9 +141,10 @@ namespace
             if (extra_ && layering_)
             {
                 char line[200];
-                std::snprintf(line, sizeof line, "extra_layers: %llu split file(s) read, %llu chunk(s) answered, %llu whose first four were not the root's",
+                std::snprintf(line, sizeof line,
+                              "extra_layers: %llu split file(s) read, %llu chunk(s) answered (%llu from their root ADT), %llu whose first four were not the root's",
                               static_cast<unsigned long long>(extra_->Files()), static_cast<unsigned long long>(extra_->Chunks()),
-                              static_cast<unsigned long long>(extra_->Mismatched()));
+                              static_cast<unsigned long long>(extra_->FromRoot()), static_cast<unsigned long long>(extra_->Mismatched()));
                 wxl::Log(WXL_LOG_INFO, kTag, line);
             }
             if (blend_ && blending_)
