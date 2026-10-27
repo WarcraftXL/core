@@ -489,6 +489,42 @@ drops every edit and raises `TerrainEditsCleared`. Main thread only. No new call
 the reads; the x86 binding calls `CreateBounds`, `AddBatch`, `FreeInst` and `OnFallLocal`
 (`calls_x86.def`) and writes `s_queryBox` at its address.
 
+### Shapes in the world
+
+`wxl.draw` (`src/services/DrawService.cpp`) keeps the shapes mods draw, by mod: immediate ones (built
+when given, dropped once a world has drawn them, or at the present of a frame without a world) and
+kept ones (built when added or changed, again when what they lie on or follow moved). The geometry
+(`src/gx/shapes/Geometry.cpp`, portable, tested natively) is in world coordinates: line segments,
+their ends marked for a square cap where a line ends or turns, and triangles. A ground shape is cut
+into convex pieces (a polygon by ear clipping), and each piece clipped against the terrain's own
+triangles (a cell's four around its middle vertex: their edges are the lines u, v, u + v and u - v =
+whole numbers in cells), every vertex taking the height of the triangle it lies on, from
+`terrain::ChunkGround` (the heights the client walks on, read once per change of
+`terrain::Generation()`, which an edit, a chunk loaded or freed and the map's unload move on). Holes,
+chunks not loaded and maps without terrain lie flat at the shape's height. Lines on the ground are
+cut where they cross those edges.
+
+Each frame (`WorldScene.RenderLiquidPass` After, the world's matrices read by binding
+`gx_world_view`: `m_projNative`, the view stack's top, `m_viewport` and the window, and
+`CWorldScene::s_activeWorldView`, the origin of the world's draws) the shapes' vertices are written
+from that origin into one stream of 32-byte vertices (`Vertex`): fills before lines, volumes far to
+near with their faces turned to the eye (their inside from within), opacity with the pulse and the
+fades of the moment; the depth-tested run first, then the one on top. A line's segment is six
+vertices carrying both ends; the vertex program (`src/gx/d3d9/shaders/draw.hlsl`,
+`src/gx/vk/shaders/glsl/draw.vert`, `Project` on the CPU for the tests) cuts it at the near plane and
+widens it on the screen by its width in pixels at 1080 lines; a ground shape's vertices are pulled
+towards the eye by 0.2 % of their distance and 2 cm, which keeps them over the ground without moving
+them on the screen. Through Vulkan (`src/gx/vk/render/Shapes.cpp`, whenever `gx::VulkanFront()`
+answers, on either client): two GRAPHICS pipelines of `wxl.render` (tested LESS_EQUAL, and none),
+the stream in the frame's memory by address, one pass onto the scene's colour against its depth,
+the world's viewport and depth range, half a pixel moved as the renderer draws the world; colour
+blended by its alpha, the scene's alpha kept (`kBlendAlphaKeepAlpha`). Through Direct3D 9
+(`src/gx/d3d9/Shapes.cpp`, either client): `DrawPrimitiveUP`, constants at c240 to c245 (no game
+program reads them), `COLORWRITEENABLE` without alpha, then the defaults the engine never sends
+again and `gx_invalidate_state`. The D3D9 programs are compiled at build time on both architectures
+where the tool runs; an x64 tree cross-built without Wine takes the copy in
+`src/gx/d3d9/shaders/generated/`.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
