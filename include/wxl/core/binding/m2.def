@@ -76,6 +76,24 @@ WXL_BINDING(m2_attachment_point, wxl_bool, (const void* model, uint32_t attachme
 // wxl.m2 attached from. False for a model that has not loaded or has no matrices.
 WXL_BINDING(m2_skeleton, wxl_bool, (void* model, wxl_core_m2_skeleton* out), (model, out), WXL_FALSE)
 
+// --- The scene's animate list (the M2 BeginThread and WaitThread gates, [engine] animate_threads) -
+
+// Whether `function` is CM2Scene::AnimateThread, what CM2Scene::Animate hands its cache's worker.
+WXL_BINDING(m2_is_animate_thread, wxl_bool, (const void* function), (function), WXL_FALSE)
+
+// Up to `capacity` models of `scene`'s animate list (CM2Scene::m_animateList, then each model's
+// m_animateNext), in its order, written to `out`; the answer is how many there are.
+WXL_BINDING(m2_animate_list, uint32_t, (const void* scene, void** out, uint32_t capacity), (scene, out, capacity), 0)
+
+// Makes `head` the first model of `scene`'s animate list and answers the one that was.
+WXL_BINDING(m2_swap_animate_list, void*, (void* scene, void* head), (scene, head), 0)
+
+// Animates `model` as CM2Scene::Animate animates a model of its list: CM2Model::AnimateMTSimple
+// for a model flagged simple (m_fFlags 0x1000), AnimateMT otherwise, with the scene's view (m_view),
+// a white diffuse, a black emissive and both alphas 1. Any thread: the client runs it on its
+// animate threads.
+WXL_BINDING(m2_animate_model, void, (void* model, void* scene), (model, scene), (void)0)
+
 // --- The model loader (ModelParsed, SkinProfileParsed, ModelSequenceLoad, wxl.m2file) ----------
 
 // What a model file is while it loads: its path, its header, how many bytes, and its skin profile

@@ -58,6 +58,7 @@ namespace wxl::core::settings
             log,
             profile,
             gx,
+            engine,
         };
         Section  section = Section::other;
         unsigned number = 0;
@@ -85,6 +86,7 @@ namespace wxl::core::settings
                 section = SameWord(name, "log")       ? Section::log
                           : SameWord(name, "profile") ? Section::profile
                           : SameWord(name, "gx")      ? Section::gx
+                          : SameWord(name, "engine")  ? Section::engine
                                                       : Section::other;
                 if (section == Section::profile) out.has_profile = true;
                 continue;
@@ -149,6 +151,31 @@ namespace wxl::core::settings
                             "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter, async_pipelines, vk_rebar, "
                             "vk_prewarm, vk_gpu_times):",
                             key);
+                }
+                continue;
+            }
+
+            if (section == Section::engine)
+            {
+                if (SameWord(key, "animate_threads"))
+                {
+                    unsigned threads = 0;
+                    bool     digits  = !value.empty() && value.size() <= 2;
+                    for (char c : value) digits = digits && c >= '0' && c <= '9';
+                    if (digits)
+                        for (char c : value) threads = threads * 10 + static_cast<unsigned>(c - '0');
+                    if (SameWord(value, "auto")) out.animate_threads = kAnimateAuto;
+                    else if (digits && (threads == 0 || (threads >= 2 && threads <= kAnimateMost))) out.animate_threads = threads;
+                    else Problem(out, number, "not auto, 0 or 2 to 16:", value);
+                }
+                else if (SameWord(key, "trim_alloc"))
+                {
+                    if (value == "0" || value == "1") out.trim_alloc = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
+                else
+                {
+                    Problem(out, number, "an unknown key of [engine] (animate_threads, trim_alloc):", key);
                 }
                 continue;
             }

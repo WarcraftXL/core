@@ -24,6 +24,11 @@ namespace wxl::core::settings
         vulkan, ///< Vulkan, a D3D9 or D3D9Ex request included; D3D9 when the machine cannot
     };
 
+    /// [engine] animate_threads = auto.
+    constexpr unsigned kAnimateAuto = ~0u;
+    /// The most [engine] animate_threads takes.
+    constexpr unsigned kAnimateMost = 16;
+
     /// What the file says. Every member has the value the runtime uses without the file.
     struct Settings
     {
@@ -56,6 +61,12 @@ namespace wxl::core::settings
         bool     gx_prewarm    = true;   ///< [gx] vk_prewarm: the programs and pipelines of earlier launches made at the device's start
         bool     gx_gpu_times  = true;   ///< [gx] vk_gpu_times: GPU timestamps around each pass, for the session's last lines and Tracy
 
+        /// [engine] animate_threads: the threads the scene's models are animated on, the main
+        /// thread's included, when the client animates on threads (M2UseThreads); 0 leaves the
+        /// client's own two. kAnimateAuto: as many as the machine has processors, at most 8.
+        unsigned animate_threads = kAnimateAuto;
+        bool     trim_alloc      = true; ///< [engine] trim_alloc: SMemAlloc and SMemFree without the heap size query whose answer they drop (x86)
+
         /// Lines of the file that were not understood, as messages for the log, at most 8.
         char     problems[8][160] = {};
         unsigned problem_count    = 0;
@@ -74,7 +85,7 @@ namespace wxl::core::settings
     /**
      * @brief Reads settings from the text of an ini file.
      *
-     * Three sections are read, `[log]`, `[profile]` and `[gx]`:
+     * Four sections are read, `[log]`, `[profile]`, `[gx]` and `[engine]`:
      *
      *     [log]
      *     level = debug          ; trace, debug, info, warn, error or off
@@ -92,6 +103,10 @@ namespace wxl::core::settings
      *     gpu = 1                ; the Vulkan device: its index, or a part of its name
      *     frames_in_flight = 2   ; 1 to 3: frames the CPU may record ahead of the GPU
      *     present_filter = linear ; linear or nearest: how the scene is stretched to the window
+     *
+     *     [engine]
+     *     animate_threads = auto ; auto, 0 (the client's own two threads) or 2 to 16
+     *     trim_alloc = 1         ; 0 or 1: the client's allocator without its dropped size query
      *
      * `;` and `#` start a comment. Other sections are left for later uses; an unknown key or a
      * value that does not read is noted in `problems` and otherwise ignored.

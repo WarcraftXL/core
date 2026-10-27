@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 WarcraftXL
+//
+// The calls the x86 runtime takes out of Wow.exe's code, as data: each one a `call` whose callee
+// has no effect but its answer, which the caller drops. The runtime writes a five-byte NOP over the
+// call when the row's setting is on and the call's bytes are the stock ones
+// (src/tuning/DropsX86.cpp); check_conventions.py holds every row against Wow.exe: the bytes are
+// that call, inside that function, to a function that pops nothing (cdecl, so the caller's own
+// cleanup stays balanced), and no path after it reads EAX before writing it.
+//
+//   WXL_DROP_CALL_X86(setting, caller, at, callee, callee_name)
+//
+// `setting` is the member of the runtime's settings that turns the row on, `caller` the function
+// the call is in (a seam's symbol), `at` the call's address and `callee` the address it calls.
+//
+// What the callee is, and that it has no other effect, is written by hand beside each row.
+
+#ifndef WXL_DROP_CALL_X86
+#error "define WXL_DROP_CALL_X86(setting, caller, at, callee, callee_name) before including drops_x86.def"
+#endif
+
+// [engine] trim_alloc. The CRT's _msize (0x004112F8): `__SEH_prolog4`, then on the system heap
+// HeapSize(_crtheap, 0, block) (on the V6 small-block heap a lookup under _HEAP_LOCK, released
+// before it returns); for a null block errno and the invalid parameter handler, which neither call
+// reaches: SMemAlloc calls it only once the block is not null (0x0076E56D), SMemFree only for a
+// pointer that is not (0x0076E5A9). Both drop its answer: SMemAlloc returns ESI (0x0076E593),
+// SMemFree calls _free next and returns 1.
+WXL_DROP_CALL_X86(trim_alloc, "SMemAlloc", 0x0076E58A, 0x004112F8, "_msize")
+WXL_DROP_CALL_X86(trim_alloc, "SMemFree", 0x0076E5AC, 0x004112F8, "_msize")
+
+#ifdef WXL_TABLE_END
+#endif

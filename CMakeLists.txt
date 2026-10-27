@@ -281,6 +281,8 @@ add_library(wxl-core SHARED
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/ImGuiService.cpp
+    src/tuning/Animate.cpp
+    src/tuning/Drops.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
     ${WXL_SEAM_BODIES}
@@ -295,7 +297,7 @@ set_property(TARGET wxl-core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 wxl_core_release_symbols(wxl-core)
 target_include_directories(wxl-core PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core wxl-core-build-ids)
-target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt)
+target_link_libraries(wxl-core PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt synchronization)
 target_compile_definitions(wxl-core PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 
@@ -340,6 +342,8 @@ add_executable(wxl-core-seam-harness
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/ImGuiService.cpp
+    src/tuning/Animate.cpp
+    src/tuning/Drops.cpp
     ${WXL_IMGUI_BACKENDS}
     ${WXL_CORE_GX_SOURCES}
     ${WXL_SEAM_BODIES}
@@ -348,7 +352,7 @@ add_executable(wxl-core-seam-harness
 set_property(TARGET wxl-core-seam-harness PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 target_include_directories(wxl-core-seam-harness PRIVATE src include "${WXL_BUILD_IDS_DIR}" "${WXL_CORE_GENERATED_DIR}")
 add_dependencies(wxl-core-seam-harness wxl-core-build-ids)
-target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt)
+target_link_libraries(wxl-core-seam-harness PRIVATE wxl::host wxl::runtime wxl::engine wxl::imgui wxl-vk wxl-core-imaging bcrypt synchronization)
 target_compile_definitions(wxl-core-seam-harness PRIVATE
     ${WXL_CORE_DEFS} WXL_CORE_VERSION=${WXL_CORE_VERSION} WXL_CORE_BUILD)
 

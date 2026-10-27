@@ -15,6 +15,7 @@
 #include "runtime/Core.hpp"
 #include "runtime/Image.hpp"
 #include "seams/AttachX86.hpp"
+#include "tuning/Drops.hpp"
 #include "seams/Table.hpp"
 #include "services/HookService.hpp"
 #include "services/PatchService.hpp"
@@ -129,6 +130,8 @@ namespace wxl::core::attachment
             if (!seams::Install()) WLOG_ERROR(kTag, "a seam is not attached; its events will not be raised");
             // [gx] api = vulkan: the devices the client makes are the Vulkan renderer's to draw with.
             gx::x86::Install();
+            // [engine] trim_alloc: the calls whose answer the client drops, taken out.
+            tuning::drops::Install();
         }
     }
 }

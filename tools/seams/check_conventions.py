@@ -360,6 +360,76 @@ def read_call_rows(path, problems):
     return rows
 
 
+# --- The calls the runtime takes out (include/wxl/tuning/drops_x86.def) ------------------------
+
+DROP_ROW = re.compile(r"^\s*WXL_DROP_CALL_X86\s*\(", re.M)
+
+
+class Drop:
+    def __init__(self, setting, caller, at, callee, name, origin):
+        self.setting, self.caller, self.at, self.callee, self.name, self.origin = (
+            setting, caller, at, callee, name, origin)
+
+
+def read_drop_rows(path, problems):
+    """Every WXL_DROP_CALL_X86 row: a call the runtime writes a NOP over."""
+    if not path.is_file():
+        problems.append("the dropped calls' table is missing: %s" % path)
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    rows = []
+    for match in DROP_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = [c.strip() for c in table.split_top_level(text[open_at + 1:close - 1])]
+        if len(columns) != 5:
+            problems.append("%s: a WXL_DROP_CALL_X86 row without its five columns" % path.name)
+            continue
+        setting, caller, at, callee, name = columns
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        try:
+            rows.append(Drop(setting, caller.strip('"'), int(at, 0), int(callee, 0), name.strip('"'), origin))
+        except ValueError:
+            problems.append("%s: an address that does not read: %s, %s" % (origin, at, callee))
+    return rows
+
+
+def check_drops(binary, functions, drops, problems):
+    """Each dropped call: a five-byte `call` to the row's callee inside the row's caller, a callee
+    whose every `ret` pops nothing (so the caller's own cleanup stays balanced without it), and no
+    path after the call reading EAX before it writes it (its answer is dropped)."""
+    for drop in drops:
+        where = "drop %s (%s) at 0x%08X" % (drop.caller, drop.origin, drop.at)
+        found, why = functions.resolve(drop.caller)
+        if not found:
+            problems.append("%s: %s" % (where, why))
+            continue
+        start, extent = found
+        if not start <= drop.at < start + extent:
+            problems.append("%s: outside %s (0x%08X-0x%08X)" % (where, drop.caller, start, start + extent))
+            continue
+        insns = trim_tables(disassemble(binary, start, start + extent), start, start + extent)
+        insn = next((i for i in insns if i.addr == drop.at), None)
+        if insn is None or insn.mn != "call" or insn.size != 5 or branch_target(insn) != drop.callee:
+            problems.append("%s: not a five-byte call to 0x%08X (%s)"
+                            % (where, drop.callee, insn.text if insn else "no instruction starts there"))
+            continue
+        body = disassemble(binary, drop.callee, drop.callee + 0x100)
+        cut = next((n for n, i in enumerate(body) if i.mn == "int3"), len(body))
+        rets = [i for i in body[:cut] if i.mn in ("ret", "retn")]
+        if not rets or any(i.operands for i in rets):
+            problems.append("%s: %s (0x%08X) does not leave the stack to its caller: %s"
+                            % (where, drop.name, drop.callee,
+                               ", ".join(i.text for i in rets) or "no ret before its padding"))
+            continue
+        verdict = site_uses_eax(binary, functions, drop.at)
+        if verdict != "dead":
+            problems.append("%s: the code after the call %s EAX, the answer it would drop"
+                            % (where, "reads" if verdict == "reads" else "may read"))
+
+
 # --- The D3D9 devices' vtable slots (include/wxl/gx/slots.def) --------------------------------
 
 SLOT_ROW = re.compile(r"^\s*WXL_GX_SLOT\s*\(", re.M)
@@ -1965,6 +2035,9 @@ def main(argv=None):
     parser.add_argument("--slots", type=Path, default=None,
                         help="the D3D9 devices' vtable slots the Vulkan renderer takes over (include/wxl/gx/slots.def); "
                              "default core's own, read when --seams is core's own")
+    parser.add_argument("--drops", type=Path, default=None,
+                        help="the calls the x86 runtime takes out (include/wxl/tuning/drops_x86.def); default "
+                             "core's own, read when --seams is core's own")
     parser.add_argument("--thunks", type=Path, default=core / "src" / "seams" / "RegparmX86.cpp",
                         help="the hand-written regparm thunks")
     parser.add_argument("--backend", choices=("local", "mcp"), default="local",
@@ -2016,6 +2089,10 @@ def main(argv=None):
     if slots_path is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
         slots_path = core / "include" / "wxl" / "gx" / "slots.def"
     vtables, slots = read_slot_rows(slots_path.resolve(), problems) if slots_path else ([], [])
+    drops_path = args.drops
+    if drops_path is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        drops_path = core / "include" / "wxl" / "tuning" / "drops_x86.def"
+    drops = read_drop_rows(drops_path.resolve(), problems) if drops_path and not args.point else []
     if args.point:
         slots = [s for s in slots if "Slot.%s" % s.name in set(args.point)]
     if not rows:
@@ -2055,6 +2132,8 @@ def main(argv=None):
             check_bodies(binary, functions, bodies, problems)
         if slots:
             findings.extend(check_slots(binary, functions, vtables, slots, args.max_callers, problems))
+        if drops:
+            check_drops(binary, functions, drops, problems)
     except Unusable as trouble:
         hint = binary.hint if binary else (McpBinary.hint if args.backend == "mcp"
                                            else LocalBinary.hint)
@@ -2096,9 +2175,10 @@ def main(argv=None):
     if not args.json:
         print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d recompiled body(ies) "
               "calling %d stock function(s) as Wow.exe's own do, %d D3D9 vtable slot(s) (%d taken by the Vulkan front, "
-              "%d kept), %d regparm thunk(s), %d witness(es), %s, %d undetermined point(s), %.1fs)"
+              "%d kept), %d regparm thunk(s), %d dropped call(s), %d witness(es), %s, %d undetermined point(s), %.1fs)"
               % (len(rows), len(point_rows), len(bodies), len(shim_rows), len(slots),
                  sum(1 for s in slots if s.kind == "front"), sum(1 for s in slots if s.kind == "keep"), len(thunks),
+                 len(drops),
                  sum(len(r.witnesses) for r in rows), binary.describe(), notes, elapsed))
     return 0
 

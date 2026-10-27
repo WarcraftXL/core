@@ -1131,6 +1131,54 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    // --- M2: the scene's animate list (the animate gates) ---------------------------------------
+
+    wxl_bool m2_is_animate_thread(const void* function)
+    {
+        return IsClient() && function && reinterpret_cast<std::uintptr_t>(function) == WXL_SITE("CM2Scene::AnimateThread", 0)
+                   ? WXL_TRUE
+                   : WXL_FALSE;
+    }
+
+    uint32_t m2_animate_list(const void* scene, void** out, uint32_t capacity)
+    {
+        if (!IsClient() || !scene) return 0;
+        // A list the client keeps acyclic; the bound only stops a walk through a broken one.
+        constexpr uint32_t kMost = 1u << 20;
+        uint32_t           count = 0;
+        for (void* model = Read<void*>(scene, WXL_FIELD("CM2Scene", "m_animateList")); model && count < kMost;
+             model       = Read<void*>(model, WXL_FIELD("CM2Model", "m_animateNext")))
+        {
+            if (out && count < capacity) out[count] = model;
+            ++count;
+        }
+        return count;
+    }
+
+    void* m2_swap_animate_list(void* scene, void* head)
+    {
+        if (!IsClient() || !scene) return nullptr;
+        void** slot = reinterpret_cast<void**>(static_cast<uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_animateList"));
+        void*  was  = *slot;
+        *slot       = head;
+        return was;
+    }
+
+    void m2_animate_model(void* model, void* scene)
+    {
+        if (!IsClient() || !model || !scene) return;
+        // As CM2Scene::Animate and AnimateThread call them (0x00821B1E, 0x00821B4E): __thiscall,
+        // (view, &diffuse, &emissive, alpha, alpha2), `ret 0x14`; diffuse (1,1,1), emissive
+        // (0,0,0), both alphas 1.
+        constexpr uint32_t kSimple    = 0x1000;
+        const float        diffuse[3] = {1.0f, 1.0f, 1.0f};
+        const float        emissive[3] = {0.0f, 0.0f, 0.0f};
+        const void*        view        = static_cast<const uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_view");
+        const bool         simple      = (Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & kSimple) != 0;
+        x86::CallMember<void>(simple ? WXL_SITE("CM2Model::AnimateMTSimple", 0) : WXL_SITE("CM2Model::AnimateMT", 0), model, view,
+                              static_cast<const void*>(diffuse), static_cast<const void*>(emissive), 1.0f, 1.0f);
+    }
+
     void m2_file_animate_bones(void* file)
     {
         if (!IsClient() || !file) return;

@@ -11,6 +11,7 @@
 #include "services/HighlightService.hpp"
 #include "services/M2Service.hpp"
 #include "services/RenderService.hpp"
+#include "tuning/Animate.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -53,4 +54,18 @@ namespace wxl::seam::M2::AnimateMTSimple
     {
         wxl::core::services::m2::PoseAttached(self);
     }
+}
+
+namespace wxl::seam::M2::BeginThread
+{
+    bool WXL_CALL Gate(void** self, void** func, void** param)
+    {
+        // Once a frame: the setting read, and nothing more, while it is 0.
+        return wxl::core::tuning::animate::Begin(*self, *func, *param);
+    }
+}
+
+namespace wxl::seam::M2::WaitThread
+{
+    bool WXL_CALL Gate(void** self) { return wxl::core::tuning::animate::Wait(*self); }
 }

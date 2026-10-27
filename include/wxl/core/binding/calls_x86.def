@@ -4,7 +4,8 @@
 // The client functions the x86 binding calls for wxl.m2's models of the world and its bone
 // watchers, for the object reads of what the player can do with a unit or a game object, for
 // the textures wxl.selectioncircle draws the game's circles with, for wxl.cvar's variables, for
-// the interface's signature the FrameXML seam asks about, for the ground wxl.terrain reshapes
+// the interface's signature the FrameXML seam asks about, for the scene's models the animate gates
+// animate on the runtime's threads, for the ground wxl.terrain reshapes
 // and the fall it starts, and for the units' animations wxl.animation plays (src/binding/BindingX86.cpp), and the device's own work the Vulkan
 // renderer's adapter of the stock client keeps (src/gx/x86/), as data: one row per function, with
 // the convention and the parameters BindingX86 calls it with. check_conventions.py holds every row against Wow.exe
@@ -25,6 +26,8 @@ WXL_BINDING_CALL_X86(M2Call, HasSequence, "CM2Model::HasSequence@0x00825EE0", in
 WXL_BINDING_CALL_X86(M2Call, SetBoneSequence, "CM2Model::SetBoneSequence", void, thiscall, (void* self, uint32_t bone, uint32_t sequence, uint32_t variation, uint32_t time, float speed, int32_t blend, int32_t primary))
 WXL_BINDING_CALL_X86(M2Call, GetSequenceInfo, "CM2Model::GetSequenceInfo", void, thiscall, (void* self, uint32_t id, uint32_t variation, void* info))
 WXL_BINDING_CALL_X86(M2Call, SetAnimating, "CM2Model::SetAnimating", void, thiscall, (void* self, int32_t animating))
+WXL_BINDING_CALL_X86(M2Call, AnimateMT, "CM2Model::AnimateMT", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+WXL_BINDING_CALL_X86(M2Call, AnimateMTSimple, "CM2Model::AnimateMTSimple", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
 WXL_BINDING_CALL_X86(M2Call, IsLoaded, "CM2Model::IsLoaded", uint32_t, thiscall, (void* self, int32_t wait, int32_t recursive))
 WXL_BINDING_CALL_X86(M2Call, GetBoundingBox, "CM2Model::GetBoundingBox", void*, thiscall, (void* self, void* out))
 WXL_BINDING_CALL_X86(M2Call, GetBoundingSphere, "CM2Model::GetBoundingSphere", void*, thiscall, (void* self, void* out))
