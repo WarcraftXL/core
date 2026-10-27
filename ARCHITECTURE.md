@@ -610,6 +610,14 @@ holds a made-up split tile to its monolithic twin through the client's reading w
 area field and chunk (heights, layers, alpha maps, shadow, holes, counts) and the placements made,
 in order.
 
+The same gate leaves out, on any tile, placements of a model the client of 3.3.5a cannot load
+(`src/services/ModelGate.cpp`): an M2 of magic MD21 (Legion's chunked form) or of a version past
+264, a WMO root past version 17. Each model a chunk places is judged once by its first 12 bytes,
+read through the client's own file layer (a file a mod serves is judged as served; ".mdx" and
+".mdl" read as ".m2", as `CM2Cache::CreateShared` does), and logged once; a chunk whose models all
+load is not taken, so a stock tile is placed by the client's own call. The placements are read
+with binding `map_area_placements`.
+
 ### Messages of a mod's own
 
 `wxl.net` (`src/services/NetService.cpp`) lets a mod claim opcode numbers and speak them with a
