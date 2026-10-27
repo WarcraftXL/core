@@ -550,6 +550,26 @@ again and `gx_invalidate_state`. The D3D9 programs are compiled at build time on
 where the tool runs; an x64 tree cross-built without Wine takes the copy in
 `src/gx/d3d9/shaders/generated/`.
 
+Since abi 0.1.38 a frame is a list of **runs** (`gx/shapes/Geometry.hpp`, `Run`), each drawn with one
+pixel program, blend and depth test: per depth, the plain insides, then one run per **surface** (a
+ground shape's inside with a texture, a feather, a radial fade or a blend of its own), then the
+volumes, the lines' shadows and the lines. A surface's triangles carry the shape's own plane (x
+along its facing, y to its left, and a polygon's distance to its border, its inside cut finer near
+the border when feathered) in the vertex's `other`; `MakeSurface` turns the style into six rows of
+numbers (the picture's frame from that plane, its part of the texture, the plane's kind and bounds,
+the feather, the fade, the blend) that `SurfacePs` reads at c200 to c205 on Direct3D 9 and
+`draw_surface.frag` from the frame's memory on Vulkan, `Shade` being their arithmetic on the CPU.
+Blends: ALPHA as before, ADD (`SRCALPHA, ONE`), MODULATE (`DESTCOLOR, ZERO` of `1 + (c - 1) a`), the
+scene's alpha kept on both (`kBlendAddKeepAlpha`, `kBlendMultiplyKeepAlpha` on Vulkan). A line's
+vertex bytes carry its softness (flags bits 2-7, quarter pixels) and a move on the screen in half
+pixels (side bits 2-7 down, end bits 1-6 right): a shadow is the shape's segments pushed once more
+in the shadow's colour, wider by its softness and moved, before every line. Textures are opened
+through the client by path (`texture_open`), shared, readied on the device each frame they are
+drawn (`gx_texture_ready`: the device's own `ITexMarkAsUpdated`, slot 0 of its vtable) and drawn as
+the device holds them (the `IDirect3DBaseTexture9` on sampler 0, or the renderer's bindless slot
+through `Front::TextureOf`); an inside waits for its texture, and a texture no shape used for three
+seconds is closed.
+
 ### Textures from SVG and PNG
 
 `wxl.texture` (`src/services/TextureService.cpp`) makes textures the client loads as its own files.
