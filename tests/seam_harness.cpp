@@ -33,6 +33,10 @@
 #include "imaging/Imaging.hpp"
 #include "services/CVarService.hpp"
 #include "services/TerrainService.hpp"
+#include "services/DrawService.hpp"
+#include "gx/d3d9/Device.hpp"
+#include "gx/d3d9/Shapes.hpp"
+#include "gx/shapes/Geometry.hpp"
 #include <imgui.h>
 #include <implot.h>
 #include "services/DataService.hpp"
@@ -1466,6 +1470,29 @@ namespace
     /// The API the fake device runs on: Direct3D 9.
     int32_t WXL_CALL FakeGxDeviceApi() { return 1; }
 
+    /// The world's view wxl.draw reads: pixels of a 1600 x 900 window on the clip space, from an eye
+    /// at (100, 200, 0); false until a check sets it up.
+    bool g_fakeWorldView = false;
+    wxl_bool WXL_CALL FakeGxWorldView(wxl_core_world_view* out)
+    {
+        if (!g_fakeWorldView || !out) return WXL_FALSE;
+        *out = wxl_core_world_view{};
+        for (int i = 0; i < 4; ++i) out->view[5 * i] = 1.0f;
+        out->projection[0]  = 2.0f / 1600.0f;
+        out->projection[5]  = -2.0f / 900.0f;
+        out->projection[10] = 0.001f;
+        out->projection[12] = -1.0f;
+        out->projection[13] = 1.0f;
+        out->projection[14] = 0.5f;
+        out->projection[15] = 1.0f;
+        const float box[6]  = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+        std::memcpy(out->viewport, box, sizeof box);
+        out->window[0] = 1600.0f;
+        out->window[1] = 900.0f;
+        out->eye       = wxl_vec3{100.0f, 200.0f, 0.0f};
+        return WXL_TRUE;
+    }
+
     wxl_bool WXL_CALL FakeGxModelDraw(const void* render, wxl_model_batch_args* out)
     {
         if (!render || !out || !g_gxDrew) return WXL_FALSE;
@@ -2145,6 +2172,7 @@ namespace
         init.gx_model_draw          = &FakeGxModelDraw;
         init.gx_device_api          = &FakeGxDeviceApi;
         init.gx_invalidate_state    = &FakeGxInvalidate;
+        init.gx_world_view          = &FakeGxWorldView;
         init.component_wearer       = &FakeComponentWearer;
         init.m2_object_model        = &FakeObjectModel;
         init.m2_item_display        = &FakeItemDisplay;
@@ -6139,10 +6167,35 @@ namespace
         wxl::seam::FrameScript::Initialize::After(1, 0);
         const char* clientNames[] = {"PLAYER_LOGIN"};
         wxl::seam::FrameScript::CreateEvents::After(clientNames, 1);
-        Check(g_vm.closures.count("__wxl_texture") == 1 && !g_vm.ran.empty() &&
-                  g_vm.ran.back().find("WarcraftXL\\WxlTexture: ") == 0 &&
-                  g_vm.ran.back().find("function WxlTexture(source, width, height, groups, tint)") != std::string::npos,
+        const auto ranChunk = [&](const char* name, const char* function) {
+            for (const std::string& chunk : g_vm.ran)
+                if (chunk.find(name) == 0 && chunk.find(function) != std::string::npos) return true;
+            return false;
+        };
+        Check(g_vm.closures.count("__wxl_texture") == 1 &&
+                  ranChunk("WarcraftXL\\WxlTexture: ", "function WxlTexture(source, width, height, groups, tint)"),
               "texture: a context coming up gets WxlTexture, run before the mods hear of it");
+        {
+            // WxlDraw beside it: the native half draws a shape for the next frame, and answers why not.
+            bool drawFound = false;
+            Check(g_vm.closures.count("__wxl_draw") == 1 && ranChunk("WarcraftXL\\WxlDraw: ", "function WxlDraw(shape, style)"),
+                  "draw: a context coming up gets WxlDraw");
+            std::vector<FakeValue> args(22, Number(0));
+            args[0]  = Number(1);  // a circle
+            args[4]  = Number(3);  // its radius
+            args[14] = Number(1);  // flat
+            args[15] = String("");
+            args[16] = Number(0xFF0000);
+            args[17] = Number(1);
+            args[19] = Number(2);
+            std::vector<FakeValue> drawn = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawFound && drawn.size() == 1 && drawn[0].type == WXL_VALUE_BOOL, "draw: WxlDraw's native half draws a circle");
+            args[4] = Number(0);
+            drawn   = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 2 && drawn[0].type == WXL_VALUE_NIL && drawn[1].string.find("invalid") == 0,
+                  "draw: a circle of no radius answers nil and why");
+            wxl::core::services::draw::Clear();
+        }
         bool found = false;
         storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), reticle.data(), static_cast<uint32_t>(reticle.size()), 0);
         std::vector<FakeValue> results =
@@ -13298,7 +13351,7 @@ namespace
                              "earlier frame were never touched, the quad's own register is above the game's");
         Check(device.targets[0] == device.scene && device.targets[1] == nullptr && device.boundDepth == device.depth &&
                   device.textures[0] == nullptr && device.textures[2] == nullptr && device.State(D3DRS_ZENABLE) == D3DZB_TRUE &&
-                  device.State(D3DRS_COLORWRITEENABLE1) == 0xF && g_gxInvalidated == invalidated + 1,
+                  device.State(D3DRS_COLORWRITEENABLE1) == 0xF && g_gxInvalidated == static_cast<int>(invalidated) + 1,
               "the scene's target and depth are put back, the passes' textures let go, and the game told to send its state");
         Check(device.released == 2, "and the scene's target and depth are let go");
         Check(device.resolves.empty(), "a scene without multisampling needs no resolve");
@@ -13375,6 +13428,303 @@ namespace
         hl::SetSource(hl::Source{});
 #endif
         wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+    }
+
+    // --- wxl.draw: shapes kept and drawn, through a device that records them ----------------------
+
+    /// A Direct3D 9 device that records wxl.draw's pass: its states, its constants, its vertices.
+    struct DrawDevice final : wxl::core::gx::d3d9::Device
+    {
+        D3DCAPS9                              caps{};
+        char                                  objects[8]{};
+        int                                   made = 0, released = 0;
+        std::map<int, DWORD>                  states;
+        float                                 constants[256][4]{};
+        D3DVIEWPORT9                          viewport{};
+        IDirect3DVertexDeclaration9*          declaration = nullptr;
+        std::vector<wxl::gx::shapes::Vertex>  vertices;
+        struct Run
+        {
+            UINT  vertices;
+            DWORD zEnable, colorWrite, blend;
+        };
+        std::vector<Run> runs;
+
+        DrawDevice()
+        {
+            caps.PixelShaderVersion  = D3DPS_VERSION(3, 0);
+            caps.VertexShaderVersion = D3DVS_VERSION(3, 0);
+            caps.DeclTypes           = D3DDTCAPS_UBYTE4;
+            caps.MaxPrimitiveCount   = 0xFFFFF;
+        }
+        template <class T>
+        T* Make()
+        {
+            ++made;
+            return reinterpret_cast<T*>(&objects[made % 8]);
+        }
+        HRESULT Caps(D3DCAPS9& out) override { out = caps; return S_OK; }
+        HRESULT GetRenderTarget(DWORD, IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT SetRenderTarget(DWORD, IDirect3DSurface9*) override { return S_OK; }
+        HRESULT GetDepthStencil(IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT SetDepthStencil(IDirect3DSurface9*) override { return S_OK; }
+        HRESULT SurfaceDesc(IDirect3DSurface9*, D3DSURFACE_DESC& out) override { out = D3DSURFACE_DESC{}; return S_OK; }
+        HRESULT TextureSurface(IDirect3DTexture9*, IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT Clear(DWORD, D3DCOLOR) override { return S_OK; }
+        HRESULT StretchRect(IDirect3DSurface9*, IDirect3DSurface9*) override { return S_OK; }
+        HRESULT CreateRenderTarget(UINT, UINT, D3DFORMAT, D3DMULTISAMPLE_TYPE, DWORD, IDirect3DSurface9** out) override
+        {
+            *out = nullptr;
+            return E_FAIL;
+        }
+        HRESULT CreateTargetTexture(UINT, UINT, D3DFORMAT, IDirect3DTexture9** out) override { *out = nullptr; return E_FAIL; }
+        HRESULT CreateVertexShader(const DWORD* code, IDirect3DVertexShader9** out) override
+        {
+            *out = code && code[0] == 0xFFFE0300u ? Make<IDirect3DVertexShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreatePixelShader(const DWORD* code, IDirect3DPixelShader9** out) override
+        {
+            *out = code && code[0] == 0xFFFF0300u ? Make<IDirect3DPixelShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreateDeclaration(const D3DVERTEXELEMENT9* elements, IDirect3DVertexDeclaration9** out) override
+        {
+            // Stride 32: position, the other end, the colour, the corner's bytes.
+            const bool shape = elements && elements[0].Offset == 0 && elements[1].Offset == 12 && elements[2].Type == D3DDECLTYPE_D3DCOLOR &&
+                               elements[3].Offset == 28 && elements[3].Type == D3DDECLTYPE_UBYTE4 && elements[4].Stream == 0xFF;
+            *out = shape ? Make<IDirect3DVertexDeclaration9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        void  Release(IUnknown* object) override { released += object ? 1 : 0; }
+        DWORD VertexShaderVersion(IDirect3DVertexShader9*) override { return 0xFFFE0300u; }
+        void  SetViewport(const D3DVIEWPORT9& v) override { viewport = v; }
+        void  SetRenderState(D3DRENDERSTATETYPE state, DWORD value) override { states[state] = value; }
+        void  SetSamplerState(DWORD, D3DSAMPLERSTATETYPE, DWORD) override {}
+        void  SetTexture(DWORD, IDirect3DBaseTexture9*) override {}
+        void  SetDeclaration(IDirect3DVertexDeclaration9* d) override { declaration = d; }
+        void  SetStreamSource(UINT, IDirect3DVertexBuffer9*, UINT, UINT) override {}
+        void  SetIndices(IDirect3DIndexBuffer9*) override {}
+        void  SetVertexShader(IDirect3DVertexShader9*) override {}
+        void  SetPixelShader(IDirect3DPixelShader9*) override {}
+        void  SetVertexConstants(UINT first, const float* values, UINT count) override { std::memcpy(constants[first], values, count * 16); }
+        void  SetPixelConstants(UINT, const float*, UINT) override {}
+        DWORD State(D3DRENDERSTATETYPE s) { return states.count(s) ? states[s] : 0xDEADu; }
+        void  DrawIndexed(D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT) override {}
+        void  DrawUp(D3DPRIMITIVETYPE type, UINT primitives, const void* data, UINT stride) override
+        {
+            if (type != D3DPT_TRIANGLELIST || stride != sizeof(wxl::gx::shapes::Vertex)) return;
+            const auto* v = static_cast<const wxl::gx::shapes::Vertex*>(data);
+            vertices.insert(vertices.end(), v, v + primitives * 3);
+            runs.push_back(Run{primitives * 3, State(D3DRS_ZENABLE), State(D3DRS_COLORWRITEENABLE), State(D3DRS_ALPHABLENDENABLE)});
+        }
+    };
+
+    /// A flat ground at z 5 everywhere, every chunk loaded.
+    struct FlatGround final : wxl::gx::shapes::Ground
+    {
+        float heights[145];
+        FlatGround() { std::fill(std::begin(heights), std::end(heights), 5.0f); }
+        bool Present() override { return true; }
+        bool Chunk(int32_t, int32_t, const float*& h, uint16_t& holes) override
+        {
+            h     = heights;
+            holes = 0;
+            return true;
+        }
+    };
+
+    void CheckDraw()
+    {
+        namespace draw = wxl::core::services::draw;
+        namespace d9   = wxl::core::gx::d3d9::shapes;
+        const wxl_draw_api& api = wxl::core::services::DrawApi();
+        DrawDevice device;
+        FlatGround ground;
+        d9::UseDevice(&device);
+        draw::UseGround(&ground);
+        g_fakeWorldView = true;
+        Check(api.supported() == WXL_TRUE && api.unsupported_reason().size == 0, "a device of shader model 3 draws shapes");
+
+        wxl_draw_shape circle{};
+        circle.struct_size = sizeof circle;
+        circle.kind        = WXL_DRAW_CIRCLE;
+        circle.center      = wxl_vec3{110.0f, 210.0f, 0.0f};
+        circle.radius      = 3.0f;
+        wxl_draw_style style{};
+        style.struct_size = sizeof style;
+        style.color       = 0xFF8000u;
+        style.alpha       = 1.0f;
+        style.fill_alpha  = 0.5f;
+        style.width       = 2.0f;
+        Check(api.draw(&circle, &style) == WXL_OK, "an immediate circle is taken");
+
+        wxl_draw_shape box{};
+        box.struct_size = sizeof box;
+        box.kind        = WXL_DRAW_BOX;
+        box.center      = wxl_vec3{120.0f, 200.0f, 2.0f};
+        box.size        = wxl_vec3{2.0f, 2.0f, 2.0f};
+        wxl_draw_style top = style;
+        top.depth          = WXL_DRAW_DEPTH_ON_TOP;
+        top.fill_alpha     = 0.0f;
+        const wxl_handle kept = api.add(&box, &top, 0.0f);
+        Check(kept != WXL_HANDLE_NONE, "a box is kept");
+
+        const uint32_t invalidated = g_gxInvalidated;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        wxl_draw_stats stats{};
+        stats.struct_size = sizeof stats;
+        Check(api.stats(&stats) == WXL_OK && stats.drawn == 2 && stats.immediate == 1 && stats.shapes == 1,
+              "the world's liquids drawn: both shapes go onto it");
+        Check(stats.vertices == device.vertices.size() && stats.vertices > 0, "every vertex the frame wrote reached the device");
+        Check(device.runs.size() == 2 && device.runs[0].zEnable == D3DZB_TRUE && device.runs[1].zEnable == D3DZB_FALSE,
+              "two runs: against the depth, then on top");
+        Check(device.runs[0].colorWrite == 7u && device.runs[0].blend == TRUE, "blended, the scene's alpha left as it is");
+        Check(device.State(D3DRS_ZENABLE) == D3DZB_TRUE && g_gxInvalidated == static_cast<int>(invalidated) + 1,
+              "what the engine leaves set is put back, and its state sent again");
+        Check(device.viewport.Width == 1600 && device.viewport.Height == 900 && device.viewport.MaxZ == 1.0f,
+              "the viewport is the world's, from its box and the window");
+        Check(std::fabs(device.constants[244][0] - 1600.0f) < 1e-3f && std::fabs(device.constants[244][2] - (900.0f / 1080.0f) / 16.0f) < 1e-6f &&
+                  std::fabs(device.constants[240][0] - 2.0f / 1600.0f) < 1e-9f,
+              "c240 to c245: the view's columns, the screen and the width's scale");
+        bool laid = !device.vertices.empty(), fromEye = true;
+        for (const auto& v : device.vertices)
+            if (v.side == 1 && v.flags & 1) laid = laid && std::fabs(v.pos[2] - 5.0f) < 1e-4f;
+        fromEye = std::fabs(device.vertices[0].pos[0] - 10.0f) < 3.5f && std::fabs(device.vertices[0].pos[1] - 10.0f) < 3.5f;
+        Check(laid && fromEye, "the circle's fill lies on the ground, its vertices taken from the eye");
+        uint32_t fills = 0, fillAlpha = 0;
+        for (const auto& v : device.vertices)
+            if (v.side == 1 && (v.color & 0xFFFFFFu) == 0xFF8000u)
+            {
+                ++fills;
+                fillAlpha = v.color >> 24;
+            }
+        Check(fills > 0 && fillAlpha == 128, "the fill is drawn in the colour at its own opacity");
+
+        // The immediate shape is gone after its frame; the kept one stays.
+        device.vertices.clear();
+        device.runs.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.immediate == 0 && stats.drawn == 1 && device.runs.size() == 1, "an immediate shape is drawn by one frame only");
+
+        // Changing a kept shape.
+        Check(api.move(kept, wxl_vec3{130.0f, 200.0f, 2.0f}, 0.5f) == WXL_OK && api.set_style(kept, &style) == WXL_OK,
+              "a kept shape moves and takes a new look");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.rebuilt == 1, "a moved shape is built again once");
+        Check(api.set_duration(kept, 0.0f) == WXL_OK && api.update(kept, &circle) == WXL_OK, "it becomes a circle");
+        api.remove(kept);
+        Check(api.move(kept, circle.center, 0.0f) == WXL_E_NOT_FOUND, "a removed shape is not found");
+
+        // Refusals.
+        wxl_draw_shape bad = circle;
+        bad.radius         = 0.0f;
+        Check(api.draw(&bad, nullptr) == WXL_E_INVALID, "a circle of no radius is refused");
+        bad.radius = 300.0f;
+        Check(api.add(&bad, nullptr, 0.0f) == WXL_HANDLE_NONE, "a circle past the extent is not kept");
+        wxl_draw_style unsized = style;
+        unsized.struct_size    = 0;
+        Check(api.draw(&circle, &unsized) == WXL_E_INVALID, "a style without its struct_size is refused");
+        wxl_draw_style weird = style;
+        weird.depth          = 7;
+        Check(api.draw(&circle, &weird) == WXL_E_INVALID, "a depth that is none is refused");
+        Check(api.add(&circle, nullptr, -1.0f) == WXL_HANDLE_NONE, "a negative duration is refused");
+        uint32_t taken = 0;
+        wxl_draw_shape small = circle;
+        small.flags          = WXL_DRAW_FLAT;
+        small.radius         = 0.5f;
+        for (uint32_t i = 0; i < WXL_DRAW_MAX_IMMEDIATE + 1; ++i) taken += api.draw(&small, nullptr) == WXL_OK ? 1 : 0;
+        Check(taken == WXL_DRAW_MAX_IMMEDIATE, "a frame takes WXL_DRAW_MAX_IMMEDIATE immediate shapes of a mod, no more");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.draw(&small, nullptr) == WXL_OK, "the next frame takes them again");
+
+        // A duration runs out.
+        const wxl_handle brief = api.add(&circle, &style, 0.001f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.set_style(brief, &style) == WXL_E_NOT_FOUND, "a shape whose duration ran out is gone");
+
+        // Attached to an object: follows it, goes when it leaves view.
+        FakeObject boar;
+        boar.guid     = 0x7D1;
+        boar.typeId   = WXL_OBJECT_UNIT;
+        boar.position = wxl_vec3{140.0f, 220.0f, 5.0f};
+        wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
+        const wxl_handle target = wxl::core::objects::HandleOf(&boar);
+        wxl_draw_shape   ring   = circle;
+        ring.kind               = WXL_DRAW_RING;
+        ring.center             = wxl_vec3{0.0f, 0.0f, 0.0f};
+        ring.inner              = 2.0f;
+        const wxl_handle mark   = api.add(&ring, &style, 0.0f);
+        Check(api.attach(mark, target, WXL_DRAW_ATTACH_TURN) == WXL_OK, "a ring is attached to a unit");
+        Check(api.attach(mark, target, 0x80) == WXL_E_INVALID, "an unknown flag is refused");
+        api.attach(mark, target, WXL_DRAW_ATTACH_TURN);
+        device.vertices.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        double cx = 0.0, cy = 0.0;
+        uint32_t n = 0;
+        for (const auto& v : device.vertices)
+            if (v.side == 1)
+            {
+                cx += v.pos[0];
+                cy += v.pos[1];
+                ++n;
+            }
+        Check(n > 0 && std::fabs(cx / n - 40.0) < 0.5 && std::fabs(cy / n - 20.0) < 0.5, "it is drawn around the unit");
+        boar.position.x += 3.0f;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.rebuilt == 1, "it is built again where the unit went");
+        Check(api.detach(mark) == WXL_OK && api.attach(mark, target, 0) == WXL_OK, "it is let go of, and attached again");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.detach(mark) == WXL_E_NOT_FOUND, "the unit gone, its shape is gone");
+
+        // The frame's budget: shapes past it are left out, counted.
+        wxl_draw_shape ball{};
+        ball.struct_size = sizeof ball;
+        ball.kind        = WXL_DRAW_SPHERE;
+        ball.center      = wxl_vec3{600.0f, 200.0f, 2.0f};
+        ball.radius      = 200.0f;
+        wxl_draw_style solid = style;
+        solid.alpha          = 0.0f;
+        solid.fill_alpha     = 0.3f;
+        uint32_t balls = 0;
+        while (balls < 200 && api.draw(&ball, &solid) == WXL_OK) ++balls;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        std::printf("  %u spheres of 200 yd: %u drawn, %u left out, %u vertices, %.0f us\n", balls, stats.drawn, stats.left_out,
+                    stats.vertices, stats.build_microseconds);
+        Check(stats.left_out > 0 && stats.vertices > WXL_DRAW_MAX_FRAME_VERTICES / 8 && stats.vertices <= WXL_DRAW_MAX_FRAME_VERTICES,
+              "past the frame's vertices, shapes are left out; the others drawn, their faces turned to the eye");
+        ball.center = wxl_vec3{110.0f, 200.0f, 2.0f};
+        device.vertices.clear();
+        Check(api.draw(&ball, &solid) == WXL_OK, "a sphere around the eye is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(!device.vertices.empty(), "from inside a volume, its inside is drawn");
+
+        // Ownership: a mod's shapes go with it; off the main thread nothing is taken.
+        const wxl_handle mine = api.add(&circle, &style, 0.0f);
+        draw::ForgetMod(0);
+        Check(api.remove != nullptr && api.set_duration(mine, 1.0f) == WXL_E_NOT_FOUND, "a mod's shapes go with it");
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.draw(&circle, &style); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a shape is refused");
+
+        // A device without shader model 3 says so.
+        device.caps.VertexShaderVersion = D3DVS_VERSION(2, 0);
+        d9::UseDevice(&device);
+        const wxl_str why = api.unsupported_reason();
+        Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("shader model 3.0") != std::string_view::npos &&
+                  api.draw(&circle, &style) == WXL_E_UNSUPPORTED,
+              "a device of shader model 2 draws none, and says why");
+
+        draw::Clear();
+        d9::UseDevice(nullptr);
+        draw::UseGround(nullptr);
+        g_fakeWorldView = false;
     }
 }
 
@@ -13460,6 +13810,7 @@ int main(int argc, char** argv)
     CheckConsoleVar();
     CheckCVarService();
     CheckTerrainService();
+    CheckDraw();
     CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();
     CheckGlue();

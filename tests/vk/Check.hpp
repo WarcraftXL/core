@@ -52,6 +52,10 @@ namespace wxl::vk::test
     /// textures, wxl.render's compute pipelines, dispatches and palettes.
     bool V7LiveCases();
 
+    /// wxl.draw: its geometry (pure) and its passes on the driver (live).
+    void ShapesPureCases();
+    bool ShapesLiveCases();
+
     /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
     /// build has no validator (SPIRV-Tools is built in the native test tree only).
     bool SpirvValidation();

@@ -426,6 +426,7 @@ int main()
     wxl::vk::test::DrawPureCases();
     wxl::vk::test::TranslatePureCases();
     wxl::vk::test::ParityPureCases();
+    wxl::vk::test::ShapesPureCases();
     if (!wxl::vk::test::SpirvValidation()) std::printf("(spirv-val is not in this build: the native tree of tests/vk/ runs it)\n");
     AddressSpace("before any Vulkan device");
     bool live = Live();
@@ -436,6 +437,7 @@ int main()
     if (live) wxl::vk::test::TranslateLiveCases();
     if (live) wxl::vk::test::RenderLiveCases();
     if (live) wxl::vk::test::V7LiveCases();
+    if (live) wxl::vk::test::ShapesLiveCases();
     if (live) AddressSpace("after every live case (their devices released)");
 
     std::printf("%d passed, %d failed%s\n", g_passes, g_failures, live ? "" : " (the live half skipped)");
