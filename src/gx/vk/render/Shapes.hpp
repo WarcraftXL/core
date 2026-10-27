@@ -62,9 +62,10 @@ namespace wxl::vk::render
                       const gx::shapes::Surface* surfaces, const float constants[24], const float viewport[6], std::string* why = nullptr);
 
     private:
-        Pipeline* PipelineFor(uint8_t program, uint8_t blend, bool on_top, std::string* why);
+        /// @p depth 0: tested (LESS_EQUAL), 1: on top, 2: behind the scene (GREATER).
+        Pipeline* PipelineFor(uint8_t program, uint8_t blend, uint32_t depth, std::string* why);
 
         Render*   render_ = nullptr;
-        Pipeline* pipelines_[2][3][2] = {}; ///< by program, blend (a surface's), on top
+        Pipeline* pipelines_[2][3][3] = {}; ///< by program, blend (a surface's), depth
     };
 }

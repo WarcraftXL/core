@@ -844,10 +844,40 @@ namespace wxl::gx::shapes
             if (parts.fill)
             {
                 static const int faces[6][4] = {{0, 1, 3, 2}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 3, 7, 5}};
-                for (const auto& f : faces)
+                // Each face's outward normal and the picture's top, in the box's own axes: the top
+                // and bottom faces' towards its facing, the sides' towards its top.
+                static const float normal[6][3] = {{0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {0, 1, 0}, {-1, 0, 0}, {1, 0, 0}};
+                static const float top[6][3]    = {{1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+                const float        half[3]      = {h.x, h.y, h.z};
+                for (int i = 0; i < 6; ++i)
                 {
+                    const auto& f = faces[i];
+                    Mesh::Face  face;
+                    face.first = static_cast<uint32_t>(out.triangles.size());
                     VolumeTriangle(out, k[f[0]], k[f[1]], k[f[2]], c);
                     VolumeTriangle(out, k[f[0]], k[f[2]], k[f[3]], c);
+                    face.count  = static_cast<uint32_t>(out.triangles.size()) - face.first;
+                    const V3 n{normal[i][0], normal[i][1], normal[i][2]}, a{top[i][0], top[i][1], top[i][2]};
+                    const V3 l  = CrossV(n, a);
+                    face.up     = turn(a);
+                    face.left   = turn(l);
+                    face.origin = Add(c, turn(V3{n.x * h.x, n.y * h.y, n.z * h.z}));
+                    const float ha = std::fabs(a.x) * half[0] + std::fabs(a.y) * half[1] + std::fabs(a.z) * half[2];
+                    const float hl = std::fabs(l.x) * half[0] + std::fabs(l.y) * half[1] + std::fabs(l.z) * half[2];
+                    face.plane.code   = 1;
+                    face.plane.hx     = ha;
+                    face.plane.hy     = hl;
+                    face.plane.min_x  = -ha;
+                    face.plane.max_x  = ha;
+                    face.plane.min_y  = -hl;
+                    face.plane.max_y  = hl;
+                    face.plane.extent = std::sqrt(ha * ha + hl * hl);
+                    for (uint32_t t = face.first; t < face.first + face.count; ++t)
+                    {
+                        const V3 r = Sub(out.triangles[t], face.origin);
+                        out.face_plane.push_back(V3{Dot(r, face.up), Dot(r, face.left), 0.0f});
+                    }
+                    out.faces.push_back(face);
                 }
             }
             break;
@@ -919,14 +949,66 @@ namespace wxl::gx::shapes
             }
             if (parts.fill)
             {
+                // Three faces: the side (its frame: x up the axis, y the arc to the left seen from
+                // outside, the seam behind the facing), then the top and the bottom ends.
                 const V3 ct = Add(c, turn(V3{0, 0, hz})), cb = Add(c, turn(V3{0, 0, -hz}));
+                const V3 axis = turn(V3{0, 0, 1}), ahead = turn(V3{1, 0, 0});
+                const float pi = static_cast<float>(kPi), r = d.radius;
+                Mesh::Face side;
+                side.first  = static_cast<uint32_t>(out.triangles.size());
+                side.origin = c;
+                side.up     = axis;
+                side.left   = turn(V3{0, -1, 0});
                 for (uint32_t i = 0; i < n; ++i)
                 {
-                    const uint32_t k = (i + 1) % n;
+                    const uint32_t k  = (i + 1) % n;
+                    float          a0 = tau * static_cast<float>(i) / static_cast<float>(n), a1 = tau * static_cast<float>(i + 1) / static_cast<float>(n);
+                    if (a0 >= pi - 1e-5f)
+                    {
+                        a0 -= tau;
+                        a1 -= tau;
+                    }
                     VolumeTriangle(out, bottom[i], bottom[k], top[k], c);
                     VolumeTriangle(out, bottom[i], top[k], top[i], c);
-                    VolumeTriangle(out, ct, top[i], top[k], c);
-                    VolumeTriangle(out, cb, bottom[k], bottom[i], c);
+                    // The arc: -r * angle (to the left of a viewer outside is clockwise from above).
+                    const V3 p[6] = {{-hz, -r * a0, 0}, {-hz, -r * a1, 0}, {hz, -r * a1, 0}, {-hz, -r * a0, 0}, {hz, -r * a1, 0}, {hz, -r * a0, 0}};
+                    out.face_plane.insert(out.face_plane.end(), p, p + 6);
+                }
+                side.count        = static_cast<uint32_t>(out.triangles.size()) - side.first;
+                side.plane.code   = 1;
+                side.plane.hx     = hz;
+                side.plane.hy     = 1e6f; // no edge along the seam
+                side.plane.min_x  = -hz;
+                side.plane.max_x  = hz;
+                side.plane.min_y  = -pi * r;
+                side.plane.max_y  = pi * r;
+                side.plane.extent = std::max(hz, pi * r);
+                out.faces.push_back(side);
+                for (int end = 0; end < 2; ++end)
+                {
+                    Mesh::Face cap;
+                    cap.first  = static_cast<uint32_t>(out.triangles.size());
+                    cap.origin = end ? cb : ct;
+                    cap.up     = ahead;
+                    cap.left   = end ? turn(V3{0, -1, 0}) : turn(V3{0, 1, 0});
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        const uint32_t k = (i + 1) % n;
+                        if (end) VolumeTriangle(out, cb, bottom[k], bottom[i], c);
+                        else VolumeTriangle(out, ct, top[i], top[k], c);
+                    }
+                    cap.count        = static_cast<uint32_t>(out.triangles.size()) - cap.first;
+                    cap.plane.code   = 0;
+                    cap.plane.radius = r;
+                    cap.plane.extent = r;
+                    cap.plane.min_x = cap.plane.min_y = -r;
+                    cap.plane.max_x = cap.plane.max_y = r;
+                    for (uint32_t t = cap.first; t < cap.first + cap.count; ++t)
+                    {
+                        const V3 q = Sub(out.triangles[t], cap.origin);
+                        out.face_plane.push_back(V3{Dot(q, cap.up), Dot(q, cap.left), 0.0f});
+                    }
+                    out.faces.push_back(cap);
                 }
             }
             break;
@@ -1065,7 +1147,7 @@ namespace wxl::gx::shapes
         out[19] = 0.0f;
         out[20] = kLiftScale;
         out[21] = kLiftYards;
-        out[22] = 0.0f;
+        out[22] = 1.0f;
         out[23] = 0.0f;
     }
 
@@ -1138,20 +1220,44 @@ namespace wxl::gx::shapes
 
     // --- Surfaces ------------------------------------------------------------------------------------
 
+    namespace
+    {
+        /// The rows of a surface in a frame whose WORLD picture is given by @p world_a (A) and
+        /// @p world_b (B): p = A (x, y) + B in yards, s to the right and t down.
+        SurfaceConstants SurfaceRows(const Mesh::Plane& pl, const SurfaceLook& look, const double world_a[2][2], const double world_b[2]);
+    }
+
     SurfaceConstants MakeSurface(const Mesh& mesh, const SurfaceLook& look)
     {
+        // East and south of the world's origin, in yards: s = -world y, t = -world x.
+        const double cf = std::cos(mesh.turn), sf = std::sin(mesh.turn);
+        const double A[2][2] = {{-sf, -cf}, {-cf, sf}};
+        const double B[2]    = {-static_cast<double>(mesh.origin.y), -static_cast<double>(mesh.origin.x)};
+        return SurfaceRows(mesh.plane, look, A, B);
+    }
+
+    SurfaceConstants MakeFaceSurface(const Mesh::Face& face, const SurfaceLook& look)
+    {
+        // Along the face's own axes from the world's origin: s = -(left), t = -(up).
+        const double A[2][2] = {{0.0, -1.0}, {-1.0, 0.0}};
+        const auto   dot     = [](V3 a, V3 b) { return static_cast<double>(a.x) * b.x + static_cast<double>(a.y) * b.y + static_cast<double>(a.z) * b.z; };
+        const double B[2]    = {-dot(face.origin, face.left), -dot(face.origin, face.up)};
+        return SurfaceRows(face.plane, look, A, B);
+    }
+
+    namespace
+    {
+    SurfaceConstants SurfaceRows(const Mesh::Plane& pl, const SurfaceLook& look, const double world_a[2][2], const double world_b[2])
+    {
         SurfaceConstants out;
-        const Mesh::Plane& pl = mesh.plane;
         const double       sx = look.size_x > 0.0f ? look.size_x : 1.0, sy = look.size_y > 0.0f ? look.size_y : 1.0;
         const double       cr = std::cos(look.rotation), sr = std::sin(look.rotation);
         // p = A (x, y) + B: the picture's frame before its turn and size (s to the right, t down).
         double A[2][2], B[2], O[2];
         if (look.uv == kUvWorld)
         {
-            // East and south of the world's origin, in yards: s = -world y, t = -world x.
-            const double cf = std::cos(mesh.turn), sf = std::sin(mesh.turn);
-            A[0][0] = -sf, A[0][1] = -cf, B[0] = -static_cast<double>(mesh.origin.y);
-            A[1][0] = -cf, A[1][1] = sf, B[1] = -static_cast<double>(mesh.origin.x);
+            A[0][0] = world_a[0][0], A[0][1] = world_a[0][1], B[0] = world_b[0];
+            A[1][0] = world_a[1][0], A[1][1] = world_a[1][1], B[1] = world_b[1];
             O[0] = look.offset_x, O[1] = look.offset_y;
         }
         else
@@ -1190,6 +1296,7 @@ namespace wxl::gx::shapes
         out.k[5][0] = 1.0f / std::max(pl.extent, 1e-4f);
         out.k[5][1] = look.blend == kBlendModulate ? 1.0f : 0.0f;
         return out;
+    }
     }
 
     namespace

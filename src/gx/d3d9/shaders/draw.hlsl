@@ -23,7 +23,7 @@
 float4 viewColumns[4] : register(c240); ///< the view-projection's columns: clip = dot([p 1], column)
 float4 screen         : register(c244); ///< the viewport's width and height in pixels, half a pixel's
                                         ///< width at 1080 lines in pixels / 8, 0
-float4 lift           : register(c245); ///< the pull towards the eye: a fraction of the distance, yards
+float4 lift           : register(c245); ///< the pull towards the eye: a fraction of the distance, yards; the run's opacity multiplier
 
 struct VsIn
 {
@@ -95,7 +95,7 @@ VsOut DrawVs(VsIn input)
     a.xy += float2(right, -down) * 8.0 * screen.z / (0.5 * screen.xy) * a.w;
     VsOut o;
     o.position = a;
-    o.color    = input.color;
+    o.color    = float4(input.color.rgb, input.color.a * lift.z);
     o.line     = line;
     o.plane    = input.other;
     return o;

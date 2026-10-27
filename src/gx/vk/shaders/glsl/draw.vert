@@ -19,7 +19,7 @@ layout(push_constant) uniform Push
 {
     vec4  viewColumns[4]; ///< the view-projection's columns: clip = dot([p 1], column)
     vec4  screen;         ///< the viewport's width and height in pixels, half a pixel's width at 1080 lines / 8
-    vec4  lift;           ///< the pull towards the eye: a fraction of the distance, yards
+    vec4  lift;           ///< the pull towards the eye: a fraction of the distance, yards; the run's opacity multiplier
     uvec2 vertices;       ///< the stream's address
     uvec2 surface;        ///< a surface's numbers (draw_surface.frag)
 } pc;
@@ -86,6 +86,6 @@ void main()
     // A shadow's move on the screen, in half pixels at 1080 lines (y down).
     a.xy += vec2(right, -down) * 8.0 * pc.screen.z / (0.5 * pc.screen.xy) * a.w;
     plane = other;
-    color       = vec4(float((argb >> 16) & 255u), float((argb >> 8) & 255u), float(argb & 255u), float(argb >> 24)) / 255.0;
+    color       = vec4(float((argb >> 16) & 255u), float((argb >> 8) & 255u), float(argb & 255u), float(argb >> 24) * pc.lift.z) / 255.0;
     gl_Position = vec4(a.x, -a.y, a.z, a.w);
 }

@@ -129,6 +129,17 @@ namespace wxl::gx::shapes
         float                turn = 0.0f;    ///< and the facing its plane is turned by
         Plane                plane;          ///< a ground shape's inside, for a surface
         std::vector<float>   edge;           ///< a polygon's inside built for a feather: each triangle corner's distance to its border
+        /// A face of a volume (a box's six, a cylinder's side and ends): its triangles, contiguous,
+        /// and its own frame, as a ground shape's plane: x towards the picture's top, y to its left.
+        struct Face
+        {
+            uint32_t first = 0, count = 0; ///< vertices in triangles
+            Plane    plane;
+            V3       origin;               ///< its middle, in the world
+            V3       up, left;             ///< its frame's axes, in the world
+        };
+        std::vector<Face>    faces;          ///< a volume's, built with its inside
+        std::vector<V3>      face_plane;     ///< each triangle corner of a face in its face's frame (x, y, 0)
 
         size_t Vertices() const { return lines.size() * 6 + triangles.size(); }
         void   Clear()
@@ -137,6 +148,8 @@ namespace wxl::gx::shapes
             triangles.clear();
             normals.clear();
             edge.clear();
+            faces.clear();
+            face_plane.clear();
         }
     };
 
@@ -212,7 +225,8 @@ namespace wxl::gx::shapes
     constexpr float kLiftYards = 0.02f;
 
     /// The constants both vertex programs take: the matrix's four columns, then (viewport width,
-    /// height, half a pixel's width at 1080 lines in pixels / 8, 0) and (kLiftScale, kLiftYards, 0, 0).
+    /// height, half a pixel's width at 1080 lines in pixels / 8, 0) and (kLiftScale, kLiftYards, the
+    /// opacity's multiplier (1; a run's alpha), 0).
     void Constants(const View& view, float out[24]);
 
     /// A vertex where the vertex program puts it, in clip space (D3D9's: y up, z 0 to w): the
@@ -288,6 +302,9 @@ namespace wxl::gx::shapes
         float k[6][4] = {};
     };
     SurfaceConstants MakeSurface(const Mesh& mesh, const SurfaceLook& look);
+    /// A volume's face's numbers: the same rows, in the face's frame; WORLD from the world's origin
+    /// along the face's axes.
+    SurfaceConstants MakeFaceSurface(const Mesh::Face& face, const SurfaceLook& look);
 
     /// Whether the sampler repeats the picture (TILE and WORLD).
     constexpr bool Repeats(uint32_t uv) { return uv == kUvTile || uv == kUvWorld; }
@@ -315,6 +332,8 @@ namespace wxl::gx::shapes
     {
         uint32_t first = 0, count = 0;
         bool     on_top = false;
+        bool     behind = false;   ///< drawn only where the scene stands in front of it (depth GREATER)
+        float    alpha = 1.0f;     ///< its vertices' opacity multiplied by this (the vertex program's lift.z)
         uint8_t  program = kPlain;
         uint8_t  blend = kBlendAlpha;  ///< a surface's
         uint32_t surface = 0;          ///< a surface's: an index into the frame's surfaces

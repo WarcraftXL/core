@@ -40,6 +40,8 @@ namespace wxl::vk::render
         static_assert(sizeof(SurfaceRows) == 112, "six rows and the picture's slots");
 
         constexpr uint32_t kBlendOf[3] = {kBlendAlphaKeepAlpha, kBlendAddKeepAlpha, kBlendMultiplyKeepAlpha};
+
+        uint32_t DepthOf(const gx::shapes::Run& run) { return run.on_top ? 1u : run.behind ? 2u : 0u; }
     }
 
     std::vector<OwnProgram> ShapePrograms()
@@ -67,23 +69,24 @@ namespace wxl::vk::render
         render_ = nullptr;
     }
 
-    Pipeline* Shapes::PipelineFor(uint8_t program, uint8_t blend, bool on_top, std::string* why)
+    Pipeline* Shapes::PipelineFor(uint8_t program, uint8_t blend, uint32_t depth, std::string* why)
     {
         const uint32_t prog = program == gx::shapes::kSurface ? 1u : 0u;
         const uint32_t b    = prog ? std::min<uint32_t>(blend, 2u) : 0u;
-        Pipeline*&     slot = pipelines_[prog][b][on_top ? 1 : 0];
+        Pipeline*&     slot = pipelines_[prog][b][std::min(depth, 2u)];
         if (slot) return slot;
         static const char* const kNames[2][3] = {{"wxl.draw's shapes", "", ""},
                                                  {"wxl.draw's surfaces", "wxl.draw's added surfaces", "wxl.draw's modulated surfaces"}};
         PipelineSpec spec;
         spec.kind             = kGraphics;
-        spec.name             = std::string(kNames[prog][b]) + (on_top ? " on top" : "");
+        static const char* const kDepths[3] = {"", " on top", " behind the scene"};
+        spec.name             = std::string(kNames[prog][b]) + kDepths[std::min(depth, 2u)];
         spec.vertex           = Words(spirv::draw_vert, sizeof spirv::draw_vert);
         spec.fragment         = prog ? Words(spirv::draw_surface_frag, sizeof spirv::draw_surface_frag) : Words(spirv::draw_frag, sizeof spirv::draw_frag);
         spec.color_formats[0] = kBgra8;
         spec.depth_format     = kDepth32f;
         spec.blend[0]         = kBlendOf[b];
-        spec.depth_test       = on_top ? kDepthOff : kDepthLessEqual;
+        spec.depth_test       = depth == 1 ? kDepthOff : depth == 2 ? kDepthGreater : kDepthLessEqual;
         spec.depth_write      = false;
         spec.cull             = kCullNone;
         spec.topology         = kTriangles;
@@ -119,7 +122,7 @@ namespace wxl::vk::render
         Render& r = *render_;
         // Every pipeline the runs need, before the pass.
         for (uint32_t i = 0; i < run_count; ++i)
-            if (runs[i].count && !PipelineFor(runs[i].program, runs[i].blend, runs[i].on_top, why)) return 0;
+            if (runs[i].count && !PipelineFor(runs[i].program, runs[i].blend, DepthOf(runs[i]), why)) return 0;
 
         PassSpec onto;
         onto.color_count    = 1;
@@ -150,8 +153,9 @@ namespace wxl::vk::render
         for (uint32_t i = 0; i < run_count && !failed; ++i)
         {
             const gx::shapes::Run& run      = runs[i];
-            Pipeline*              pipeline = PipelineFor(run.program, run.blend, run.on_top, why);
+            Pipeline*              pipeline = PipelineFor(run.program, run.blend, DepthOf(run), why);
             if (!run.count || !pipeline) continue;
+            push.constants[22] = run.alpha;
             push.surface[0] = push.surface[1] = 0;
             if (run.program == gx::shapes::kSurface && surfaces)
             {

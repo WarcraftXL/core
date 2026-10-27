@@ -80,6 +80,7 @@ namespace
         float           shadow_alpha = 0.0f, shadow_x = 0.0f, shadow_y = 0.0f, shadow_softness = 0.0f;
         std::string     texture; ///< the key it is held under (Textures), empty for none
         sh::SurfaceLook look;
+        float           occluded = 0.0f; ///< abi 0.1.39: what the scene hides drawn at this part of the opacity
 
         bool      Surface() const { return look.textured || look.feather > 0.0f || look.radial > 0.0f || look.blend != sh::kBlendAlpha; }
         sh::Parts Parts() const { return sh::Parts{alpha > 0.0f, fill > 0.0f, look.feather}; }
@@ -159,6 +160,12 @@ namespace
         uint32_t mod = 0;
         Style    style;
         sh::Mesh mesh;
+        // What the mesh was built from: a shape given again as it was (the same mod, the same slot of
+        // the frame, the ground unchanged) is drawn without being built again.
+        sh::Desc  desc;
+        sh::Parts parts;
+        uint64_t  generation = 0;
+        bool      valid = false;
 
         /// Drawn or dropped: its texture is no longer held for it.
         void Done()
@@ -189,9 +196,46 @@ namespace
     wxl::vk::render::Render* g_attached = nullptr;
 
     // The frame's vertices, their memory kept from frame to frame.
-    std::vector<sh::Vertex>  g_fill[2], g_surfaceVertices[2], g_volumes[2], g_shadows[2], g_lines[2], g_stream;
-    std::vector<sh::Run>     g_surfaceRuns[2], g_runs;
+    /// What a frame draws of a class of shapes, by part: plain insides, surfaces (a run each),
+    /// volumes far to near (plain runs and their faces' surface runs), lines' shadows, lines. Run
+    /// ranges are within each part's own vertices until the frame's stream is put together.
+    struct Bucket
+    {
+        std::vector<sh::Vertex> fill, surfaces, volumes, shadows, lines;
+        std::vector<sh::Run>    surfaceRuns, volumeRuns;
+        float                   occluded = 0.0f; ///< an occluded shape's own bucket: its hidden part's opacity
+
+        void Clear()
+        {
+            fill.clear();
+            surfaces.clear();
+            volumes.clear();
+            shadows.clear();
+            lines.clear();
+            surfaceRuns.clear();
+            volumeRuns.clear();
+        }
+    };
+
+    Bucket                   g_buckets[2];  ///< tested, on top
+    std::vector<Bucket>      g_occluded;    ///< a bucket per shape with an occluded_alpha; the first g_occludedCount live
+    size_t                   g_occludedCount = 0;
+    std::vector<sh::Vertex>  g_stream;
+    std::vector<sh::Run>     g_runs;
     std::vector<sh::Surface> g_surfaces;
+    uint32_t                 g_reused = 0; ///< immediate shapes not built again since the last world drawn
+
+    bool SameDesc(const sh::Desc& a, const sh::Desc& b)
+    {
+        const auto same = [](sh::V3 p, sh::V3 q) { return p.x == q.x && p.y == q.y && p.z == q.z; };
+        if (a.kind != b.kind || a.flags != b.flags || !same(a.center, b.center) || a.radius != b.radius || a.inner != b.inner ||
+            a.angle != b.angle || a.facing != b.facing || a.pitch != b.pitch || a.roll != b.roll || !same(a.size, b.size) ||
+            a.spacing != b.spacing || a.points.size() != b.points.size() || a.alphas != b.alphas)
+            return false;
+        for (size_t i = 0; i < a.points.size(); ++i)
+            if (!same(a.points[i], b.points[i])) return false;
+        return true;
+    }
 
     /// wxl.terrain's ground, its chunks' heights read once per change of the ground.
     class TerrainGround final : public sh::Ground
@@ -386,7 +430,7 @@ namespace
         out.fade_in  = in->fade_in;
         out.fade_out = in->fade_out;
         out.fill_color = out.color;
-        if (in->struct_size < sizeof(wxl_draw_style)) return true; // abi 0.1.36's look
+        if (in->struct_size < WXL_DRAW_STYLE_SIZE_0138) return true; // abi 0.1.36's look; abi 0.1.38's goes on below
 
         const auto refuse = [&](const char* why) {
             Refuse(call, std::string("the style's ") + why);
@@ -440,6 +484,11 @@ namespace
         out.look.blend      = in->blend;
         out.look.feather    = in->feather;
         out.look.radial     = in->radial_fade;
+        if (in->struct_size >= sizeof(wxl_draw_style))
+        {
+            if (!number(in->occluded_alpha, 0.0f, 1.0f)) return refuse("occluded_alpha must be an opacity from 0 to 1");
+            out.occluded = in->occluded_alpha;
+        }
         if (!path.empty())
         {
             // Held from here: the caller lets it go when the style is dropped (or refused later).
@@ -524,13 +573,26 @@ namespace
         Style           look;
         if (!ReadShape("draw", shape, desc) || !ReadStyle("draw", style, look)) return WXL_E_INVALID;
         if (g_immediateCount == g_immediate.size()) g_immediate.emplace_back();
-        Immediate&  slot = g_immediate[g_immediateCount];
-        std::string why;
-        if (!sh::Build(desc, look.Parts(), &GroundOf(), slot.mesh, &why))
+        Immediate&      slot  = g_immediate[g_immediateCount];
+        std::string     why;
+        const sh::Parts parts = look.Parts();
+        const uint64_t  ground = GenerationOf();
+        if (slot.valid && slot.mod == mod && slot.generation == ground && slot.parts.lines == parts.lines && slot.parts.fill == parts.fill &&
+            slot.parts.feather == parts.feather && SameDesc(slot.desc, desc))
+            ++g_reused; // as the frame before: its mesh stands
+        else
         {
-            LetGoTexture(look.texture);
-            Refuse("draw", "the shape: " + why);
-            return WXL_E_INVALID;
+            slot.valid = false;
+            if (!sh::Build(desc, parts, &GroundOf(), slot.mesh, &why))
+            {
+                LetGoTexture(look.texture);
+                Refuse("draw", "the shape: " + why);
+                return WXL_E_INVALID;
+            }
+            slot.desc       = desc;
+            slot.parts      = parts;
+            slot.generation = ground;
+            slot.valid      = true;
         }
         slot.mod   = mod;
         slot.style = look; // the texture held for it until it is drawn (Immediate::Done)
@@ -727,14 +789,6 @@ namespace
         return m;
     }
 
-    struct Job
-    {
-        const sh::Mesh* mesh;
-        const Style*    style;
-        float           beat;
-        float           distance; ///< of a volume, to draw them far to near
-    };
-
     /// The world's view as the client draws it now, for both devices.
     bool ReadView(sh::View& out)
     {
@@ -863,14 +917,14 @@ function WxlDraw(shape, style)
                   along and num(style, "alpha_start", 1) or -1, along and num(style, "alpha_end", 1) or -1,
                   num(style, "shadow_color", 0), shadow, sxo, syo, num(style, "shadow_softness", shadow > 0 and 1 or 0),
                   texture or "", right, bottom, uv, usx, usy, num(style, "uv_rotation", 0), uox, uoy, blend,
-                  num(style, "feather", 0), num(style, "radial_fade", 0))
+                  num(style, "feather", 0), num(style, "radial_fade", 0), num(style, "occluded_alpha", 0))
 end
 )lua";
 
     void WXL_CALL InterfaceDraw(wxl_script_call* call, void*)
     {
         const wxl_script_api& script = services::ScriptApi();
-        constexpr uint32_t kArgs = 43, kPoints = 15, kTexture = 31;
+        constexpr uint32_t kArgs = 44, kPoints = 15, kTexture = 31;
         double             n[kArgs] = {};
         n[22] = n[24] = n[25] = -1.0; // fill_color, alpha_start, alpha_end: not given
         const uint32_t given = std::min(script.arg_count(call), kArgs);
@@ -954,6 +1008,7 @@ end
         style.blend           = static_cast<uint32_t>(n[40]);
         style.feather         = f(41);
         style.radial_fade     = f(42);
+        style.occluded_alpha  = f(43);
         const wxl_result result = DrawNow(&shape, &style);
         if (result == WXL_OK)
         {
@@ -1069,21 +1124,40 @@ namespace wxl::core::services
 
             // The frame's vertices, kept first (oldest first), then the immediate ones: past the
             // budget the newest go first.
-            for (int top = 0; top < 2; ++top)
-            {
-                g_fill[top].clear();
-                g_surfaceVertices[top].clear();
-                g_surfaceRuns[top].clear();
-                g_volumes[top].clear();
-                g_shadows[top].clear();
-                g_lines[top].clear();
-            }
+            for (Bucket& bucket : g_buckets) bucket.Clear();
+            g_occludedCount = 0;
             g_surfaces.clear();
-            std::vector<Job> volumes[2];
-            uint32_t         total = 0, drawn = 0, leftOut = 0, textured = 0, shadowed = 0;
+            struct Volume
+            {
+                const sh::Mesh* mesh;
+                const Style*    style;
+                float           beat;
+                float           distance; ///< to draw them far to near
+                Bucket*         bucket;
+            };
+            std::vector<Volume> volumes;
+            uint32_t            total = 0, drawn = 0, leftOut = 0, textured = 0, shadowed = 0, occluded = 0;
+
+            // A surface's run in @p runs over the vertices @p into gets from here on, its numbers kept.
+            const auto surfaceRun = [&](std::vector<sh::Run>& runs, const std::vector<sh::Vertex>& into, const Style& style, bool top,
+                                        const sh::SurfaceConstants& constants, void* texture) {
+                sh::Surface surface;
+                surface.constants = constants;
+                surface.texture   = texture;
+                surface.repeats   = sh::Repeats(style.look.uv) && style.look.right >= 1.0f && style.look.bottom >= 1.0f;
+                sh::Run run;
+                run.first   = static_cast<uint32_t>(into.size());
+                run.on_top  = top;
+                run.program = sh::kSurface;
+                run.blend   = static_cast<uint8_t>(style.look.blend);
+                run.surface = static_cast<uint32_t>(g_surfaces.size());
+                g_surfaces.push_back(surface);
+                runs.push_back(run);
+            };
             const auto take = [&](const sh::Mesh& mesh, const Style& style, float beat) {
                 if (!mesh.lines.size() && !mesh.triangles.size()) return;
                 const bool   shadow = style.shadow_alpha > 0.0f && !mesh.lines.empty();
+                const bool   xray   = style.occluded > 0.0f && style.depth == WXL_DRAW_DEPTH_TESTED;
                 const size_t n      = mesh.Vertices() + (shadow ? mesh.lines.size() * 6 : 0);
                 if (total + n > WXL_DRAW_MAX_FRAME_VERTICES)
                 {
@@ -1092,7 +1166,17 @@ namespace wxl::core::services
                 }
                 total += static_cast<uint32_t>(n);
                 ++drawn;
-                const int top = style.depth == WXL_DRAW_DEPTH_ON_TOP ? 1 : 0;
+                const bool top = style.depth == WXL_DRAW_DEPTH_ON_TOP;
+                Bucket*    bucket = &g_buckets[top ? 1 : 0];
+                if (xray)
+                {
+                    // A bucket of its own, drawn twice: where the scene hides it, then where it is seen.
+                    if (g_occludedCount == g_occluded.size()) g_occluded.emplace_back();
+                    bucket = &g_occluded[g_occludedCount++];
+                    bucket->Clear();
+                    bucket->occluded = style.occluded;
+                    ++occluded;
+                }
                 if (!mesh.lines.empty())
                 {
                     sh::LineLook look;
@@ -1101,7 +1185,7 @@ namespace wxl::core::services
                     look.soft        = sh::SoftCode(style.softness);
                     look.alpha_start = style.alpha_start;
                     look.alpha_end   = style.alpha_end;
-                    for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(g_lines[top], seg, view.eye, look, mesh.ground);
+                    for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(bucket->lines, seg, view.eye, look, mesh.ground);
                     if (shadow)
                     {
                         // The same segments once more, under every line: wider by the softness,
@@ -1111,7 +1195,7 @@ namespace wxl::core::services
                         look.soft  = sh::SoftCode(style.shadow_softness);
                         look.right = sh::OffsetCode(style.shadow_x);
                         look.down  = sh::OffsetCode(style.shadow_y);
-                        for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(g_shadows[top], seg, view.eye, look, mesh.ground);
+                        for (const sh::Mesh::Segment& seg : mesh.lines) sh::PushSegment(bucket->shadows, seg, view.eye, look, mesh.ground);
                         ++shadowed;
                     }
                 }
@@ -1119,27 +1203,20 @@ namespace wxl::core::services
                 if (!mesh.normals.empty())
                 {
                     const float dx = mesh.middle.x - view.eye.x, dy = mesh.middle.y - view.eye.y, dz = mesh.middle.z - view.eye.z;
-                    volumes[top].push_back(Job{&mesh, &style, beat, dx * dx + dy * dy + dz * dz});
+                    volumes.push_back(Volume{&mesh, &style, beat, dx * dx + dy * dy + dz * dz, bucket});
                     return;
                 }
                 const uint32_t fc = Color(style.fill_color, style.fill * beat);
                 if (!style.Surface())
                 {
                     for (size_t t = 0; t + 2 < mesh.triangles.size(); t += 3)
-                        sh::PushTriangle(g_fill[top], mesh.triangles[t], mesh.triangles[t + 1], mesh.triangles[t + 2], view.eye, fc, mesh.ground);
+                        sh::PushTriangle(bucket->fill, mesh.triangles[t], mesh.triangles[t + 1], mesh.triangles[t + 2], view.eye, fc, mesh.ground);
                     return;
                 }
                 // A surface: its run and numbers; a texture still loading leaves the inside out.
-                sh::Surface surface;
-                if (style.look.textured && !(surface.texture = deviceTexture(style.texture))) return;
-                surface.constants = sh::MakeSurface(mesh, style.look);
-                surface.repeats   = sh::Repeats(style.look.uv) && style.look.right >= 1.0f && style.look.bottom >= 1.0f;
-                sh::Run run;
-                run.first   = static_cast<uint32_t>(g_surfaceVertices[top].size());
-                run.on_top  = top == 1;
-                run.program = sh::kSurface;
-                run.blend   = static_cast<uint8_t>(style.look.blend);
-                run.surface = static_cast<uint32_t>(g_surfaces.size());
+                void* texture = nullptr;
+                if (style.look.textured && !(texture = deviceTexture(style.texture))) return;
+                surfaceRun(bucket->surfaceRuns, bucket->surfaces, style, top, sh::MakeSurface(mesh, style.look), texture);
                 const bool edged = mesh.edge.size() == mesh.triangles.size();
                 for (size_t t = 0; t + 2 < mesh.triangles.size(); t += 3)
                 {
@@ -1149,11 +1226,9 @@ namespace wxl::core::services
                         plane[k]   = sh::InPlane(mesh, mesh.triangles[t + k]);
                         plane[k].z = edged ? mesh.edge[t + k] : 0.0f;
                     }
-                    sh::PushSurfaceTriangle(g_surfaceVertices[top], &mesh.triangles[t], plane, view.eye, fc, mesh.ground);
+                    sh::PushSurfaceTriangle(bucket->surfaces, &mesh.triangles[t], plane, view.eye, fc, mesh.ground);
                 }
-                run.count = static_cast<uint32_t>(g_surfaceVertices[top].size()) - run.first;
-                g_surfaces.push_back(surface);
-                g_surfaceRuns[top].push_back(run);
+                bucket->surfaceRuns.back().count = static_cast<uint32_t>(bucket->surfaces.size()) - bucket->surfaceRuns.back().first;
                 ++textured;
             };
             if (seen)
@@ -1161,66 +1236,117 @@ namespace wxl::core::services
                 for (const auto& k : g_kept)
                     if (k->built) take(k->mesh, k->style, Beat(k->style, now, k->born, k->ends));
                 for (size_t i = 0; i < g_immediateCount; ++i) take(g_immediate[i].mesh, g_immediate[i].style, Beat(g_immediate[i].style, now, 0.0, 0.0));
-                // Volumes' fills far to near, their front faces only.
-                for (int top = 0; top < 2; ++top)
+                // Volumes far to near, their faces turned to the eye (from inside one, its inside);
+                // a textured box's or cylinder's faces each a surface in its own frame.
+                std::stable_sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.distance > b.distance; });
+                for (const Volume& v : volumes)
                 {
-                    std::sort(volumes[top].begin(), volumes[top].end(), [](const Job& a, const Job& b) { return a.distance > b.distance; });
-                    std::vector<sh::Vertex>& fill = g_volumes[top];
-                    for (const Job& job : volumes[top])
+                    const sh::Mesh& m      = *v.mesh;
+                    const Style&    style  = *v.style;
+                    Bucket&         bucket = *v.bucket;
+                    const bool      top    = style.depth == WXL_DRAW_DEPTH_ON_TOP;
+                    const uint32_t  fc     = Color(style.fill_color, style.fill * v.beat);
+                    auto facing = [&](size_t t) {
+                        const sh::V3& a = m.triangles[t];
+                        const sh::V3& n = m.normals[t / 3];
+                        return n.x * (a.x - view.eye.x) + n.y * (a.y - view.eye.y) + n.z * (a.z - view.eye.z) < 0.0f;
+                    };
+                    bool outside = false;
+                    for (size_t t = 0; t + 2 < m.triangles.size() && !outside; t += 3) outside = facing(t);
+                    const bool faced = style.Surface() && !m.faces.empty() && m.face_plane.size() == m.triangles.size();
+                    void*      texture = nullptr;
+                    if (faced && style.look.textured && !(texture = deviceTexture(style.texture))) continue; // loading
+                    if (!faced)
                     {
-                        const uint32_t fc = Color(job.style->fill_color, job.style->fill * job.beat);
-                        const sh::Mesh& m = *job.mesh;
-                        // The faces turned to the eye; from inside the volume (none is), its inside.
-                        auto facing = [&](size_t t, size_t f) {
-                            const sh::V3& a = m.triangles[t];
-                            const sh::V3& n = m.normals[f];
-                            return n.x * (a.x - view.eye.x) + n.y * (a.y - view.eye.y) + n.z * (a.z - view.eye.z) < 0.0f;
-                        };
-                        bool outside = false;
-                        for (size_t t = 0, f = 0; t + 2 < m.triangles.size() && !outside; t += 3, ++f) outside = facing(t, f);
-                        for (size_t t = 0, f = 0; t + 2 < m.triangles.size(); t += 3, ++f)
-                            if (facing(t, f) == outside)
-                                sh::PushTriangle(fill, m.triangles[t], m.triangles[t + 1], m.triangles[t + 2], view.eye, fc, false);
+                        sh::Run run;
+                        run.first  = static_cast<uint32_t>(bucket.volumes.size());
+                        run.on_top = top;
+                        for (size_t t = 0; t + 2 < m.triangles.size(); t += 3)
+                            if (facing(t) == outside)
+                                sh::PushTriangle(bucket.volumes, m.triangles[t], m.triangles[t + 1], m.triangles[t + 2], view.eye, fc, false);
+                        run.count = static_cast<uint32_t>(bucket.volumes.size()) - run.first;
+                        if (run.count) bucket.volumeRuns.push_back(run);
+                        continue;
                     }
+                    for (const sh::Mesh::Face& face : m.faces)
+                    {
+                        if (!(face.count >= 3 && facing(face.first) == outside)) continue;
+                        surfaceRun(bucket.volumeRuns, bucket.volumes, style, top, sh::MakeFaceSurface(face, style.look), texture);
+                        for (uint32_t t = face.first; t + 2 < face.first + face.count; t += 3)
+                            if (facing(t) == outside)
+                                sh::PushSurfaceTriangle(bucket.volumes, &m.triangles[t], &m.face_plane[t], view.eye, fc, false);
+                        bucket.volumeRuns.back().count = static_cast<uint32_t>(bucket.volumes.size()) - bucket.volumeRuns.back().first;
+                    }
+                    ++textured;
                 }
             }
             const uint32_t immediate = static_cast<uint32_t>(g_immediateCount);
             for (size_t i = 0; i < g_immediateCount; ++i) g_immediate[i].Done();
             g_immediateCount = 0;
             g_immediateOf.clear();
+            const uint32_t reused = g_reused;
+            g_reused              = 0;
 
             uint32_t sent = 0;
             if (seen)
             {
-                // Per depth: plain insides; each surface; volumes, the lines' shadows and the lines.
+                // Per class: plain insides; each surface; volumes (plain runs and faces), the lines'
+                // shadows and the lines. An occluded shape's runs go twice: behind the scene at its
+                // occluded opacity, then as usual.
                 g_stream.clear();
                 g_runs.clear();
-                const auto plain = [&](bool top, std::initializer_list<const std::vector<sh::Vertex>*> parts) {
-                    sh::Run run;
-                    run.first  = static_cast<uint32_t>(g_stream.size());
-                    run.on_top = top;
-                    for (const auto* part : parts) g_stream.insert(g_stream.end(), part->begin(), part->end());
-                    run.count = static_cast<uint32_t>(g_stream.size()) - run.first;
+                const auto add = [&](sh::Run run) {
                     if (!run.count) return;
-                    // Right after a plain run of the same depth (no surface between): one run.
-                    if (!g_runs.empty() && g_runs.back().program == sh::kPlain && g_runs.back().on_top == top &&
-                        g_runs.back().first + g_runs.back().count == run.first)
+                    const sh::Run* last = g_runs.empty() ? nullptr : &g_runs.back();
+                    if (last && run.program == sh::kPlain && last->program == sh::kPlain && last->on_top == run.on_top &&
+                        last->behind == run.behind && last->alpha == run.alpha && last->first + last->count == run.first)
                         g_runs.back().count += run.count;
                     else
                         g_runs.push_back(run);
                 };
-                for (int top = 0; top < 2; ++top)
+                // The bucket's vertices into the stream; its runs, in order, into @p out.
+                std::vector<sh::Run> runs;
+                const auto lay = [&](const Bucket& b, bool top) {
+                    runs.clear();
+                    const auto plain = [&](const std::vector<sh::Vertex>& part) {
+                        sh::Run run;
+                        run.first  = static_cast<uint32_t>(g_stream.size());
+                        run.on_top = top;
+                        run.count  = static_cast<uint32_t>(part.size());
+                        g_stream.insert(g_stream.end(), part.begin(), part.end());
+                        if (run.count) runs.push_back(run);
+                    };
+                    const auto withRuns = [&](const std::vector<sh::Vertex>& part, const std::vector<sh::Run>& own) {
+                        const uint32_t base = static_cast<uint32_t>(g_stream.size());
+                        g_stream.insert(g_stream.end(), part.begin(), part.end());
+                        for (sh::Run run : own)
+                        {
+                            run.first += base;
+                            if (run.count) runs.push_back(run);
+                        }
+                    };
+                    plain(b.fill);
+                    withRuns(b.surfaces, b.surfaceRuns);
+                    withRuns(b.volumes, b.volumeRuns);
+                    plain(b.shadows);
+                    plain(b.lines);
+                };
+                lay(g_buckets[0], false);
+                for (const sh::Run& run : runs) add(run);
+                for (size_t i = 0; i < g_occludedCount; ++i)
                 {
-                    plain(top == 1, {&g_fill[top]});
-                    const uint32_t base = static_cast<uint32_t>(g_stream.size());
-                    g_stream.insert(g_stream.end(), g_surfaceVertices[top].begin(), g_surfaceVertices[top].end());
-                    for (sh::Run run : g_surfaceRuns[top])
+                    const Bucket& b = g_occluded[i];
+                    lay(b, false);
+                    for (sh::Run run : runs)
                     {
-                        run.first += base;
-                        g_runs.push_back(run);
+                        run.behind = true;
+                        run.alpha  = b.occluded;
+                        add(run);
                     }
-                    plain(top == 1, {&g_volumes[top], &g_shadows[top], &g_lines[top]});
+                    for (const sh::Run& run : runs) add(run);
                 }
+                lay(g_buckets[1], true);
+                for (const sh::Run& run : runs) add(run);
                 float constants[24];
                 sh::Constants(view, constants);
                 std::string why;
@@ -1254,6 +1380,8 @@ namespace wxl::core::services
             g_stats.immediate_microseconds = static_cast<float>(g_immediateSeconds * 1e6);
             g_stats.textured               = textured;
             g_stats.shadows                = shadowed;
+            g_stats.occluded               = occluded;
+            g_stats.reused                 = reused;
             ++g_stats.frames;
             g_immediateSeconds = 0.0;
             g_leftOutSince += leftOut;

@@ -179,12 +179,26 @@ namespace wxl::core::gx::d3d9::shapes
         uint32_t   drawn   = 0;
         bool       sampled = false;
         int        zState = -1, program = -1, blend = -1;
+        float      alpha  = 1.0f;
+        float      lift[4] = {constants[20], constants[21], 1.0f, constants[23]};
         for (uint32_t i = 0; i < run_count; ++i)
         {
             const wxl::gx::shapes::Run& run = runs[i];
             if (run.count < 3) continue;
-            const int z = run.on_top ? 0 : 1;
-            if (z != zState) d.SetRenderState(D3DRS_ZENABLE, (zState = z) ? D3DZB_TRUE : D3DZB_FALSE);
+            // On top: no depth; tested: LESSEQUAL; behind the scene: GREATER.
+            const int z = run.on_top ? 0 : run.behind ? 2 : 1;
+            if (z != zState)
+            {
+                if (zState <= 0 || z == 0) d.SetRenderState(D3DRS_ZENABLE, z ? D3DZB_TRUE : D3DZB_FALSE);
+                if (z) d.SetRenderState(D3DRS_ZFUNC, z == 2 ? D3DCMP_GREATER : D3DCMP_LESSEQUAL);
+                zState = z;
+            }
+            if (run.alpha != alpha)
+            {
+                alpha   = run.alpha;
+                lift[2] = alpha;
+                d.SetVertexConstants(kViewRegister + 5, lift, 1);
+            }
             const bool surface = run.program == wxl::gx::shapes::kSurface && surfaces;
             if (static_cast<int>(surface) != program)
             {
@@ -229,6 +243,7 @@ namespace wxl::core::gx::d3d9::shapes
         // What the engine leaves set and never sends again (CGxDeviceD3d::IStateSetD3DDefaults),
         // then everything else it keeps, sent again before its next draw.
         d.SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+        d.SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
         d.SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
         binding::gx_invalidate_state();
         return drawn;
