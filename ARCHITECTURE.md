@@ -581,6 +581,35 @@ chunk's info) until the next map; MPHD 0x80 (height texturing) without 0x4 is gi
 `CMap::ValidateShaders` runs again, since this client reads 4096-byte alpha maps under 0x4 only,
 where retail reads them under either.
 
+Tiles split by file name (abi 0.1.45, `set_tile_provider`, `src/services/TerrainTiles.cpp`):
+Cataclysm and later write a tile as a root without MCIN (heights, normals, vertex colours, sounds,
+MH2O, MFBO) and, beside it, `_tex0` (MTEX, MTXF or MTXP, MAMP; per chunk MCLY, MCAL, MCSH),
+`_obj0` (MMDX, MMID, MWMO, MWID, MDDF, MODF; per chunk MCRD and MCRW) and `_obj1`. Nothing is
+written again into one file: the client's own structures point into the files. Before
+`CMapArea::ProcessIffChunks` (`MapArea.ProcessIffChunks`) a root without MCIN has the tile
+providers asked for the set (each file from the first that answers it, copied, kept until
+`CMap::FreeArea`, `Map.FreeArea`) and the set indexed (`src/services/SplitTile.cpp`, portable,
+bounds-checked). The client's own reading then sets the header, MFBO and the liquid from the root
+as for any tile, and finds every other MHDR slot 0 (every retail root): empty chunks, counts 0, no
+textures. After it, the area is pointed into the files (binding `map_area_split_set`):
+`m_chunkInfo` an index of the root's MCNKs (offset, size; the flags the client's), the
+placements and name tables `_obj0`'s, `m_textureFlags` `_tex0`'s MTXF (or MTXP's flags laid out as
+MTXF when MTXF is absent or short), MAMP into the root's MHDR, and `CMapArea::LoadTextures` on
+`_tex0`'s MTEX. After `CMapChunk::ProcessIffChunks` (`MapChunk.ProcessIffChunks`) a chunk of such a
+tile (its MCNK inside a held root) has `m_layers`, `m_additionalShadowmap` and `m_shadowMap` its
+`_tex0` MCNK's, its header's nLayers the layers the client can draw (at most 4, up to the first
+naming a texture the tile has not or an alpha map past MCAL), sizeAlpha MCAL's size + 8, the
+reference counts and `m_mcrfPtr` MCRD's, and retail's 64 holes (8 x 8, byte = row) folded into
+the 16 the client reads (a hole wherever one of the four under it is). The gate on
+`CMapChunk::CreateRefs` takes such a chunk's call and makes the client's own twice, map objects
+from MCRW then doodads from MCRD (the order of one list), leaving out a reference to a placement
+that does not exist or whose model is named by FileDataID (binding `map_chunk_create_refs`, the
+guard letting the inner calls through). Layers past four are `chunk_fn`'s, from `_tex0`. A root
+without MCIN no provider answers loads its ground untextured, without placements. The harness
+holds a made-up split tile to its monolithic twin through the client's reading written out: every
+area field and chunk (heights, layers, alpha maps, shadow, holes, counts) and the placements made,
+in order.
+
 ### Messages of a mod's own
 
 `wxl.net` (`src/services/NetService.cpp`) lets a mod claim opcode numbers and speak them with a

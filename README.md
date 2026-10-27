@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.44-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.45-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -474,6 +474,10 @@ source. Everything else observes.
 | `Map.AllocDoodadDef` | `CMap::AllocDoodadDef()` | nothing itself: after, notes the def it handed out, which tells a placement from a def found in the map's hash |
 | `Map.LoadWdt` | `CMap::LoadWdt()`, the map's WDT header read as the map loads | after: `wxl.terrain` reads the WDT for layer providers, and gives a map flagged 0x80 without 0x4 the 0x4 that has the client read its alpha maps as retail does |
 | `Map.Unload` | `CMap::Unload()`, the map and its ground unloaded | before: `wxl.terrain` drops every edit and the layers' texture scales, `TerrainEditsCleared` |
+| `MapArea.ProcessIffChunks` | `CMapArea::ProcessIffChunks()`, a tile's file read into its fields | for a root ADT without MCIN (a tile split into `_tex0` and `_obj0`): before, the tile providers asked for its files and the set indexed; after, the area's chunk index, placements, names and texture flags pointed into them and `_tex0`'s textures loaded by `CMapArea::LoadTextures` |
+| `MapChunk.ProcessIffChunks` | `CMapChunk::ProcessIffChunks(bool a3)`, a chunk's sub-chunks walked | after, for a chunk of a split tile: its layers, alpha maps and shadow pointed into its `_tex0` MCNK, its header's layer count (at most 4), alpha size and reference counts set, its 64 holes folded into 16 |
+| `MapChunk.CreateRefs` | `CMapChunk::CreateRefs(area, refs, doodads, map objects)` (gate) | for a chunk of a split tile, taken: the client's own call made for `_obj0`'s MCRW, then its MCRD, references it cannot follow left out |
+| `Map.FreeArea` | `CMap::FreeArea(CMapArea*)`, a tile freed after its purge | before: a split tile's files and index let go |
 | `MapRenderChunk.CreateLayer` | `CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate)`, a texture layer appended to a render chunk | nothing itself: after, `wxl.terrain` asks the layer providers for the layer's texture scale and keeps it |
 | `MapRenderChunk.RenderSinglePassVertexPixelShader`, `RenderMultiPassVertexPixelShader`, `RenderMultiPassVertexPixelShaderBigAlpha`, `RenderSinglePassPixelShader`, `RenderMultiPassPixelShader`, `RenderMultiPassPixelShaderBigAlpha`, `RenderMultiPassAdditive`, `RenderMultiPassAlpha` | the eight functions that draw a chunk's layers, by vertex program or texture-stage matrix, in one draw or a layer a draw | nothing itself: before and after, which chunk is drawn on which path, for `Gx.D3dDraw` |
 | `Gx.D3dDraw`, `Gx.D3d9ExDraw` | `CGxDeviceD3d::Draw(batch, count)`, `CGxDeviceD3d9Ex::Draw` (vtable slot 42); the Vulkan renderer's `draw_begin` and `draw_end` stand for them | nothing itself: before, a draw of a chunk with a scaled layer gets its texture coordinates scaled through the vertex constants or the stage matrices; after, the client's own come back |
