@@ -13,7 +13,7 @@ endif()
 wxl_add_mod(modern-adt
     SOURCES src/mod.cpp src/Options.cpp src/adt/Reader.cpp src/store/Store.cpp src/features/TextureScale.cpp
         src/features/HeightBlend.cpp src/features/ExtraLayers.cpp src/shader/Ps3.cpp src/adt/Survey.cpp
-        src/store/TileSet.cpp src/features/SplitTiles.cpp
+        src/store/TileSet.cpp src/features/SplitTiles.cpp src/store/Listfile.cpp src/features/FileNames.cpp
     MANIFEST mod.json
     TARGETS win-x86 win-x64)
 

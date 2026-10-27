@@ -21,7 +21,10 @@ namespace wxl::modern_adt
                                          split ? set->tex0.size() : size);
             area.textures = adt::ReadTextures(reader, prefer_);
             area.names.clear();
-            for (std::string_view name : reader.TextureNames()) area.names.emplace_back(name);
+            if (split) area.names = set->textureNames; // MTEX, or MDID's ids named
+            else
+                for (std::string_view name : reader.TextureNames()) area.names.emplace_back(name);
+            if (area.textures.size() < area.names.size()) area.textures.resize(area.names.size());
             area.scaled   = 0;
             for (const adt::TextureInfo& t : area.textures) area.scaled += t.scale ? 1u : 0u;
             ++reads_;

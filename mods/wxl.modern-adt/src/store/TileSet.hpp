@@ -6,7 +6,10 @@
 // <tile>_obj0.adt and <tile>_obj1.adt. Read when the root is (TerrainTileLoad), or when first
 // asked; kept for the 64 tiles read last, which is more than a client holds at once. What the
 // features share: the tile provider hands them to the runtime, the texture store and the extra
-// layers read _tex0 from here.
+// layers read _tex0 from here. A _tex0 of 8.1 and later names its textures by FileDataID (MDID):
+// their names come from the namer (a listfile), "FileDataID_<id>.blp" for one it does not know, as
+// the runtime names them. A map whose WDT lists its tiles' files by FileDataID (MAID) has a file
+// missing under its usual name read under the name the namer gives its id.
 //
 // Main thread only, as wxl.terrain calls the mod.
 
@@ -26,6 +29,8 @@ namespace wxl::modern_adt
     public:
         /// Fills a file's bytes; false when it is not there.
         using ReadFn = std::function<bool(const std::string&, std::vector<uint8_t>&)>;
+        /// The name of a FileDataID; false when unknown.
+        using NameFn = std::function<bool(uint32_t, std::string&)>;
 
         struct Files
         {
@@ -33,10 +38,18 @@ namespace wxl::modern_adt
             uint32_t             rootSize = 0;
             bool                 split = false;  ///< the root has no MCIN
             std::vector<uint8_t> tex0, obj0, obj1;
+            std::vector<std::string> textureNames; ///< _tex0's MTEX, or its MDID's ids named
             uint64_t             stamp = 0;
         };
 
-        explicit TileSet(ReadFn read) : read_(std::move(read)) {}
+        explicit TileSet(ReadFn read, NameFn name = nullptr) : read_(std::move(read)), name_(std::move(name)) {}
+
+        /// The files of tile (x, y) a WDT's MAID names (root, obj0, obj1, tex0) that were not found
+        /// under their usual names, read under the names their ids are given. @p wdt: the map's WDT.
+        void ReadMissingByIds(int32_t tile_x, int32_t tile_y, const void* wdt, uint32_t wdtSize);
+
+        /// The textures a _tex0 names (MTEX, or MDID's ids named).
+        std::vector<std::string> TextureNames(const std::vector<uint8_t>& tex0) const;
 
         /// The tile at @p path (a root ADT, @p root its bytes) was read: its other files are read.
         const Files& Loaded(std::string_view path, int32_t tile_x, int32_t tile_y, const void* root, uint32_t size);
@@ -54,6 +67,7 @@ namespace wxl::modern_adt
 
     private:
         ReadFn                    read_;
+        NameFn                    name_;
         std::map<uint32_t, Files> tiles_; ///< by tile: 64 * y + x
         uint64_t                  stamp_ = 0, reads_ = 0;
     };

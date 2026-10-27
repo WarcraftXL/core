@@ -17,12 +17,15 @@
 //                  wxl.terrain's chunk_fn.
 //   split_tiles    tiles split by file name (Cataclysm to Legion: a root without MCIN, its _tex0,
 //                  _obj0, _obj1), through wxl.terrain's tile provider: the runtime loads them
-//                  natively from the files the mod reads (store/TileSet).
+//                  natively from the files the mod reads (store/TileSet). Those of 8.1 and later,
+//                  naming textures and models by FileDataID, are named from a listfile
+//                  (features/FileNames: the map's World\Maps\<map>\listfile.csv, else the mod's).
 //
 // Main thread only, as wxl.terrain and wxl.gx call their providers.
 
 #include "Options.hpp"
 #include "features/ExtraLayers.hpp"
+#include "features/FileNames.hpp"
 #include "features/HeightBlend.hpp"
 #include "features/SplitTiles.hpp"
 #include "features/TextureScale.hpp"
@@ -36,6 +39,8 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -65,6 +70,34 @@ namespace
         return g_storage->read(wxl::Str(path), bytes.data(), size, &read) == WXL_OK && read == size;
     }
 
+    bool ReadDisk(const std::string& path, std::vector<uint8_t>& bytes)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return true;
+    }
+
+    bool WriteDisk(const std::string& path, const std::vector<uint8_t>& bytes)
+    {
+        std::error_code made;
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path(), made);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return static_cast<bool>(out);
+    }
+
+    /// The mod's folder (Mods\wxl.modern-adt); empty without one.
+    std::string ModFolder()
+    {
+        const wxl_host*         host    = wxl::Host();
+        const wxl_runtime_info* runtime = host && host->runtime ? host->runtime() : nullptr;
+        if (!runtime || runtime->struct_size < offsetof(wxl_runtime_info, mods_directory) + sizeof(wxl_str) || !runtime->mods_directory.size)
+            return {};
+        return std::string(runtime->mods_directory.data, runtime->mods_directory.size) + "\\wxl.modern-adt";
+    }
+
     class ModernAdtMod final : public wxl::Mod
     {
     public:
@@ -72,7 +105,8 @@ namespace
         {
             options_ = ReadOptions();
             for (const std::string& line : options_.problems) wxl::Log(WXL_LOG_WARN, kTag, line.c_str());
-            tiles_ = std::make_unique<wxl::modern_adt::TileSet>(&ReadFile);
+            names_ = std::make_unique<wxl::modern_adt::FileNames>(ModFolder(), &ReadFile, &ReadDisk, &WriteDisk);
+            tiles_ = std::make_unique<wxl::modern_adt::TileSet>(&ReadFile, [this](uint32_t id, std::string& out) { return names_->Name(id, out); });
             store_ = std::make_unique<wxl::modern_adt::Store>(options_.source, tiles_.get());
             scale_ = std::make_unique<wxl::modern_adt::TextureScale>(*store_);
             blend_ = std::make_unique<wxl::modern_adt::HeightBlend>(*store_, &FileExists, options_.require_wdt_flag);
@@ -83,6 +117,7 @@ namespace
                 tiles.struct_size = sizeof tiles;
                 tiles.fn          = &ModernAdtMod::OnSplitTile;
                 tiles.user        = this;
+                tiles.name_fn     = &ModernAdtMod::OnName;
                 if (g_terrain->set_tile_provider(&tiles) != WXL_OK)
                 {
                     wxl::Log(WXL_LOG_ERROR, kTag, "wxl.terrain refused the tile provider: split tiles load untextured");
@@ -165,9 +200,11 @@ namespace
             tileEvents_ = wxl::Subscription();
             if (split_)
             {
-                char line[200];
-                std::snprintf(line, sizeof line, "split_tiles: %llu tile(s) handed to the runtime, %llu without their _tex0 or _obj0",
-                              static_cast<unsigned long long>(split_->Tiles()), static_cast<unsigned long long>(split_->Missing()));
+                char line[240];
+                std::snprintf(line, sizeof line,
+                              "split_tiles: %llu tile(s) handed to the runtime, %llu without their _tex0 or _obj0; %llu FileDataID(s) named, %llu unknown",
+                              static_cast<unsigned long long>(split_->Tiles()), static_cast<unsigned long long>(split_->Missing()),
+                              static_cast<unsigned long long>(names_->Named()), static_cast<unsigned long long>(names_->Unknown()));
                 wxl::Log(WXL_LOG_INFO, kTag, line);
             }
             if (extra_ && layering_)
@@ -222,15 +259,32 @@ namespace
             const auto* tile = static_cast<const wxl_terrain_tile_args*>(args);
             if (!tile) return;
             // The tile's other files, read once for every feature.
+            self->names_->MapOf(std::string_view(tile->path.data, tile->path.size));
             const wxl::modern_adt::TileSet::Files& files =
                 self->tiles_->Loaded(std::string_view(tile->path.data, tile->path.size), tile->tile_x, tile->tile_y, tile->data, tile->size);
-            if (self->extra_) self->extra_->TileLoaded(tile->tile_x, tile->tile_y, files.tex0);
+            if (self->extra_) self->extra_->TileLoaded(tile->tile_x, tile->tile_y, files.tex0, &files.textureNames);
         }
 
         static void WXL_CALL OnSplitTile(void* user, const wxl_terrain_tile* tile, wxl_terrain_tile_files* out)
         {
             auto* self = static_cast<ModernAdtMod*>(user);
-            if (tile && out && self->split_) self->split_->Answer(*tile, *out);
+            if (!tile || !out || !self->split_) return;
+            self->names_->MapOf(std::string_view(tile->path.data, tile->path.size));
+            self->split_->Answer(*tile, *out);
+        }
+
+        static wxl_bool WXL_CALL OnName(void* user, uint32_t file_id, char* out, uint32_t capacity)
+        {
+            auto*       self = static_cast<ModernAdtMod*>(user);
+            std::string name;
+            if (!out || !capacity || !self->names_->Name(file_id, name) || name.size() >= capacity) return WXL_FALSE;
+            std::memcpy(out, name.c_str(), name.size() + 1);
+            if (!self->names_->Said().empty() && self->names_->Said() != self->said_)
+            {
+                self->said_ = self->names_->Said();
+                wxl::Log(WXL_LOG_INFO, kTag, ("listfile " + self->said_).c_str());
+            }
+            return WXL_TRUE;
         }
 
         static wxl_bool WXL_CALL OnProgram(void* user, const wxl_gx_shader_code* code, wxl_gx_shader_answer* answer)
@@ -249,8 +303,7 @@ namespace
             if (!runtime || runtime->struct_size < offsetof(wxl_runtime_info, mods_directory) + sizeof(wxl_str) ||
                 !runtime->mods_directory.size)
                 return {};
-            const std::string path =
-                std::string(runtime->mods_directory.data, runtime->mods_directory.size) + "\\wxl.modern-adt\\modern-adt.ini";
+            const std::string path = ModFolder() + "\\modern-adt.ini";
             std::ifstream     in(path, std::ios::binary);
             if (!in) return {};
             std::ostringstream text;
@@ -259,6 +312,7 @@ namespace
         }
 
         wxl::modern_adt::Options                       options_;
+        std::unique_ptr<wxl::modern_adt::FileNames>    names_;
         std::unique_ptr<wxl::modern_adt::TileSet>      tiles_;
         std::unique_ptr<wxl::modern_adt::Store>        store_;
         std::unique_ptr<wxl::modern_adt::TextureScale> scale_;
@@ -266,6 +320,7 @@ namespace
         std::unique_ptr<wxl::modern_adt::ExtraLayers>  extra_;
         std::unique_ptr<wxl::modern_adt::SplitTiles>   split_;
         wxl::Subscription                              tileEvents_;
+        std::string                                    said_; ///< the listfile line logged last
         bool                                           blending_ = false;
         bool                                           layering_ = false;
         std::vector<uint32_t>                          program_; ///< the last program answered, read by the runtime before the call returns
