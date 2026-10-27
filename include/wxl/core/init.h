@@ -233,6 +233,23 @@ typedef struct wxl_core_chunk_split
     void* refs;   ///< m_mcrfPtr: MCRD (CreateRefs is answered by the runtime for such a chunk)
 } wxl_core_chunk_split;
 
+/// One far-terrain area of a WDL (binding map_area_low_add): what CMapLowDetail::Load sets on a
+/// CMapAreaLow, offsets from the start of the WDL as the client keeps it (m_data).
+typedef struct wxl_core_area_low
+{
+    uint32_t index;        ///< 64 * row + column: its place in m_areas, as MAOF's
+    int32_t  column;       ///< m_index.x
+    int32_t  row;          ///< m_index.y
+    uint32_t heights;      ///< MARE's data: m_heights
+    uint32_t holes;        ///< MAHO's data, 0 for none: m_holes
+    uint32_t index_count;  ///< m_indexCount: 12 a cell not a hole, 3072 without MAHO
+    float    top_left[2];  ///< m_topLeft
+    float    box_min[3];   ///< m_bbox.b
+    float    box_max[3];   ///< m_bbox.t
+    float    center[3];    ///< m_sphere.c
+    float    radius;       ///< m_sphere.r
+} wxl_core_area_low;
+
 /// A program's record (binding gx_shader_record): CGxShader.
 typedef struct wxl_core_shader_record
 {

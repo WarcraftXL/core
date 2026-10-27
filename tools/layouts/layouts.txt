@@ -959,6 +959,16 @@ type CMapArea WoW/Source/WorldClient/MapArea.h CMapArea
   m_mapChunks                             game/ADT:kOffTileChunkSlots
   sizeof(m_mapChunks[0])                  game/ADT:kTileSlotStride
 
+type CMapLowDetail WoW/Source/WorldClient/MapLowDetail.h CMapLowDetail
+  sizeof                                  -
+  m_data                                  -                                            # binding map_low_detail_set: a WDL of later clients read natively
+  m_mapObjNames                           -                                            # binding map_low_detail_set
+  m_mapObjNameOffsets                     -                                            # binding map_low_detail_set
+  m_mapObjDefs                            -                                            # binding map_low_detail_set
+  m_mapObjDefCount                        -                                            # binding map_low_detail_set
+  m_areaOffsets                           -                                            # binding map_low_detail_set
+  m_areas                                 -                                            # binding map_area_low_add
+
 type CMapAreaTexture WoW/Source/WorldClient/Types.h CMapAreaTexture
   sizeof                                  game/ADT:kTexOwnerHandleStride
 

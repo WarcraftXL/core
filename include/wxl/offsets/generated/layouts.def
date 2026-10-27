@@ -12,7 +12,7 @@
 // Rows are sorted by id, then TYPE, then FIELD by offset and member, then SIZE by member, so the
 // file diffs cleanly after an upstream pull.
 //
-// 145 types, 897 field offsets, 11 member sizes.
+// 146 types, 904 field offsets, 11 member sizes.
 WXL_LAYOUT_TYPE(AuraData, "AuraData", 0x18, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_creator", 0x0, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
 WXL_LAYOUT_FIELD(AuraData, "m_spellId", 0x8, "WoW/Source/Object/ObjectClient/AuraData.h", 12)
@@ -637,6 +637,14 @@ WXL_LAYOUT_FIELD(CMapDoodadDef, "m_mat.d2", 0x110, "WoW/Source/WorldClient/MapDo
 WXL_LAYOUT_TYPE(CMapDoodadDefHash, "TSHashTable<CMapDoodadDef, HASHKEY_DWORD>", 0x28, "Engine/Source/Storm/H/stpl.h", 180)
 WXL_LAYOUT_FIELD(CMapDoodadDefHash, "m_fulllist.m_linkoffset", 0x4, "Engine/Source/Storm/H/stpl.h", 180)
 WXL_LAYOUT_FIELD(CMapDoodadDefHash, "m_fulllist.m_terminator.m_next", 0xC, "Engine/Source/Storm/H/stpl.h", 180)
+WXL_LAYOUT_TYPE(CMapLowDetail, "CMapLowDetail", 0x4028, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_data", 0x0, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_mapObjNames", 0x4, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_mapObjNameOffsets", 0x8, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_mapObjDefs", 0xC, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_mapObjDefCount", 0x10, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_areaOffsets", 0x14, "WoW/Source/WorldClient/MapLowDetail.h", 40)
+WXL_LAYOUT_FIELD(CMapLowDetail, "m_areas", 0x18, "WoW/Source/WorldClient/MapLowDetail.h", 40)
 WXL_LAYOUT_TYPE(CMapObj, "CMapObj", 0x9F8, "WoW/Source/WorldClient/MapObj.h", 55)
 WXL_LAYOUT_FIELD(CMapObj, "m_wmoName", 0x1C, "WoW/Source/WorldClient/MapObj.h", 55)
 WXL_LAYOUT_FIELD(CMapObj, "m_header", 0x120, "WoW/Source/WorldClient/MapObj.h", 55)

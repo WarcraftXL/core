@@ -286,6 +286,8 @@ add_library(wxl-core SHARED
     src/services/TerrainTiles.cpp
     src/services/SplitTile.cpp
     src/services/ModelGate.cpp
+    src/services/TerrainLowDetail.cpp
+    src/services/WdlRead.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -354,6 +356,8 @@ add_executable(wxl-core-seam-harness
     src/services/TerrainTiles.cpp
     src/services/SplitTile.cpp
     src/services/ModelGate.cpp
+    src/services/TerrainLowDetail.cpp
+    src/services/WdlRead.cpp
     src/services/DrawService.cpp
     src/services/AnimationService.cpp
     src/services/NetService.cpp
@@ -461,8 +465,9 @@ add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)
 # A split set is also indexed as the runtime does (src/services/SplitTile.cpp) from the files the
 # mod's TileSet reads.
 add_executable(wxl-core-modern-adt-corpus "${WXL_MODERN_ADT_DIR}/tests/corpus_tool.cpp" "${WXL_MODERN_ADT_DIR}/src/adt/Reader.cpp"
-    "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp" "${WXL_MODERN_ADT_DIR}/src/store/TileSet.cpp" src/services/SplitTile.cpp)
-target_include_directories(wxl-core-modern-adt-corpus PRIVATE "${WXL_MODERN_ADT_DIR}/src" src)
+    "${WXL_MODERN_ADT_DIR}/src/adt/Survey.cpp" "${WXL_MODERN_ADT_DIR}/src/store/TileSet.cpp" "${WXL_MODERN_ADT_DIR}/src/store/Listfile.cpp"
+    src/services/SplitTile.cpp src/services/WdlRead.cpp)
+target_include_directories(wxl-core-modern-adt-corpus PRIVATE "${WXL_MODERN_ADT_DIR}/src" src include "${WXL_SDK_DIR}/include")
 target_compile_features(wxl-core-modern-adt-corpus PRIVATE cxx_std_20)
 set_tests_properties(vk PROPERTIES SKIP_RETURN_CODE 77)
 

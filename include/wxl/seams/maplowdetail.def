@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The MapLowDetail domain: seams on CMapLowDetail, the map's far terrain (its WDL).
+
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including maplowdetail.def"
+#endif
+
+// Reads the map's WDL (<map path>\<map name>.wdl) whole and builds the far terrain from it: the
+// map objects of MWMO, MWID and MODF when they follow MVER, then MAOF taken to follow at once
+// (its 4096 offsets of MARE, a MAHO after each) with no check of its id. A missing file loads
+// nothing (`ret 8` at 0x007CC361). Called by CMap::Load as the map loads. __thiscall, two
+// dwords (path, name), `ret 8`. Gate: a WDL of later clients (MVER, then MLDD, MLDX, MLMD, MLMX,
+// MSSN, ... before MAOF; MAOE between MARE and MAHO), which the client would read MLDD's bytes
+// as MAOF's offsets from, is taken: the runtime finds MAOF by its id, and the client's own areas
+// are made from its MAREs and MAHOs (CMap::AllocAreaLow, the fields its loop sets); its map
+// objects (MLMD/MLMX, by FileDataID) are left out. A WDL laid out as the client reads it is not taken.
+WXL_SEAM_GATE(MapLowDetail, Load, "CMapLowDetail::Load", void, thiscall, (void* self, const char* map_path, const char* map_name))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

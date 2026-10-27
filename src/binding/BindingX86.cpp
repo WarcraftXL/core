@@ -1275,6 +1275,52 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    void* map_low_detail_set(void* detail, const void* bytes, uint32_t size, uint32_t area_offsets)
+    {
+        if (!IsClient() || !OnMainThread() || !detail || !bytes || !size || area_offsets >= size) return nullptr;
+        // SMemAlloc(size, file, line, flags): __stdcall, four dwords, `ret 0x10` (0x0076E597).
+        using Alloc = void*(__stdcall*)(uint32_t, const char*, int32_t, uint32_t);
+        char* data = static_cast<char*>(reinterpret_cast<Alloc>(WXL_SITE("SMemAlloc", 0))(size, "WarcraftXL", 0, 0));
+        if (!data) return nullptr;
+        std::memcpy(data, bytes, size);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_data"), data);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjNames"), static_cast<char*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjNameOffsets"), static_cast<uint32_t*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjDefs"), static_cast<void*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjDefCount"), uint32_t{0});
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_areaOffsets"), reinterpret_cast<uint32_t*>(data + area_offsets));
+        return data;
+    }
+
+    wxl_bool map_area_low_add(void* detail, const wxl_core_area_low* a)
+    {
+        if (!IsClient() || !OnMainThread() || !detail || !a || a->index >= 4096) return WXL_FALSE;
+        char* data = Read<char*>(detail, WXL_FIELD("CMapLowDetail", "m_data"));
+        if (!data) return WXL_FALSE;
+        // CMap::AllocAreaLow(): cdecl, nothing, a bare `ret` (0x007C0ABF); null when the heap is full.
+        void* area = x86::CallFree<void*>(WXL_SITE("CMap::AllocAreaLow", 0));
+        if (!area) return WXL_FALSE;
+        Put(area, WXL_FIELD("CMapAreaLow", "m_heights"), reinterpret_cast<int16_t*>(data + a->heights));
+        Put(area, WXL_FIELD("CMapAreaLow", "m_holes"), a->holes ? reinterpret_cast<uint16_t*>(data + a->holes) : nullptr);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_indexCount"), a->index_count);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_index.x"), a->column);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_index.y"), a->row);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_topLeft.x"), a->top_left[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_topLeft.y"), a->top_left[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.x"), a->box_min[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.y"), a->box_min[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.z"), a->box_min[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.x"), a->box_max[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.y"), a->box_max[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.z"), a->box_max[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.x"), a->center[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.y"), a->center[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.z"), a->center[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.r"), a->radius);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_areas") + sizeof(void*) * a->index, area);
+        return WXL_TRUE;
+    }
+
     wxl_bool map_chunk_parts(const void* chunk, wxl_core_map_chunk* out)
     {
         if (!IsClient() || !chunk || !out) return WXL_FALSE;

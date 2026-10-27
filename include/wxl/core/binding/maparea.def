@@ -28,6 +28,16 @@ WXL_BINDING(map_area_split_set, wxl_bool, (void* area, const wxl_core_area_split
 // zero). False for a null area.
 WXL_BINDING(map_area_placements, wxl_bool, (const void* area, wxl_core_area_split* out), (area, out), WXL_FALSE)
 
+// The map's far terrain read from a WDL of later clients (CMapLowDetail): the bytes copied into a
+// block of the client's own (SMemAlloc, which CMapLowDetail::Unload frees), m_data set to it,
+// m_areaOffsets to its MAOF data at `area_offsets`, no map objects. Answers the block, null for
+// none. Main thread only.
+WXL_BINDING(map_low_detail_set, void*, (void* detail, const void* bytes, uint32_t size, uint32_t area_offsets), (detail, bytes, size, area_offsets), 0)
+
+// One far-terrain area: CMap::AllocAreaLow, its fields set as CMapLowDetail::Load sets them, and
+// put in m_areas. False when the client's heap has no room (the area is left out).
+WXL_BINDING(map_area_low_add, wxl_bool, (void* detail, const wxl_core_area_low* area), (detail, area), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive
