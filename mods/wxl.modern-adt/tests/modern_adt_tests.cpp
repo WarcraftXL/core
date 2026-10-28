@@ -3,7 +3,7 @@
 //
 // wxl.modern-adt's reading layer, store, texture scale and options, on ADTs made up byte by byte:
 // a root ADT with MVER, MHDR, MTEX, MTXF (its bits 4 to 7) and a trailing MTXP no MHDR slot points
-// to, as WorldGen and retail write them; a stock one (MTXF bit 0 only); a file cut short. The
+// to, as map tools and retail write them; a stock one (MTXF bit 0 only); a file cut short. The
 // height blend: its answers (a retail MTXP's numbers, from arakkoadungeon_26_30_tex0.adt), and the
 // rewritten pixel program run by a small ps_3_0 interpreter against the blend's formula worked out
 // apart: the Direct3D 9 path's CPU reference (the Vulkan renderer's is held on lavapipe). Tiles
@@ -794,7 +794,7 @@ namespace
         std::vector<std::string> read;
         Store       store;
         HeightBlend blend(store, [](const std::string& n) { return n.find("e_h") != std::string::npos; });
-        // The map's WDT: MPHD flags height texturing and big alpha, as WorldGen writes it.
+        // The map's WDT: MPHD flags height texturing and big alpha, as map tools write it.
         Adt wdt;
         wdt.Chunk(adt::kMVER, Words({18}));
         wdt.Chunk(adt::kMPHD, Words({0x84, 0, 0, 0, 0, 0, 0, 0}));
@@ -966,28 +966,28 @@ namespace
               "a program that both lerps and sums its alphas: left as it is");
     }
 
-    /// MTEX, MTXP and chunk (14, 4) of DawnlightWorld_38_19.adt as WorldGen wrote it: five layers in
-    /// the root, no _tex0 beside it, uncompressed 4096-byte alpha maps (the map's WDT says 0x84).
-    const uint8_t kDawnlightRoot[] = {
+    /// A tool-written root ADT chunk with five layers: MTEX, MTXP and chunk (14, 4) of its tile, five
+    /// layers in the root, no _tex0 beside it, uncompressed 4096-byte alpha maps (the map's WDT says 0x84).
+    const uint8_t kFiveLayerRoot[] = {
 #include "modern_adt_root_chunk.inc"
     };
 
     void RootExtraCases()
     {
-        const uint32_t mtexSize = kDawnlightRoot[4] | kDawnlightRoot[5] << 8 | kDawnlightRoot[6] << 16 | kDawnlightRoot[7] << 24;
+        const uint32_t mtexSize = kFiveLayerRoot[4] | kFiveLayerRoot[5] << 8 | kFiveLayerRoot[6] << 16 | kFiveLayerRoot[7] << 24;
         const size_t   mtxpAt = 8 + mtexSize;
-        const uint32_t mtxpSize = kDawnlightRoot[mtxpAt + 4] | kDawnlightRoot[mtxpAt + 5] << 8 | kDawnlightRoot[mtxpAt + 6] << 16 |
-                                  kDawnlightRoot[mtxpAt + 7] << 24;
+        const uint32_t mtxpSize = kFiveLayerRoot[mtxpAt + 4] | kFiveLayerRoot[mtxpAt + 5] << 8 | kFiveLayerRoot[mtxpAt + 6] << 16 |
+                                  kFiveLayerRoot[mtxpAt + 7] << 24;
         const size_t   mcnkAt = mtxpAt + 8 + mtxpSize;
         // The root: MVER, MHDR (MTEX's slot), MTEX, MTXP, chunks 0 to 77 empty, then the real chunk 78.
         Adt root;
         root.Chunk(adt::kMVER, Words({18}));
         const size_t mhdr = root.Chunk(adt::kMHDR, std::vector<uint8_t>(64, 0));
         const size_t mtex = root.bytes.size();
-        root.bytes.insert(root.bytes.end(), kDawnlightRoot, kDawnlightRoot + mcnkAt);
+        root.bytes.insert(root.bytes.end(), kFiveLayerRoot, kFiveLayerRoot + mcnkAt);
         for (int c = 0; c < 78; ++c) root.Chunk(adt::kMCNK, std::vector<uint8_t>(128, 0));
         const size_t real = root.bytes.size();
-        root.bytes.insert(root.bytes.end(), kDawnlightRoot + mcnkAt, kDawnlightRoot + sizeof kDawnlightRoot);
+        root.bytes.insert(root.bytes.end(), kFiveLayerRoot + mcnkAt, kFiveLayerRoot + sizeof kFiveLayerRoot);
         const uint32_t v = static_cast<uint32_t>(mtex - (mhdr + 8));
         std::memcpy(&root.bytes[mhdr + 8 + adt::kSlotMtex], &v, 4);
         // The runtime has cut the client's count to 4; MCLY still holds the five.
@@ -997,14 +997,14 @@ namespace
         adt::SplitChunk chunk;
         Check(named == 5 && adt::ReadRootChunk(adt::Reader(root.bytes.data(), root.bytes.size()), 78, chunk) && chunk.layers.size() == 5 &&
                   chunk.mcalSize >= 4 * 4096,
-              "a WorldGen root chunk of five layers: MCLY read by its own size, past the cut count, with its MCAL");
+              "a tool-written root chunk of five layers: MCLY read by its own size, past the cut count, with its MCAL");
         Adt wdt;
         wdt.Chunk(adt::kMVER, Words({18}));
         wdt.Chunk(adt::kMPHD, Words({0x84, 0, 0, 0, 0, 0, 0, 0}));
         Store       store;
         HeightBlend blend(store, [](const std::string&) { return true; });
         ExtraLayers extra(store, &blend, [](const std::string&, std::vector<uint8_t>&) { return false; });
-        extra.TileLoaded("World\\Maps\\DawnlightWorld\\DawnlightWorld_38_19.adt", 38, 19);
+        extra.TileLoaded("World\\Maps\\Test\\Test_38_19.adt", 38, 19);
         wxl_terrain_chunk info{};
         info.struct_size = sizeof info;
         info.tile_x = 38, info.tile_y = 19;
@@ -1024,7 +1024,7 @@ namespace
         for (uint32_t t = 0; same && t < 4096; ++t) same = out.alpha[t * 4] == chunk.mcal[chunk.layers[4].offset + t] && out.alpha[t * 4 + 1] == 0;
         Check(out.count == 1 && name == out.layer[0].texture && extra.FromRoot() == 1 && name.find("grass07") != std::string::npos,
               "no _tex0 beside it: layer 4 answered from the root itself, its texture from the root's MTEX");
-        Check(same, "its alpha map the root's MCAL as WorldGen wrote it, 4096 bytes (MPHD 0x84)");
+        Check(same, "its alpha map the root's MCAL as the tool wrote it, 4096 bytes (MPHD 0x84)");
         Check(out.layer[0].extra_texture && out.layer[0].params[2] == 1.0f, "its height as height_blend gives it on a map flagged 0x80");
     }
 

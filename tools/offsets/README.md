@@ -65,7 +65,7 @@ tagged address must be padding, or decode as a chain of whole padded functions t
 the successor. The summary reports the three outcomes; a chain that stops right at a decoded
 end would mean the sweep cut a function (none does today).
 
-The image is `client/game/base/Wow.exe`, found through `--image`, then `$DAWNLIGHT_ROOT`, then
+The image is `client/game/base/Wow.exe`, found through `--image`, then `$WXL_CLIENT_ROOT`, then
 the first ancestor directory of the tool that contains it. Its PE section headers give the
 section ranges; the summary lists them with how many addresses fall in each. **Without the
 image** the tool still runs: every function address is treated as one code section, the bound

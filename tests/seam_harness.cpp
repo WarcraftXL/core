@@ -6068,7 +6068,7 @@ namespace
         g_vm.stack.clear();
 #if defined(_MSC_VER)
         {
-            // As Dawnlight's ScriptVmReady handler did at a /reload: the chunk runs from a handler
+            // As a mod's ScriptVmReady handler may at a /reload: the chunk runs from a handler
             // the host guards, and calls GetBindingKey before the client has loaded the bindings.
             wxl_result ran = WXL_OK;
             const auto handler = [](void* context)
@@ -10421,7 +10421,7 @@ namespace
         const wxl_subscription realmSub = g_host->Events().Subscribe(WXL_EV_GlueRealm, &OnRealm, &realms, 0);
         Body realmList;
         realmList.U16(2)
-            .U8(1).U8(0).U8(0x4).Str("Dawnlight").Str("127.0.0.1:8085").F32(1.5f).U8(3).U8(2).U8(1).U8(3).U8(3).U8(5).U16(12340)
+            .U8(1).U8(0).U8(0x4).Str("Test Realm").Str("127.0.0.1:8085").F32(1.5f).U8(3).U8(2).U8(1).U8(3).U8(3).U8(5).U16(12340)
             .U8(0).U8(1).U8(0x2).Str("Old").Str("10.0.0.1:8085").F32(0.0f).U8(0).U8(1).U8(2);
         store = realmList.Store();
         FakeLogin grunt;
@@ -10439,7 +10439,7 @@ namespace
                       first.version_major == 3 && first.version_build == 12340,
                   "the first with its type, flags, population, characters, category, id and version");
             Check(second.index == 1 && second.locked == WXL_TRUE && second.realm_id == 2 && second.version_major == 0 &&
-                      realms.strings.size() == 4 && realms.strings[0] == "Dawnlight" &&
+                      realms.strings.size() == 4 && realms.strings[0] == "Test Realm" &&
                       realms.strings[1] == "127.0.0.1:8085" && realms.strings[2] == "Old",
                   "the second locked and without a version, and the names and addresses");
         }

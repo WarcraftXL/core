@@ -452,11 +452,11 @@ add_executable(wxl-core-modern-adt-tests "${WXL_MODERN_ADT_DIR}/tests/modern_adt
     "${WXL_MODERN_ADT_DIR}/src/store/TileSet.cpp" "${WXL_MODERN_ADT_DIR}/src/features/SplitTiles.cpp"
     "${WXL_MODERN_ADT_DIR}/src/store/Listfile.cpp" "${WXL_MODERN_ADT_DIR}/src/features/FileNames.cpp")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${WXL_MODERN_ADT_DIR}/src" "${WXL_SDK_DIR}/include")
-# A chunk of a real DawnlightWorld root ADT (WorldGen's, five layers), compiled into the tests.
-file(READ "${WXL_MODERN_ADT_DIR}/tests/data/DawnlightWorld_38_19_chunk_14_4.bin" _root_chunk HEX)
+# A tool-written root ADT chunk with five layers, compiled into the tests.
+file(READ "${WXL_MODERN_ADT_DIR}/tests/data/root_5_layers_chunk.bin" _root_chunk HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _root_chunk "${_root_chunk}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/modern_adt_root_chunk.inc" "${_root_chunk}\n")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WXL_MODERN_ADT_DIR}/tests/data/DawnlightWorld_38_19_chunk_14_4.bin")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WXL_MODERN_ADT_DIR}/tests/data/root_5_layers_chunk.bin")
 target_include_directories(wxl-core-modern-adt-tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_features(wxl-core-modern-adt-tests PRIVATE cxx_std_20)
 add_test(NAME modern-adt COMMAND wxl-core-modern-adt-tests)

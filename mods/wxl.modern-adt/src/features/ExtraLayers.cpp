@@ -77,7 +77,7 @@ namespace wxl::modern_adt
         const uint32_t index = static_cast<uint32_t>(chunk.chunk_x % 16) + 16u * static_cast<uint32_t>(chunk.chunk_y % 16);
         const Area&    area  = store_.AreaOf(chunk.tile_x, chunk.tile_y, chunk.file, chunk.file_size);
         // The tile's split file when it has one; else the root itself, whose MCNK may name more
-        // layers than the client keeps (Noggit-style tools and WorldGen write them there).
+        // layers than the client keeps (Noggit-style map tools write them there).
         const adt::SplitChunk*               c        = nullptr;
         const std::vector<std::string>*      names    = nullptr;
         const std::vector<adt::TextureInfo>* textures = nullptr;

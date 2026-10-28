@@ -9,8 +9,8 @@
 // MTXF), heights (as height_blend gives them, layers 4 and 5) and alpha maps, decoded from MCAL.
 //
 // The split file is read when the tile is (TerrainTileLoad). A tile without one has its layers past
-// four read from the root ADT itself, whose MCNK may name up to 8 (as Noggit-style tools and
-// WorldGen write them; the runtime cuts the client's count to 4, MCLY keeps them all). A chunk of
+// four read from the root ADT itself, whose MCNK may name up to 8 (as Noggit-style map tools write
+// them; the runtime cuts the client's count to 4, MCLY keeps them all). A chunk of
 // four or fewer layers, or a split chunk whose first four differ from the root's, is drawn as the
 // client draws it.
 
