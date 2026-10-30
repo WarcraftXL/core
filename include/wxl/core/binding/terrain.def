@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Terrain domain of the client binding: the map's ground as wxl.terrain reads and reshapes
+// it. A chunk is a CMapChunk; its heights and normals are the tile file's own bytes, which every
+// reader of the ground takes live (the drawing's vertex fill, CMapChunk::Intersect for the
+// collision facets and the ray tests, CMap::GetHeightTerrain). Main thread only.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including terrain.def"
+#endif
+
+// Whether the loaded map has terrain: in the world, and not CMap::bDungeon (a map made of map
+// objects alone, where CMap::GetFacets and the height query skip the ground).
+WXL_BINDING(terrain_present, wxl_bool, (void), (), WXL_FALSE)
+
+// The loaded chunk at a column and row of the map, as CMap::GetChunkAtPosition finds it:
+// CMap::m_areaTable[tile], then the tile's m_mapChunks[chunk]; null when the tile is not loaded,
+// still being read (m_asyncObject) or the chunk not built.
+WXL_BINDING(terrain_chunk, void*, (int32_t chunk_x, int32_t chunk_y), (chunk_x, chunk_y), 0)
+
+// A live chunk's place, heights, normals, base and holes (wxl_core_terrain_chunk). Refuses
+// anything that is not one: memory not readable for a chunk, or a chunk whose place on the map
+// does not lead back to it through its tile's slot (one already taken out of it, a stray value).
+WXL_BINDING(terrain_chunk_view, wxl_bool, (void* chunk, wxl_core_terrain_chunk* out), (chunk, out), WXL_FALSE)
+
+// A chunk's place on the map (m_cOffset), for one being freed: its tile has already cleared its
+// slot (CMapArea::Purge, PurgeChunks and Update clear it before CMapChunk::Purge), so only the
+// memory is checked. Nothing else of it is read.
+WXL_BINDING(terrain_chunk_place, wxl_bool, (const void* chunk, int32_t* chunk_x, int32_t* chunk_y), (chunk, chunk_x, chunk_y), WXL_FALSE)
+
+// What depends on a chunk's heights, made again with the client's own functions:
+// CMapChunk::CreateBounds (m_bbox, m_sphere, m_bbox2: culling); its render chunk's bounds by
+// CMapRenderChunk::AddBatch over the same chunks and position; the render chunk's pooled vertex
+// buffer marked empty (CGxBuf::m_hasData 0), which RenderPrepBufs fills again from the heights
+// and normals at the next draw, through the device's own lock and unlock (Direct3D 9 or the
+// Vulkan renderer); and, with `doodads`, its ground clutter freed (CDetailDoodad::FreeInst),
+// which CMapChunk::RenderPrep grows again on the new ground. Never while the world is drawn.
+WXL_BINDING(terrain_chunk_rebuild, void, (void* chunk, wxl_bool doodads), (chunk, doodads), (void)0)
+
+// Empties the movement's facet query (the static s_queryBox of Movement.cpp): its facets are
+// copies of the ground's triangles, reused while a move stays inside the box, so the next move
+// queries the ground again.
+WXL_BINDING(terrain_forget_collision, void, (void), (), (void)0)
+
+// Starts the active mover's fall, as the client does when the transport it stands on goes:
+// CMovement_C::OnFallLocal(now) on the unit's movement, which queues a fall the movement then
+// plays and lands.
+WXL_BINDING(unit_fall_local, void, (const void* unit), (unit), (void)0)
+
+// A terrain render chunk's layers (CMapRenderChunk): their count, its render flags, each layer's
+// MCLY flags and MTEX index, and the address of its batch, which every draw of its layers hands
+// the device. False for a null chunk or more than 4 layers.
+WXL_BINDING(terrain_render_chunk, wxl_bool, (const void* chunk, wxl_core_render_chunk* out), (chunk, out), WXL_FALSE)
+
+// The map's WDT as the client loaded it: its name, its MPHD flags (CMap::wdtFilename,
+// CMap::header.m_flags) and its MAIN (CMap::m_areaInfo), which the caller may change before the
+// map's tiles load, and the map's folder and name. False without a client.
+WXL_BINDING(map_wdt, wxl_bool, (wxl_core_wdt* out), (out), WXL_FALSE)
+
+// The client checks its terrain programs against the map's flags again (CMap::ValidateShaders),
+// after a change of them.
+WXL_BINDING(map_validate_shaders, void, (void), (), (void)0)
+
+// The ADT an area of the map was read from (CMapArea): its tile and its file's bytes as the client
+// read them (m_fileBuffer, m_fileSize). False for a null area or one without its file.
+WXL_BINDING(terrain_area_file, wxl_bool, (const void* area, wxl_core_area_file* out), (area, out), WXL_FALSE)
+
+// The terrain's vertex program constants as the client fills them before each chunk
+// (CMapRenderChunk::s_vertexShaderConsts): 37 rows of 4 floats, c0 to c36; c13 + k each layer's
+// animation offset, c18 + k its texture scale. Null without a client.
+WXL_BINDING(terrain_vertex_constants, const float*, (void), (), 0)
+
+// Where a chunk being made reads from: its MCNK (m_chunkInfoBeginPtr), its header (m_header) and
+// its place in its tile (m_aIndex). False for a null chunk.
+WXL_BINDING(map_chunk_parts, wxl_bool, (const void* chunk, wxl_core_map_chunk* out), (chunk, out), WXL_FALSE)
+
+// Points a chunk of a split tile at its _tex0's and _obj0's parts: m_layers, m_additionalShadowmap,
+// m_shadowMap, m_mcrfPtr. False for a null chunk.
+WXL_BINDING(map_chunk_split_set, wxl_bool, (void* chunk, const wxl_core_chunk_split* split), (chunk, split), WXL_FALSE)
+
+// Places a chunk's map objects and doodads with the client's own CMapChunk::CreateRefs(area,
+// refs, doodads, map objects): the first `doodads` of `refs` index MDDF, the next `map_objs` MODF.
+// Main thread only, while the chunk is made.
+WXL_BINDING(map_chunk_create_refs, void, (void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t map_objs), (chunk, area, refs, doodads, map_objs), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -1,0 +1,3 @@
+volk vulkan-sdk-1.4.357.0 (https://github.com/zeux/volk, commit 776893306c5d3b22b6185b5d4a258b81d94572bf), MIT (LICENSE.md).
+Kept: volk.h and volk.c, unmodified. The Vulkan loader found at run time (vulkan-1.dll, libvulkan.so.1) and its
+entry points loaded per device; built by core's CMakeLists.txt against deps/vulkan-headers of the same SDK version.

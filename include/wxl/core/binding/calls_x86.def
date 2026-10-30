@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 WarcraftXL
+//
+// The client functions the x86 binding calls for wxl.m2's models of the world and its bone
+// watchers, for the object reads of what the player can do with a unit or a game object, for
+// the textures wxl.selectioncircle draws the game's circles with, for wxl.cvar's variables, for
+// the interface's signature the FrameXML seam asks about, for the scene's models the animate gates
+// animate on the runtime's threads, for the ground wxl.terrain reshapes
+// and the fall it starts, for the units' animations wxl.animation plays and for the messages wxl.net sends (src/binding/BindingX86.cpp), and the device's own work the Vulkan
+// renderer's adapter of the stock client keeps (src/gx/x86/), as data: one row per function, with
+// the convention and the parameters BindingX86 calls it with. check_conventions.py holds every row against Wow.exe
+// as it holds the seams; BindingX86 resolves each symbol when it compiles.
+//
+//   WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params)
+//
+// `symbol` is written as a seam's: "name", or "name@0x..." for a name several functions carry.
+// A thiscall row names `this` first; a member that answers a struct by value takes the hidden
+// pointer it writes it to as its first stack parameter.
+
+#ifndef WXL_BINDING_CALL_X86
+#error "define WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params) before including calls_x86.def"
+#endif
+
+WXL_BINDING_CALL_X86(M2Call, SetLoadedCallback, "CM2Model::SetLoadedCallback", void, thiscall, (void* self, void* callback, void* arg))
+WXL_BINDING_CALL_X86(M2Call, HasSequence, "CM2Model::HasSequence@0x00825EE0", int32_t, thiscall, (void* self, uint32_t id))
+WXL_BINDING_CALL_X86(M2Call, SetBoneSequence, "CM2Model::SetBoneSequence", void, thiscall, (void* self, uint32_t bone, uint32_t sequence, uint32_t variation, uint32_t time, float speed, int32_t blend, int32_t primary))
+WXL_BINDING_CALL_X86(M2Call, GetSequenceInfo, "CM2Model::GetSequenceInfo", void, thiscall, (void* self, uint32_t id, uint32_t variation, void* info))
+WXL_BINDING_CALL_X86(M2Call, SetAnimating, "CM2Model::SetAnimating", void, thiscall, (void* self, int32_t animating))
+WXL_BINDING_CALL_X86(M2Call, AnimateMT, "CM2Model::AnimateMT", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+WXL_BINDING_CALL_X86(M2Call, AnimateMTSimple, "CM2Model::AnimateMTSimple", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+WXL_BINDING_CALL_X86(M2Call, IsLoaded, "CM2Model::IsLoaded", uint32_t, thiscall, (void* self, int32_t wait, int32_t recursive))
+WXL_BINDING_CALL_X86(M2Call, GetBoundingBox, "CM2Model::GetBoundingBox", void*, thiscall, (void* self, void* out))
+WXL_BINDING_CALL_X86(M2Call, GetBoundingSphere, "CM2Model::GetBoundingSphere", void*, thiscall, (void* self, void* out))
+WXL_BINDING_CALL_X86(M2Call, SetEmittersEnabled, "CM2Model::SetEmittersEnabled", void, thiscall, (void* self, int32_t enabled))
+WXL_BINDING_CALL_X86(M2Call, SetRibbonsEnabled, "CM2Model::SetRibbonsEnabled", void, thiscall, (void* self, uint32_t enabled))
+WXL_BINDING_CALL_X86(M2Call, HasAttachment, "CM2Model::HasAttachment", int32_t, thiscall, (void* self, uint32_t id))
+WXL_BINDING_CALL_X86(M2Call, GetAttachmentPosition, "CM2Model::GetAttachmentPosition", void*, thiscall, (void* self, void* out, uint32_t id))
+WXL_BINDING_CALL_X86(M2Call, RotateAroundX, "C44Matrix::RotateAroundX", void, thiscall, (void* self, float angle))
+WXL_BINDING_CALL_X86(M2Call, RotateAroundY, "C44Matrix::RotateAroundY", void, thiscall, (void* self, float angle))
+WXL_BINDING_CALL_X86(M2Call, RotateAroundZ, "C44Matrix::RotateAroundZ", void, thiscall, (void* self, float angle))
+WXL_BINDING_CALL_X86(M2Call, Scale, "C44Matrix::Scale@0x004C1BF0", void, thiscall, (void* self, float scale))
+WXL_BINDING_CALL_X86(M2Call, ObjectCreateStatic, "CMap::ObjectCreateStatic", void*, cdecl, (void* model, const void* matrix, void* func, void* func_param, uintptr_t param32))
+WXL_BINDING_CALL_X86(M2Call, ObjectUpdate, "CMap::ObjectUpdate", void, cdecl, (void* entity, void* matrix, void* box, void* sphere, void* light, int32_t moved, uint32_t flags))
+WXL_BINDING_CALL_X86(M2Call, ObjectDestroy, "World::ObjectDestroy", void, cdecl, (void* entity))
+WXL_BINDING_CALL_X86(ObjectCall, CanAttack, "CGUnit_C::CanAttack", bool, thiscall, (const void* self, const void* target))
+WXL_BINDING_CALL_X86(ObjectCall, CanInteractNow, "CGUnit_C::CanInteractNow", bool, thiscall, (const void* self, const void* target))
+WXL_BINDING_CALL_X86(ObjectCall, CanHighlight, "CGGameObject_C::CanHighlight", bool, thiscall, (const void* self))
+WXL_BINDING_CALL_X86(TextureCall, CreateTexture, "CreateTexture", void*, cdecl, (const char* path, void* status))
+WXL_BINDING_CALL_X86(TextureCall, GetGlobalStatusObj, "GetGlobalStatusObj", void*, cdecl, ())
+WXL_BINDING_CALL_X86(TextureCall, HandleClose, "HandleClose", void, cdecl, (void* handle))
+WXL_BINDING_CALL_X86(GxCall, ShaderConstantsSet, "GxShaderConstantsSet", void, cdecl, (uint32_t target, uint32_t index, const float* constants, uint32_t count))
+WXL_BINDING_CALL_X86(GxCall, XformSet, "GxXformSet", void, cdecl, (uint32_t xf, const void* matrix))
+WXL_BINDING_CALL_X86(GxCall, RsSetPointer, "GxRsSet@0x00408240", void, cdecl, (uint32_t which, void* value))
+WXL_BINDING_CALL_X86(GxCall, RsSetInt, "GxRsSet@0x00408BF0", void, cdecl, (uint32_t which, int32_t value))
+WXL_BINDING_CALL_X86(GxCall, TexSetWrap, "GxTexSetWrap", void, cdecl, (void* texture, uint32_t wrap_u, uint32_t wrap_v))
+WXL_BINDING_CALL_X86(CVarCall, Lookup, "CVar::Lookup", void*, cdecl, (const char* name))
+WXL_BINDING_CALL_X86(CVarCall, Register, "CVar::Register", void*, cdecl, (const char* name, const char* help, uint32_t flags, const char* value, void* callback, uint32_t category, uint8_t set_command, void* arg, uint8_t unk))
+WXL_BINDING_CALL_X86(CVarCall, Set, "CVar::Set@0x007668C0", bool, thiscall, (void* self, const char* value, uint8_t set_value, uint8_t set_reset, uint8_t set_default, uint8_t set_needs_save))
+WXL_BINDING_CALL_X86(InterfaceCall, CheckSignature, "FrameXML_CheckSignature", int32_t, cdecl, (const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest))
+WXL_BINDING_CALL_X86(InterfaceCall, MD5Init, "MD5Init", void, cdecl, (void* context))
+WXL_BINDING_CALL_X86(InterfaceCall, ProcessFileForMakeSign, "ProcessFileForMakeSign", int32_t, cdecl, (void* context, const char* file, const char* base))
+WXL_BINDING_CALL_X86(InterfaceCall, MD5Update, "MD5Update", void, cdecl, (void* context, const uint8_t* data, uint32_t size))
+WXL_BINDING_CALL_X86(InterfaceCall, MD5Final, "MD5Final", void, cdecl, (uint8_t* digest, void* context))
+WXL_BINDING_CALL_X86(TerrainCall, ValidateShaders, "CMap::ValidateShaders", void, cdecl, ())
+WXL_BINDING_CALL_X86(TerrainCall, CreateBounds, "CMapChunk::CreateBounds", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(TerrainCall, AddBatch, "CMapRenderChunk::AddBatch", void, thiscall, (void* self, void* chunk1, void* chunk2, const wxl_vec3* position, uint8_t flags))
+WXL_BINDING_CALL_X86(TerrainCall, FreeInst, "CDetailDoodad::FreeInst", void, cdecl, (void* inst))
+WXL_BINDING_CALL_X86(TerrainCall, OnFallLocal, "CMovement_C::OnFallLocal", void, thiscall, (void* self, uint32_t event_time))
+WXL_BINDING_CALL_X86(TerrainCall, LoadTextures, "CMapArea::LoadTextures", void, thiscall, (void* self, char* names, uint32_t size))
+WXL_BINDING_CALL_X86(TerrainCall, SMemAlloc, "SMemAlloc", void*, stdcall, (uint32_t size, const char* file, int32_t line, uint32_t flags))
+WXL_BINDING_CALL_X86(TerrainCall, AllocAreaLow, "CMap::AllocAreaLow", void*, cdecl, ())
+WXL_BINDING_CALL_X86(TerrainCall, CreateRefs, "CMapChunk::CreateRefs", void, thiscall, (void* self, void* area, uint32_t* refs, uint32_t doodads, uint32_t map_objs))
+WXL_BINDING_CALL_X86(AnimCall, PlayBaseAnimation, "CGUnit_C::PlayBaseAnimation", void, thiscall, (void* self, uint32_t anim, int32_t flags))
+WXL_BINDING_CALL_X86(AnimCall, UpdateBaseAnimation, "CGUnit_C::UpdateBaseAnimation", void, thiscall, (void* self, uint32_t anim_flags, int32_t mask))
+WXL_BINDING_CALL_X86(AnimCall, GetCurrentTorsoAnimId, "CGUnit_C::GetCurrentTorsoAnimId", uint32_t, thiscall, (const void* self))
+WXL_BINDING_CALL_X86(AnimCall, SetKeyBoneSequenceSpeed, "CGUnit_C::SetKeyBoneSequenceSpeed", void, thiscall, (void* self, void* model, uint32_t bone, float speed, int32_t force))
+WXL_BINDING_CALL_X86(AnimCall, GetBoneSequenceId, "CM2Model::GetBoneSequenceId", uint32_t, thiscall, (void* self, uint32_t bone))
+
+WXL_BINDING_CALL_X86(GxCall, DeviceCreate, "CGxDevice::DeviceCreate@0x00682CB0", int32_t, thiscall, (void* self, void* window_proc, const void* format))
+WXL_BINDING_CALL_X86(GxCall, DeviceDestroy, "CGxDevice::DeviceDestroy", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetFormat, "CGxDevice::DeviceSetFormat", int32_t, thiscall, (void* self, const void* format))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetBaseMipLevel, "CGxDevice::DeviceSetBaseMipLevel", void, thiscall, (void* self, uint32_t level))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetGamma, "CGxDevice::DeviceSetGamma@0x00684170", void, thiscall, (void* self, float gamma))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetGammaRamp, "CGxDevice::DeviceSetGamma@0x00684190", void, thiscall, (void* self, const void* ramp))
+WXL_BINDING_CALL_X86(GxCall, DeviceOverride, "CGxDevice::DeviceOverride", void, thiscall, (void* self, uint32_t override, uint32_t value))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetRenderTarget, "CGxDevice::DeviceSetRenderTarget", void, thiscall, (void* self, uint32_t buffer, void* texture, uint32_t plane))
+WXL_BINDING_CALL_X86(GxCall, DeviceSetDefWindow, "CGxDevice::DeviceSetDefWindow", void, thiscall, (void* self, const void* rect))
+WXL_BINDING_CALL_X86(GxCall, ClampRectToWindow, "CGxDevice::ClampRectToWindow", void, thiscall, (void* self, void* rect))
+WXL_BINDING_CALL_X86(GxCall, ScenePresent, "CGxDevice::ScenePresent", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, DeviceScreenShot, "CGxDevice::DeviceScreenShot", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, WaitForFPSCap, "CGxDevice::WaitForFPSCap", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, XformSetView, "CGxDevice::XformSetView", void, thiscall, (void* self, const void* matrix))
+WXL_BINDING_CALL_X86(GxCall, QueryCreate, "CGxDevice::QueryCreate", void, thiscall, (void* self, void* query_ref, uint32_t type))
+WXL_BINDING_CALL_X86(GxCall, ShaderConstantsClear, "CGxDevice::ShaderConstantsClear", void, cdecl, ())
+WXL_BINDING_CALL_X86(GxCall, IRsSync, "CGxDevice::IRsSync", void, thiscall, (void* self, int32_t force))
+WXL_BINDING_CALL_X86(GxCall, ITexMarkAsUpdated, "CGxDevice::ITexMarkAsUpdated", void, stdcall, (void* texture))
+WXL_BINDING_CALL_X86(GxCall, ITexWHDStartEnd, "CGxDevice::ITexWHDStartEnd", void, thiscall, (void* self, void* texture, uint32_t* width, uint32_t* height, uint32_t* base_mip, uint32_t* mip_count))
+WXL_BINDING_CALL_X86(GxCall, TexMarkForUpdate, "CGxDevice::TexMarkForUpdate", void, thiscall, (void* self, void* texture, const void* rect, int32_t immediate))
+WXL_BINDING_CALL_X86(GxCall, TexDestroy, "CGxDevice::TexDestroy", void, stdcall, (void* texture))
+WXL_BINDING_CALL_X86(GxCall, PoolDestroy, "CGxDevice::PoolDestroy", void, thiscall, (void* self, void* pool))
+WXL_BINDING_CALL_X86(GxCall, BufLock, "CGxDevice::BufLock", void*, thiscall, (void* self, void* buf))
+WXL_BINDING_CALL_X86(GxCall, BufUnlock, "CGxDevice::BufUnlock", int32_t, thiscall, (void* self, void* buf, uint32_t size))
+WXL_BINDING_CALL_X86(GxCall, BufData, "CGxDevice::BufData", void, stdcall, (void* buf, const void* data, uint32_t size, uint32_t offset))
+WXL_BINDING_CALL_X86(GxCall, ICursorCreate, "CGxDevice::ICursorCreate", void, thiscall, (void* self, const void* format))
+WXL_BINDING_CALL_X86(GxCall, ICursorDestroy, "CGxDevice::ICursorDestroy", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, ICursorDraw, "CGxDevice::ICursorDraw", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, CursorSetVisible, "CGxDevice::CursorSetVisible", void, thiscall, (void* self, int32_t visible))
+WXL_BINDING_CALL_X86(GxCall, CursorUnlock, "CGxDevice::CursorUnlock", void, thiscall, (void* self, uint32_t x, uint32_t y))
+WXL_BINDING_CALL_X86(GxCall, QueryDestroy, "CGxDevice::QueryDestroy", void, stdcall, (void* query_ref))
+WXL_BINDING_CALL_X86(GxCall, ShaderCreate, "CGxDevice::ShaderCreate", void, thiscall, (void* self, void* shaders, uint32_t target, const char* path, const char* name, uint32_t permutations))
+WXL_BINDING_CALL_X86(GxCall, ShaderDestroy, "CGxDevice::ShaderDestroy", void, thiscall, (void* self, void* shader_ref))
+WXL_BINDING_CALL_X86(GxCall, LogFormat, "CGxDevice::Log@0x00684D10", void, stdcall, (const void* format))
+WXL_BINDING_CALL_X86(GxCall, LogCaps, "CGxDevice::Log@0x00684C40", void, stdcall, (const void* caps))
+WXL_BINDING_CALL_X86(GxCall, AdjustWindowRectToWorkArea, "CGxDevice::AdjustWindowRectToWorkArea", int32_t, cdecl, (float aspect, void* adjust, void* rect))
+WXL_BINDING_CALL_X86(GxCall, MatrixStackIdentity, "CGxMatrixStack::Identity", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, EmergencyLock, "EmergencyMem::Lock", void*, thiscall, (void* self, uint32_t size))
+WXL_BINDING_CALL_X86(GxCall, EmergencyUnlock, "EmergencyMem::Unlock", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, PoolDiscard, "CGxPool::Discard", void, thiscall, (void* self))
+WXL_BINDING_CALL_X86(GxCall, PixelsSetCount, "TSGrowableArray<T>::SetCount@0x00616CA0", void, thiscall, (void* self, uint32_t count))
+WXL_BINDING_CALL_X86(GxCall, Blit, "Blit", int32_t, cdecl, (const void* size, uint32_t alpha, const void* in, uint32_t in_stride, uint32_t in_format, void* out, uint32_t out_stride, uint32_t out_format))
+WXL_BINDING_CALL_X86(GxCall, GetBlitFormat, "GxGetBlitFormat", uint32_t, cdecl, (uint32_t format))
+WXL_BINDING_CALL_X86(GxCall, GxLog, "GxLog", void, cdecl, (const char* format, const char* text))
+WXL_BINDING_CALL_X86(GxCall, PostClose, "EventPostClose", void, cdecl, ())
+WXL_BINDING_CALL_X86(GxCall, CommandRegister, "ConsoleCommandRegister", int32_t, cdecl, (const char* command, void* handler, uint32_t category, const char* help))
+WXL_BINDING_CALL_X86(GxCall, ConsoleWrite, "ConsoleWrite", void, cdecl, (const char* text, uint32_t color))
+// A texture's callback (CGxTex::m_userFunc, a GxTexUserFunc) is called as this one of them is.
+WXL_BINDING_CALL_X86(GxCall, TexUserFunc, "CGxDevice::ICursorUpdate", void, cdecl, (uint32_t command, uint32_t width, uint32_t height, uint32_t face, uint32_t level, void* user_arg, uint32_t* stride, const void** texels))
+WXL_BINDING_CALL_X86(NetCall, StoreOver, "CDataStore::CDataStore@0x004669A0", void*, thiscall, (void* self, uint8_t* data, uint32_t size))
+WXL_BINDING_CALL_X86(NetCall, Send2, "ClientServices::Send2", void, cdecl, (void* message))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

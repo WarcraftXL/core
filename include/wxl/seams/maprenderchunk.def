@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The MapRenderChunk domain: a terrain chunk's texture layers, made and drawn. wxl.terrain's layer
+// providers are asked as each layer is made, and the eight functions that draw a chunk's layers say
+// which path draws it, so that a layer's texture scale reaches the state that path reads.
+
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including maprenderchunk.def"
+#endif
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including maprenderchunk.def"
+#endif
+
+// A layer appended to the chunk (or refused as a duplicate of one it has): the MCLY entry's MTEX
+// index and flags, the area's ADT file.
+WXL_SEAM_AFTER(MapRenderChunk, CreateLayer, "CMapRenderChunk::CreateLayer", void, thiscall,
+               (void* self, void* area, const void* layer, int32_t check_duplicate))
+
+// The vertex program paths: every layer in one draw (c18 + k, c13 + k), or a layer a draw (c18, c13).
+WXL_SEAM(MapRenderChunk, RenderSinglePassVertexPixelShader, "CMapRenderChunk::RenderSinglePassVertexPixelShader", void, thiscall,
+         (void* self))
+WXL_SEAM(MapRenderChunk, RenderMultiPassVertexPixelShader, "CMapRenderChunk::RenderMultiPassVertexPixelShader", void, cdecl,
+         (void* render_chunk))
+WXL_SEAM(MapRenderChunk, RenderMultiPassVertexPixelShaderBigAlpha, "CMapRenderChunk::RenderMultiPassVertexPixelShaderBigAlpha", void,
+         cdecl, (void* render_chunk))
+
+// The fixed-function texture coordinate paths: every layer in one draw (stage k's matrix), or a
+// layer a draw (stage 0's).
+WXL_SEAM(MapRenderChunk, RenderSinglePassPixelShader, "CMapRenderChunk::RenderSinglePassPixelShader", void, thiscall, (void* self))
+WXL_SEAM(MapRenderChunk, RenderMultiPassPixelShader, "CMapRenderChunk::RenderMultiPassPixelShader", void, cdecl, (void* render_chunk))
+WXL_SEAM(MapRenderChunk, RenderMultiPassPixelShaderBigAlpha, "CMapRenderChunk::RenderMultiPassPixelShaderBigAlpha", void, cdecl,
+         (void* render_chunk))
+WXL_SEAM(MapRenderChunk, RenderMultiPassAdditive, "CMapRenderChunk::RenderMultiPassAdditive", void, cdecl, (void* render_chunk))
+WXL_SEAM(MapRenderChunk, RenderMultiPassAlpha, "CMapRenderChunk::RenderMultiPassAlpha", void, cdecl, (void* render_chunk))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

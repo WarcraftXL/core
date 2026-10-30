@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Animation domain of the client binding: a unit's animation as the client chooses and plays
+// it (CGUnit_C), which wxl.animation plays through, and the lift of the active player onto ground
+// raised under them (wxl.terrain). Main thread only.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including animation.def"
+#endif
+
+// Plays an animation on a unit as the client plays an emote: CGUnit_C::PlayBaseAnimation(anim,
+// flags), with the client's own flags (1 no blend, 4 no fallback to the model's nearest
+// animation). The client chooses the bones (the upper body over a moving unit's legs) and may
+// refuse: a model not loaded (it keeps the id pending), a dead unit, a transition playing.
+WXL_BINDING(unit_play_animation, void, (void* unit, uint32_t anim, uint32_t flags), (unit, anim, flags), (void)0)
+
+// Has the client choose and play a unit's animation again from its state (moving, fighting,
+// casting, standing): CGUnit_C::UpdateBaseAnimation(0, -1), what it does when an animation ends.
+WXL_BINDING(unit_update_animation, void, (void* unit), (unit), (void)0)
+
+// The animation a unit's model shows: CGUnit_C::GetCurrentTorsoAnimId, its torso key bone's
+// sequence when it plays one, else its root's. 0xFFFFFFFF while the model loads.
+WXL_BINDING(unit_shown_animation, uint32_t, (const void* unit), (unit), 0xFFFFFFFFu)
+
+// Sets the speed of animation `anim` where the unit's model plays it, its root and its torso key
+// bone: CGUnit_C::SetKeyBoneSequenceSpeed(m_worldModel, bone, speed, 0) for each that plays it.
+WXL_BINDING(unit_animation_speed, void, (void* unit, uint32_t anim, float speed), (unit, anim, speed), (void)0)
+
+// One play of animation `anim` on the unit's own model (m_worldModel, not what it rides), in
+// milliseconds at speed 1: CM2Model::GetSequenceInfo's duration. 0 for a model without it or not
+// loaded.
+WXL_BINDING(unit_animation_length, uint32_t, (const void* unit, uint32_t anim), (unit, anim), 0)
+
+// Puts the active mover's feet at height `z`, where they stand: CMovement_C::m_position.z, the
+// height the movement walks, collides, draws and sends from, as CMovement_C::AttemptStepUp
+// raises it on a step. Nothing is sent: the movement's next message carries it.
+WXL_BINDING(unit_lift_local, void, (void* unit, float z), (unit, z), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

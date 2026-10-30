@@ -5,13 +5,24 @@
 
 #include "wxl/seams/seams.h"
 
+#include "services/ShaderCode.hpp"
+#include "services/TerrainLayers.hpp"
+
 #include <cstring>
 
 #include "binding/Binding.hpp"
+#include "gx/Events.hpp"
+#include "gx/Memory.hpp"
+#include "gx/Pacing.hpp"
 #include "profile/Profile.hpp"
 #include "runtime/Core.hpp"
 #include "runtime/Frame.hpp"
 #include "services/FootprintService.hpp"
+#include "services/DrawService.hpp"
+#include "services/HighlightService.hpp"
+#include "services/ImGuiService.hpp"
+#include "services/RenderService.hpp"
+#include "services/InputService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -36,6 +47,18 @@ namespace wxl::seam::Gx::ScenePresent
         // Every present ends a frame on the profiler's timeline, the loading screen's included.
         wxl::core::profile::Present();
 
+        // The graphics memory report, a minute into the frames then every five minutes.
+        wxl::core::gx::memory::Present();
+
+        // A pointer a mod captured is held at the centre, and hidden, before the frame shows.
+        wxl::core::services::input::Present();
+
+        // What the highlights' last world pass did, about once a second while some are set.
+        wxl::core::services::highlight::Present();
+
+        // Immediate shapes of a frame without a world go; shapes left out are said once a second.
+        wxl::core::services::draw::Present();
+
         // Only the frame Scrn.OnPaint opened ends here. The loading screen presents frames of
         // its own, and a paint with nothing to draw into presents anyway; neither opened one.
         wxl::host::ModHost* host = wxl::core::Host();
@@ -46,10 +69,48 @@ namespace wxl::seam::Gx::ScenePresent
         if (host && wxl::core::services::footprint::PressureDue(&pressure))
             host->Raise(WXL_EV_MemoryPressure, &pressure);
 
+        // The interface is drawn: the mods' passes over the whole frame, under their Dear ImGui
+        // windows, while the frame is still open.
+        wxl_render_point_args point{};
+        if (host && wxl::core::services::render::PointBegin(WXL_RENDER_POINT_AFTER_UI, point))
+        {
+            host->Raise(WXL_EV_RenderPoint, &point);
+            wxl::core::services::render::PointEnd();
+        }
+
         wxl_frame_args args{};
-        if (!wxl::core::frame::End(args)) return;
+        const bool     painted = wxl::core::frame::End(args);
+        // The frame's time, on every device: a loading screen's present is no frame of the game.
+        wxl::core::gx::pacing::Present(painted);
+        if (!painted) return;
         if (!host) return;
+        // The mods' Dear ImGui windows, over the game's interface, while the device is in its scene.
+        if (wxl::core::services::imgui::BeginFrame())
+        {
+            host->Raise(WXL_EV_ImGuiFrame, &args);
+            wxl::core::services::imgui::EndFrame();
+        }
         host->Raise(WXL_EV_FrameEnd, &args);
+    }
+}
+
+namespace wxl::core::gx
+{
+    void ResourcesLost(bool device_objects)
+    {
+        // ImGui's device objects go with the game's, and come back at its next frame; so do
+        // wxl.highlight's targets and programs.
+        if (device_objects)
+        {
+            wxl::core::services::imgui::DeviceLost();
+            wxl::core::services::highlight::DeviceLost();
+        }
+
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (!host) return;
+        // Read before the release: this is the size of what is about to go away.
+        const wxl_swapchain_args args = Size();
+        host->Raise(WXL_EV_SwapchainLost, &args);
     }
 }
 
@@ -57,12 +118,8 @@ namespace wxl::seam::Gx::ReleaseD3dResources
 {
     void WXL_CALL Before(void* self, int32_t)
     {
-        wxl::host::ModHost* host = wxl::core::Host();
-        if (!host || !self) return;
-
-        // Read before the release: this is the size of what is about to go away.
-        const wxl_swapchain_args args = Size();
-        host->Raise(WXL_EV_SwapchainLost, &args);
+        if (!wxl::core::Host() || !self) return;
+        wxl::core::gx::ResourcesLost(true);
     }
 }
 
@@ -95,4 +152,42 @@ namespace wxl::seam::Gx::IShaderLoad
         args.permutations = permutations;
         host->Raise(WXL_EV_ShaderLoad, &args);
     }
+}
+
+namespace wxl::seam::Gx::D3dDraw
+{
+    // Before the device's state reaches it: a terrain chunk's scaled layers (wxl.terrain).
+    void WXL_CALL Before(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
+    void WXL_CALL After(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
+}
+
+namespace wxl::seam::Gx::D3dIShaderCreatePixel
+{
+    // The record's bytecode, a shader provider's answer for the call (wxl.gx).
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3dIShaderCreateVertex
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3d9ExIShaderCreatePixel
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3d9ExIShaderCreateVertex
+{
+    void WXL_CALL Before(void*, void* shader) { wxl::core::services::shader_code::BeforeCreate(shader); }
+    void WXL_CALL After(void*, void* shader) { wxl::core::services::shader_code::AfterCreate(shader); }
+}
+
+namespace wxl::seam::Gx::D3d9ExDraw
+{
+    void WXL_CALL Before(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::BeforeDraw(batch); }
+    void WXL_CALL After(void*, const void* batch, int32_t) { wxl::core::services::terrain_layers::AfterDraw(batch); }
 }

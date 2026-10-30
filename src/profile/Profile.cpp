@@ -10,6 +10,7 @@
 #include "common/Log.hpp"
 #include "runtime/Core.hpp"
 #include "services/FootprintService.hpp"
+#include "services/RenderService.hpp"
 
 #include "wxl/core/profile.h"
 #include "wxl/host/mod_host.hpp"
@@ -191,6 +192,12 @@ namespace
         if (!Live()) return;
         if (const char* kept = Name(View(name))) ___tracy_emit_frame_mark(kept);
     }
+    wxl_result WXL_CALL SvcGpuZoneBegin(wxl_str name)
+    {
+        return wxl::core::services::render::GpuZoneBegin(std::string_view(name.data ? name.data : "", name.size));
+    }
+
+    void WXL_CALL SvcGpuZoneEnd() { wxl::core::services::render::GpuZoneEnd(); }
 } // namespace
 
 namespace wxl::core::profile
@@ -318,6 +325,8 @@ namespace wxl::core::profile
             t.plot        = &SvcPlot;
             t.message     = &SvcMessage;
             t.frame_mark  = &SvcFrameMark;
+            t.gpu_zone_begin = &SvcGpuZoneBegin;
+            t.gpu_zone_end   = &SvcGpuZoneEnd;
             return t;
         }();
         return api;

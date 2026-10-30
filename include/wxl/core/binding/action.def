@@ -46,6 +46,13 @@ WXL_BINDING(action_follow, wxl_bool, (const void* mover, uint64_t guid), (mover,
 // point, facing 0). False for a point it will not walk to.
 WXL_BINDING(action_move_to, wxl_bool, (const void* player, wxl_vec3 point), (player, point), WXL_FALSE)
 
+// Turns the player to a facing, as steering with the mouse does: CGUnit_C::OnSetRawFacingLocal
+// (OsGetAsyncTimeMs, facing) on the active player, the call CGInputControl::CameraTurnPlayer makes
+// for mouse look, which turns the character at once and queues MSG_MOVE_SET_FACING for the
+// server. False when the player is not the unit it moves (a vehicle), or when the client's own
+// test for turning, CGInputControl::CanTurn, says no: dead, stunned, on a spline.
+WXL_BINDING(action_face, wxl_bool, (const void* player, float facing), (player, facing), WXL_FALSE)
+
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read
 // several times in one translation unit, under shapes that may leave it empty. A directive

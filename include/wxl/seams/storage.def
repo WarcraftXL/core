@@ -48,6 +48,19 @@ WXL_SEAM_RAISES(Storage, OpenEx, FileOpened)
 // while no source and no transform is registered.
 WXL_SEAM_GATE(Storage, FindFile, "System_SFile2::FindFile", int32_t, cdecl, (const char* name, char* path, uint32_t size, uint32_t flags, uint32_t* type, void** archive))
 
+// The same function, observed: where a name was found, and that it was found nowhere. On x86 a
+// second link of the chain, attached after the gate and nearer the function; on x64 the fork
+// calls After at each of the function's returns after the gate's test. It is not reached when the
+// gate took the call. The answer is in al alone: After reads its low byte.
+//
+// After notes, for the thread, the layer that holds the name -- an archive (`*archive`), a loose
+// file, a folder of the search path -- for wxl.storage's hash_file; and when nothing has it, raises
+// FileMissing: an open when `archive` is given (SFile::OpenEx), an existence check when it is null
+// (SFile::FileExistsEx, SFile::FileExists). Never for the runtime's own lookups, nor a mod's
+// wxl.storage calls. Called on every thread that opens files.
+WXL_SEAM_AFTER(Storage, FindFileResult, "System_SFile2::FindFile", int32_t, cdecl, (const char* name, char* path, uint32_t size, uint32_t flags, uint32_t* type, void** archive))
+WXL_SEAM_RAISES(Storage, FindFileResult, FileMissing)
+
 // Mounts an archive by path: an .MPQ file, or a folder named like one. Nonzero, with an SArchive
 // written through `archive`, when it was opened; its hash and block tables are read by then. A
 // class static declared STORMAPI: __stdcall (`ret 0x10`). After raises ArchiveMounted for an

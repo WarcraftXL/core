@@ -2,13 +2,11 @@
   "$schema": "../../../sdk/schema/mod.json",
   "id": "wxl.glue-unlock",
   "name": "Glue unlock",
-  "version": "1.0.0",
-  "abi": "0.1.5",
-  "description": "Bypasses the client's Lua/XML signature check so custom interface code loads.",
+  "version": "2.0.0",
+  "abi": "0.1.32",
+  "description": "Loads a changed interface (GlueXML, FrameXML, the Blizzard add-ons) as the client loads its own, and keeps loose interface folders on disk.",
   "binaries": {
-    "win-x86": "bin/x86/glue-unlock.dll"
-  },
-  "requires": [
-    { "service": "wxl.patch", "version": 1 }
-  ]
+    "win-x86": "bin/x86/glue-unlock.dll",
+    "win-x64": "bin/x64/glue-unlock.dll"
+  }
 }

@@ -78,6 +78,45 @@ namespace wxl::core::services::assets
     /// Whether a path is one LayerPath wrote, and the client's name inside it.
     bool IsLayerPath(const char* path, uint32_t* id, const char** name);
 
+    /// Whether the calling thread is inside a mod's wxl.storage call: the client is not the one
+    /// asking, so nothing is raised for what it does not find.
+    bool ModAsking();
+
+    /// Marks the calling thread as inside a mod's wxl.storage call for the life of the object.
+    class AskingScope
+    {
+    public:
+        AskingScope();
+        ~AskingScope();
+        AskingScope(const AskingScope&)            = delete;
+        AskingScope& operator=(const AskingScope&) = delete;
+
+    private:
+        bool previous_;
+    };
+
+    /// Where the calling thread's last lookup found its name: what hash_file reports.
+    struct Resolution
+    {
+        uint32_t    layer   = WXL_FILE_LAYER_NONE; ///< a wxl_file_layer
+        void*       archive = nullptr;             ///< the ARCHIVEREC* of an archive's file, when the client said
+        uint32_t    source  = 0;                   ///< a provider's or served name's id
+        std::string path;                          ///< a file of the disk: the path the client opens
+    };
+
+    /// Forgets the calling thread's last lookup.
+    void ClearResolution();
+
+    /// Notes where the calling thread's lookup found its name.
+    void NoteResolution(const Resolution& resolution);
+
+    /// The calling thread's last lookup since ClearResolution; layer NONE when none was noted.
+    const Resolution& LastResolution();
+
+    /// The layer a source id is (PROVIDER or SERVED), and the id of the mod that added it; NONE
+    /// for an id no source has.
+    uint32_t SourceLayer(uint32_t id, std::string* mod);
+
     // --- the members of wxl.storage -----------------------------------------------------------
 
     wxl_result AddProvider(const wxl_asset_provider* provider, int32_t priority, uint64_t* out, uint32_t mod);

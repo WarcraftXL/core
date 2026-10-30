@@ -5,7 +5,9 @@
 
 #include "binding/Binding.hpp"
 #include "binding/BindingX86.hpp"
+#include "gx/Vulkan.hpp"
 #include "binding/CallX86.hpp"
+#include "binding/HighlightDrawX86.hpp"
 #include "binding/ModelDrawX86.hpp"
 
 #include "common/Log.hpp"
@@ -13,16 +15,21 @@
 #include "runtime/Image.hpp"
 
 #include "wxl/events.h"
+#include "wxl/core/camera_facing.hpp"
 #include "wxl/core/gpu.hpp"
+#include "wxl/core/gx_state.h"
 #include "wxl/core/storm.hpp"
 #include "wxl/offsets/layout.hpp"
 #include "wxl/offsets/site.hpp"
 #include "wxl/services/script.h"
 
 #include <windows.h>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -106,6 +113,8 @@ namespace
     using ScriptExecute    = void(__cdecl*)(const char* source, const char* name, const char* taint);
     using ScriptCreateEvts = void(__cdecl*)(const char** names, uint32_t count);
     using ScriptSignal     = void(__cdecl*)(uint32_t index, void* L, int32_t arg_count);
+    using LuaFClose        = void(__cdecl*)(void* L, void* level);
+    using LuaDReallocCI    = void(__cdecl*)(void* L, int32_t size);
 
     // The client's file layer. STORMAPI is __stdcall, and every one of these has external
     // linkage, so the convention they are declared with is the convention they carry.
@@ -190,6 +199,34 @@ namespace
     ScriptExecute    ScriptExecuteAt() { return reinterpret_cast<ScriptExecute>(WXL_SITE_AT("FrameScript_Execute", 0x00819210, 0)); }
     ScriptCreateEvts ScriptCreateEventsAt() { return reinterpret_cast<ScriptCreateEvts>(WXL_SITE("FrameScript_CreateEvents", 0)); }
     ScriptSignal     ScriptSignalEventAt() { return reinterpret_cast<ScriptSignal>(WXL_SITE_AT("FrameScript_SignalEvent", 0x0081AA00, 0)); }
+    LuaFClose        LuaFCloseAt() { return reinterpret_cast<LuaFClose>(WXL_SITE("luaF_close", 0)); }
+    LuaDReallocCI    LuaDReallocCIAt() { return reinterpret_cast<LuaDReallocCI>(WXL_SITE("luaD_reallocCI", 0)); }
+
+    // --- A mark of the script state: what luaD_pcall keeps before a protected call (ldo.c) -----
+
+    /// The words of a wxl_script_mark on this side.
+    enum MarkWord : uint32_t
+    {
+        kMarkTop,             ///< L->top, as an offset from L->stack
+        kMarkCall,            ///< L->ci, as an offset from L->base_ci
+        kMarkCCalls,          ///< L->nCcalls
+        kMarkAllowHook,       ///< L->allowhook
+        kMarkErrFunc,         ///< L->errfunc
+        kMarkErrorJmp,        ///< L->errorJmp
+        kMarkTainted,         ///< lua_tainted
+        kMarkTaintExpected,   ///< lua_taintexpected
+        kMarkTaintedClosure,  ///< lua_taintedclosure
+    };
+
+    constexpr int32_t kLuaTFunction = 6;     // LUA_TFUNCTION
+    constexpr int32_t kLuaMaxCalls  = 20000; // LUAI_MAXCALLS, the call array's limit
+
+    /// A member of the client's state, by reference.
+    template <typename T>
+    T& Slot(void* base, std::size_t offset)
+    {
+        return *reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset);
+    }
 
     uint32_t ValueType(int32_t luaType)
     {
@@ -206,6 +243,19 @@ namespace
 namespace wxl::core::binding::x86
 {
     void Prepare() { g_mainThread = GetCurrentThreadId(); }
+
+    // wxl.highlight keeps a batch's draw to draw it again: the device, the engine's copy of the
+    // vertex constants (CGxDevice::s_shadowConstants[1], after the pixel program's [0]) and
+    // whether the client draws with shaders at all (HighlightDrawX86.hpp).
+    gx::d3d9::highlight::Source HighlightSource()
+    {
+        gx::d3d9::highlight::Source source;
+        source.device = [] { return GxDevice(); };
+        source.vertexShadow =
+            reinterpret_cast<uint8_t*>(WXL_STATIC("CGxDevice::s_shadowConstants")) + x86::highlight_draw::kShadowSize;
+        source.enableShaders = reinterpret_cast<const int32_t*>(WXL_STATIC("CShaderEffect::s_enableShaders"));
+        return source;
+    }
 }
 
 namespace wxl::core::binding
@@ -522,6 +572,71 @@ namespace wxl::core::binding
         if (IsClient() && state) ScriptSignalEventAt()(index, state, arg_count);
     }
 
+    void script_mark(void* state, wxl_script_mark* mark)
+    {
+        if (!mark) return;
+        *mark = wxl_script_mark{};
+        if (!IsClient() || !state) return;
+        uint8_t* const stack = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "stack"));
+        uint8_t* const calls = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "base_ci"));
+        mark->words[kMarkTop]       = static_cast<uintptr_t>(Slot<uint8_t*>(state, WXL_FIELD("lua_State", "top")) - stack);
+        mark->words[kMarkCall]      = static_cast<uintptr_t>(Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci")) - calls);
+        mark->words[kMarkCCalls]    = Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls"));
+        mark->words[kMarkAllowHook] = Slot<uint8_t>(state, WXL_FIELD("lua_State", "allowhook"));
+        mark->words[kMarkErrFunc]   = static_cast<uintptr_t>(Slot<int32_t>(state, WXL_FIELD("lua_State", "errfunc")));
+        mark->words[kMarkErrorJmp]  = reinterpret_cast<uintptr_t>(Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp")));
+        mark->words[kMarkTainted]   = *reinterpret_cast<const uintptr_t*>(WXL_STATIC("lua_tainted"));
+        mark->words[kMarkTaintExpected]  = static_cast<uintptr_t>(*reinterpret_cast<const int32_t*>(WXL_STATIC("lua_taintexpected")));
+        mark->words[kMarkTaintedClosure] = static_cast<uintptr_t>(*reinterpret_cast<const int32_t*>(WXL_STATIC("lua_taintedclosure")));
+    }
+
+    wxl_bool script_unwind(void* state, const wxl_script_mark* mark)
+    {
+        if (!IsClient() || !state || !mark) return WXL_FALSE;
+        constexpr std::size_t kCall = WXL_TYPE_SIZE("CallInfo");
+        uint8_t* const calls = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "base_ci"));
+        uint8_t* const call  = calls + mark->words[kMarkCall];
+        uint8_t*       ci    = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci"));
+        // A protected call still open shows in its call, its C-call depth or its recovery point
+        // (the parser's runs at the caller's call level).
+        if (ci == call && Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls")) == mark->words[kMarkCCalls] &&
+            reinterpret_cast<uintptr_t>(Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp"))) == mark->words[kMarkErrorJmp])
+            return WXL_FALSE;
+
+        // A profiled interface counts how deep each Lua function runs; the calls dropped leave it.
+        void* const global = Slot<void*>(state, WXL_FIELD("lua_State", "l_G"));
+        if (Slot<uint8_t>(global, WXL_FIELD("global_State", "profile")))
+            while (ci > call + kCall)
+            {
+                ci -= kCall;
+                void* const func = Slot<void*>(ci, WXL_FIELD("CallInfo", "func"));
+                if (Slot<int32_t>(func, WXL_FIELD("TValue", "tt")) != kLuaTFunction) continue;
+                void* const closure = Slot<void*>(func, WXL_FIELD("TValue", "value"));
+                if (Slot<uint8_t>(closure, WXL_FIELD("LClosure", "isC"))) continue;
+                Slot<int32_t>(Slot<void*>(closure, WXL_FIELD("LClosure", "profile")), WXL_FIELD("Profile", "depth")) -= 1;
+            }
+
+        uint8_t* const top = Slot<uint8_t*>(state, WXL_FIELD("lua_State", "stack")) + mark->words[kMarkTop];
+        LuaFCloseAt()(state, top);
+        Slot<uint8_t*>(state, WXL_FIELD("lua_State", "top"))      = top;
+        Slot<uint16_t>(state, WXL_FIELD("lua_State", "nCcalls"))  = static_cast<uint16_t>(mark->words[kMarkCCalls]);
+        Slot<uint8_t*>(state, WXL_FIELD("lua_State", "ci"))       = call;
+        Slot<void*>(state, WXL_FIELD("lua_State", "base"))        = Slot<void*>(call, WXL_FIELD("CallInfo", "base"));
+        Slot<void*>(state, WXL_FIELD("lua_State", "savedpc"))     = Slot<void*>(call, WXL_FIELD("CallInfo", "savedpc"));
+        Slot<uint8_t>(state, WXL_FIELD("lua_State", "allowhook")) = static_cast<uint8_t>(mark->words[kMarkAllowHook]);
+        Slot<int32_t>(state, WXL_FIELD("lua_State", "errfunc"))   = static_cast<int32_t>(mark->words[kMarkErrFunc]);
+        Slot<void*>(state, WXL_FIELD("lua_State", "errorJmp"))    = reinterpret_cast<void*>(mark->words[kMarkErrorJmp]);
+        // restore_stack_limit: a call array grown past its limit by an overflow goes back to it.
+        if (Slot<int32_t>(state, WXL_FIELD("lua_State", "size_ci")) > kLuaMaxCalls &&
+            static_cast<int32_t>((call - calls) / kCall) + 1 < kLuaMaxCalls)
+            LuaDReallocCIAt()(state, kLuaMaxCalls);
+
+        *reinterpret_cast<uintptr_t*>(WXL_STATIC("lua_tainted"))      = mark->words[kMarkTainted];
+        *reinterpret_cast<int32_t*>(WXL_STATIC("lua_taintexpected"))  = static_cast<int32_t>(mark->words[kMarkTaintExpected]);
+        *reinterpret_cast<int32_t*>(WXL_STATIC("lua_taintedclosure")) = static_cast<int32_t>(mark->words[kMarkTaintedClosure]);
+        return WXL_TRUE;
+    }
+
     wxl_bool file_exists(const char* path)
     {
         if (!IsClient() || !path) return WXL_FALSE;
@@ -663,9 +778,148 @@ namespace wxl::core::binding
     // Both D3D9 devices keep a copy of what they last set (m_deviceStates, the current
     // declaration and streams); spoiling it makes the next state sync send everything again.
 
-    void* gx_d3d9_device()
+    int32_t gx_device_api()
     {
         const void* device = IsClient() ? GxDevice() : nullptr;
+        return device ? static_cast<int32_t>(Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"))) : -1;
+    }
+
+    wxl_bool gx_world_view(wxl_core_world_view* out)
+    {
+        const void* device = IsClient() ? GxDevice() : nullptr;
+        if (!device || !out) return WXL_FALSE;
+        constexpr std::size_t kViewStack = 10; // GxXform_View
+        const char*           bytes      = static_cast<const char*>(device);
+        const std::size_t     stack      = WXL_FIELD("CGxDevice", "m_xforms") + kViewStack * WXL_TYPE_SIZE("CGxMatrixStack");
+        uint32_t              level      = Read<uint32_t>(device, stack + WXL_FIELD("CGxMatrixStack", "m_level"));
+        if (level > 3) level = 3;
+        std::memcpy(out->projection, bytes + WXL_FIELD("CGxDevice", "m_projNative"), sizeof out->projection);
+        std::memcpy(out->view, bytes + stack + WXL_FIELD("CGxMatrixStack", "m_mtx") + level * sizeof out->view, sizeof out->view);
+        std::memcpy(out->viewport, bytes + WXL_FIELD("CGxDevice", "m_viewport.m_x.m_l"), sizeof out->viewport);
+        out->window[0] = Read<float>(device, WXL_FIELD("CGxDevice", "m_curWindowRect.maxX"));
+        out->window[1] = Read<float>(device, WXL_FIELD("CGxDevice", "m_curWindowRect.maxY"));
+        out->eye       = *reinterpret_cast<const wxl_vec3*>(WXL_STATIC("CWorldScene::s_activeWorldView"));
+        return WXL_TRUE;
+    }
+
+    void* gx_texture_ready(void* texture)
+    {
+        void* device = IsClient() && OnMainThread() && texture ? const_cast<void*>(GxDevice()) : nullptr;
+        if (!device) return nullptr;
+        void* gx = Read<void*>(texture, WXL_FIELD("CTexture", "m_gxTex"));
+        if (!gx) return nullptr; // the file is still loading
+        // CGxDevice::ITexMarkAsUpdated(CGxTex*) is the device vtable's slot 0, which every device
+        // overrides (CGxDeviceD3d at 0x006A3070, the Vulkan adapter's copy of the table): it makes
+        // the texture on the device and fills it, as the engine does before binding it.
+        using MarkFn                 = void(__fastcall*)(void* self, void* edx, void* tex);
+        const void* const* vtable    = Read<const void* const*>(device, 0);
+        reinterpret_cast<MarkFn>(const_cast<void*>(vtable[0]))(device, nullptr, gx);
+        if (Read<int8_t>(gx, WXL_FIELD("CGxTex", "m_needsCreation"))) return nullptr;
+        return Read<void*>(gx, WXL_FIELD("CGxTex", "m_apiSpecificData")) ? gx : nullptr;
+    }
+
+    void gx_vertex_constants_set(uint32_t first, const float* rows, uint32_t count)
+    {
+        // GxShaderConstantsSet(target, index, constants, count): cdecl, four dwords (0x00408210);
+        // GxSh_Vertex is 0.
+        if (IsClient() && OnMainThread() && rows && count && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxShaderConstantsSet", 0), uint32_t{0}, first, rows, count);
+    }
+
+    wxl_bool gx_xform_get(uint32_t xform, float* matrix)
+    {
+        const void* device = IsClient() ? GxDevice() : nullptr;
+        if (!device || !matrix || xform > 10) return WXL_FALSE;
+        const std::size_t stack = WXL_FIELD("CGxDevice", "m_xforms") + xform * WXL_TYPE_SIZE("CGxMatrixStack");
+        uint32_t          level = Read<uint32_t>(device, stack + WXL_FIELD("CGxMatrixStack", "m_level"));
+        if (level > 3) level = 3;
+        std::memcpy(matrix, static_cast<const char*>(device) + stack + WXL_FIELD("CGxMatrixStack", "m_mtx") + level * 16 * sizeof(float),
+                    16 * sizeof(float));
+        return WXL_TRUE;
+    }
+
+    void gx_xform_set(uint32_t xform, const float* matrix)
+    {
+        // GxXformSet(xf, matrix): cdecl, two dwords (0x0057C450): the stack's top, marked dirty.
+        if (IsClient() && OnMainThread() && matrix && xform <= 10 && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxXformSet", 0), xform, static_cast<const void*>(matrix));
+    }
+
+    void gx_pixel_constants_set(uint32_t first, const float* rows, uint32_t count)
+    {
+        // GxShaderConstantsSet(target, index, constants, count): cdecl (0x00408210); GxSh_Pixel is 1.
+        if (IsClient() && OnMainThread() && rows && count && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxShaderConstantsSet", 0), uint32_t{1}, first, rows, count);
+    }
+
+    void* gx_texture_stage(uint32_t stage)
+    {
+        const void* device = IsClient() && stage < 16 ? GxDevice() : nullptr;
+        if (!device) return nullptr;
+        const auto* states = Read<const wxl_gx_app_state*>(device, WXL_FIELD("CGxDevice", "m_appRenderStates.m_data"));
+        return states ? states[21 + stage].value.data.p : nullptr; // GxRs_Texture0 is 21
+    }
+
+    void gx_texture_stage_set(uint32_t stage, void* texture)
+    {
+        // GxRsSet(which, void*): cdecl, two dwords (0x00408240), CGxDevice::RsSet on the device.
+        if (IsClient() && OnMainThread() && stage < 16 && GxDevice())
+            x86::CallFree<void>(WXL_SITE_AT("GxRsSet", 0x00408240, 0), uint32_t{21 + stage}, texture);
+    }
+
+    void gx_texture_wrap(void* texture)
+    {
+        // GxTexSetWrap(texture, wrapU, wrapV): cdecl, three dwords (0x00681450); GxTex_Wrap is 1.
+        if (IsClient() && OnMainThread() && texture && GxDevice())
+            x86::CallFree<void>(WXL_SITE("GxTexSetWrap", 0), texture, uint32_t{1}, uint32_t{1});
+    }
+
+    int32_t gx_render_state(uint32_t which)
+    {
+        const void* device = IsClient() && which < 100 ? GxDevice() : nullptr;
+        if (!device) return 0;
+        const auto* states = Read<const wxl_gx_app_state*>(device, WXL_FIELD("CGxDevice", "m_appRenderStates.m_data"));
+        return states ? states[which].value.data.i[0] : 0;
+    }
+
+    void gx_render_state_set(uint32_t which, int32_t value)
+    {
+        // GxRsSet(which, int): cdecl, two dwords (0x00408BF0).
+        if (IsClient() && OnMainThread() && GxDevice()) x86::CallFree<void>(WXL_SITE_AT("GxRsSet", 0x00408BF0, 0), which, value);
+    }
+
+    void gx_draw(const void* batch, int32_t count)
+    {
+        // CGxDevice::Draw(batch, count): the device vtable's slot 42, thiscall (every device's own).
+        void* device = IsClient() && OnMainThread() && batch ? const_cast<void*>(GxDevice()) : nullptr;
+        if (!device) return;
+        using DrawFn              = void(__fastcall*)(void* self, void* edx, const void* batch, int32_t count);
+        const void* const* vtable = Read<const void* const*>(device, 0);
+        reinterpret_cast<DrawFn>(const_cast<void*>(vtable[42]))(device, nullptr, batch, count);
+    }
+
+    wxl_bool gx_shader_record(const void* shader, wxl_core_shader_record* out)
+    {
+        if (!IsClient() || !shader || !out) return WXL_FALSE;
+        out->name   = Read<const char*>(shader, WXL_FIELD("CGxShader", "m_key.m_str"));
+        out->target = Read<int32_t>(shader, WXL_FIELD("CGxShader", "m_target"));
+        out->code   = Read<const void*>(shader, WXL_FIELD("CGxShader", "m_code.m_data"));
+        out->size   = Read<uint32_t>(shader, WXL_FIELD("CGxShader", "m_code.m_count"));
+        return WXL_TRUE;
+    }
+
+    void gx_shader_code_set(void* shader, const void* code, uint32_t size)
+    {
+        if (!IsClient() || !shader) return;
+        *reinterpret_cast<const void**>(static_cast<char*>(shader) + WXL_FIELD("CGxShader", "m_code.m_data")) = code;
+        *reinterpret_cast<uint32_t*>(static_cast<char*>(shader) + WXL_FIELD("CGxShader", "m_code.m_count")) = size;
+    }
+
+    void* gx_d3d9_device()
+    {
+        // Under Vulkan the device keeps D3D9's EGxApi (so the engine takes D3D9's paths), but no
+        // IDirect3DDevice9 behind it.
+        const void* device = IsClient() && !gx::VulkanActive() ? GxDevice() : nullptr;
         if (!device) return nullptr;
         switch (Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api")))
         {
@@ -677,7 +931,7 @@ namespace wxl::core::binding
 
     namespace
     {
-        template <std::size_t Decl, std::size_t Streams, std::size_t StreamsSize, std::size_t States,
+        template <std::size_t Decl, std::size_t Index, std::size_t Streams, std::size_t StreamsSize, std::size_t States,
                   std::size_t StatesSize>
         void SpoilD3d(void* device)
         {
@@ -685,7 +939,12 @@ namespace wxl::core::binding
             std::memset(bytes + States, 0xA5, StatesSize);
             std::memset(bytes + Decl, 0, sizeof(void*));
             std::memset(bytes + Streams, 0, StreamsSize);
+            // The index buffer is bound again only when the engine marks its own as changed
+            // (CGxDeviceD3d::IStateSync tests m_primIndexDirty first): both, or a draw that keeps
+            // the engine's buffer would draw with the one set behind its back.
+            std::memset(bytes + Index, 0, sizeof(void*));
             const int32_t dirty = 1;
+            std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_primIndexDirty"), &dirty, sizeof dirty);
             std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_viewportDirty"), &dirty, sizeof dirty);
             std::memcpy(bytes + WXL_FIELD("CGxDevice", "m_scissorRectDirty"), &dirty, sizeof dirty);
         }
@@ -693,18 +952,19 @@ namespace wxl::core::binding
 
     void gx_invalidate_state()
     {
-        void* device = IsClient() ? const_cast<void*>(GxDevice()) : nullptr;
+        void* device = IsClient() && !gx::VulkanActive() ? const_cast<void*>(GxDevice()) : nullptr;
         if (!device) return;
         const uint32_t api = Read<uint32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
         if (api != 1 && api != 2) return;
         // CGxDevice::IRsForceUpdate(), the overload taking nothing: __thiscall, `ret` (0x00685B4D).
         x86::CallMember<void>(WXL_SITE_AT("CGxDevice::IRsForceUpdate", 0x00685A70, 0), device);
         if (api == 1)
-            SpoilD3d<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"),
+            SpoilD3d<WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"),
+                     WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"),
                      WXL_MEMBER_SIZE("CGxDeviceD3d", "m_d3dVertexStreamBuf"), WXL_FIELD("CGxDeviceD3d", "m_deviceStates"),
                      WXL_MEMBER_SIZE("CGxDeviceD3d", "m_deviceStates")>(device);
         else
-            SpoilD3d<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"),
+            SpoilD3d<WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"), WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentIndexBuf"),
                      WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"), WXL_MEMBER_SIZE("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf"),
                      WXL_FIELD("CGxDeviceD3d9Ex", "m_deviceStates"), WXL_MEMBER_SIZE("CGxDeviceD3d9Ex", "m_deviceStates")>(device);
     }
@@ -904,6 +1164,267 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    void* circle_swap_texture(void* texture)
+    {
+        if (!IsClient() || !OnMainThread()) return nullptr;
+        void** slot = reinterpret_cast<void**>(WXL_STATIC("CGObject_C::s_selectionTexture"));
+        void*  held = *slot;
+        *slot       = texture;
+        return held;
+    }
+
+    void* texture_open(const char* path)
+    {
+        if (!IsClient() || !OnMainThread() || !path || !*path) return nullptr;
+        // CreateTexture(fileName, status): cdecl, two dwords (TextureCreate with clamped
+        // CGxTexFlags(GxTex_LinearMipNearest), 0x004E8D30); the client's global status takes
+        // what the load reports later (GetGlobalStatusObj, cdecl, nothing).
+        void* status = x86::CallFree<void*>(WXL_SITE("GetGlobalStatusObj", 0));
+        return x86::CallFree<void*>(WXL_SITE("CreateTexture", 0), path, status);
+    }
+
+    void texture_close(void* texture)
+    {
+        // HandleClose(handle): cdecl, one dword (0x0047BF30).
+        if (IsClient() && OnMainThread() && texture) x86::CallFree<void>(WXL_SITE("HandleClose", 0), texture);
+    }
+
+    wxl_bool terrain_render_chunk(const void* chunk, wxl_core_render_chunk* out)
+    {
+        if (!IsClient() || !chunk || !out) return WXL_FALSE;
+        const uint32_t layers = Read<uint8_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_layersCount"));
+        if (layers > 4) return WXL_FALSE;
+        *out              = wxl_core_render_chunk{};
+        out->layers       = layers;
+        out->render_flags = Read<uint16_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_renderFlags"));
+        for (uint32_t i = 0; i < layers; ++i)
+        {
+            const std::size_t at   = WXL_FIELD("CMapRenderChunk", "m_layers") + i * WXL_TYPE_SIZE("CMapRenderChunkLayer");
+            out->layer_flags[i]   = Read<uint16_t>(chunk, at + WXL_FIELD("CMapRenderChunkLayer", "m_flags"));
+            out->layer_texture[i] = Read<uint32_t>(chunk, at + WXL_FIELD("CMapRenderChunkLayer", "m_textureId"));
+        }
+        out->batch     = static_cast<const char*>(chunk) + WXL_FIELD("CMapRenderChunk", "m_batch");
+        out->map_chunk  = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+        out->map_chunk2 = Read<const void*>(chunk, WXL_FIELD("CMapRenderChunk", "m_mapChunks[1]"));
+        out->pair       = Read<uint8_t>(chunk, WXL_FIELD("CMapRenderChunk", "m_unkFlags")) & 3u;
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_wdt(wxl_core_wdt* out)
+    {
+        if (!IsClient() || !out) return WXL_FALSE;
+        out->path  = reinterpret_cast<const char*>(WXL_STATIC("CMap::wdtFilename"));
+        out->flags = reinterpret_cast<uint32_t*>(WXL_STATIC("CMap::header")); // SMMapHeader::m_flags, its first field
+        out->tiles    = reinterpret_cast<uint32_t*>(WXL_STATIC("CMap::m_areaInfo")); // SMAreaInfo[4096]: m_flags, m_unused
+        out->map_path = reinterpret_cast<const char*>(WXL_STATIC("CMap::mapPath"));
+        out->map_name = reinterpret_cast<const char*>(WXL_STATIC("CMap::mapName"));
+        return WXL_TRUE;
+    }
+
+    void map_validate_shaders()
+    {
+        // CMap::ValidateShaders(): cdecl, nothing (0x007BD8A0).
+        if (IsClient() && OnMainThread()) x86::CallFree<void>(WXL_SITE("CMap::ValidateShaders", 0));
+    }
+
+    wxl_bool terrain_area_file(const void* area, wxl_core_area_file* out)
+    {
+        if (!IsClient() || !area || !out) return WXL_FALSE;
+        out->tile_x = Read<int32_t>(area, WXL_FIELD("CMapArea", "m_index.x"));
+        out->tile_y = Read<int32_t>(area, WXL_FIELD("CMapArea", "m_index.y"));
+        out->data   = Read<const void*>(area, WXL_FIELD("CMapArea", "m_fileBuffer"));
+        out->size   = Read<uint32_t>(area, WXL_FIELD("CMapArea", "m_fileSize"));
+        return out->data && out->size ? WXL_TRUE : WXL_FALSE;
+    }
+
+    /// Writes @p value at a byte offset from a base, without alignment assumptions.
+    template <class T>
+    void Put(void* base, std::size_t offset, T value)
+    {
+        std::memcpy(static_cast<char*>(base) + offset, &value, sizeof value);
+    }
+
+    wxl_bool map_area_split_set(void* area, const wxl_core_area_split* split)
+    {
+        if (!IsClient() || !OnMainThread() || !area || !split) return WXL_FALSE;
+        Put(area, WXL_FIELD("CMapArea", "m_chunkInfo"), split->chunk_info);
+        Put(area, WXL_FIELD("CMapArea", "m_doodadDef"), split->doodad_defs);
+        Put(area, WXL_FIELD("CMapArea", "m_mapObjDef"), split->map_obj_defs);
+        Put(area, WXL_FIELD("CMapArea", "m_doodadDefCount"), static_cast<int32_t>(split->doodad_count));
+        Put(area, WXL_FIELD("CMapArea", "m_mapObjDefCount"), static_cast<int32_t>(split->map_obj_count));
+        Put(area, WXL_FIELD("CMapArea", "m_m2FileNames"), split->model_names);
+        Put(area, WXL_FIELD("CMapArea", "m_wmoFileNames"), split->map_obj_names);
+        Put(area, WXL_FIELD("CMapArea", "m_modelFilenamesOffsets"), split->model_offsets);
+        Put(area, WXL_FIELD("CMapArea", "m_wmoFilenamesOffsets"), split->map_obj_offsets);
+        Put(area, WXL_FIELD("CMapArea", "m_textureFlags"), split->texture_flags);
+        // CMapArea::LoadTextures(names, size): __thiscall, two dwords, `ret 8` (0x007D6E0B).
+        if (split->texture_names && split->texture_names_size)
+            x86::CallMember<void>(WXL_SITE("CMapArea::LoadTextures", 0), area, split->texture_names, split->texture_names_size);
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_area_placements(const void* area, wxl_core_area_split* out)
+    {
+        if (!IsClient() || !area || !out) return WXL_FALSE;
+        *out                 = wxl_core_area_split{};
+        out->doodad_defs     = Read<void*>(area, WXL_FIELD("CMapArea", "m_doodadDef"));
+        out->map_obj_defs    = Read<void*>(area, WXL_FIELD("CMapArea", "m_mapObjDef"));
+        out->doodad_count    = static_cast<uint32_t>(Read<int32_t>(area, WXL_FIELD("CMapArea", "m_doodadDefCount")));
+        out->map_obj_count   = static_cast<uint32_t>(Read<int32_t>(area, WXL_FIELD("CMapArea", "m_mapObjDefCount")));
+        out->model_names     = Read<char*>(area, WXL_FIELD("CMapArea", "m_m2FileNames"));
+        out->map_obj_names   = Read<char*>(area, WXL_FIELD("CMapArea", "m_wmoFileNames"));
+        out->model_offsets   = Read<uint32_t*>(area, WXL_FIELD("CMapArea", "m_modelFilenamesOffsets"));
+        out->map_obj_offsets = Read<uint32_t*>(area, WXL_FIELD("CMapArea", "m_wmoFilenamesOffsets"));
+        return WXL_TRUE;
+    }
+
+    void* map_low_detail_set(void* detail, const void* bytes, uint32_t size, uint32_t area_offsets)
+    {
+        if (!IsClient() || !OnMainThread() || !detail || !bytes || !size || area_offsets >= size) return nullptr;
+        // SMemAlloc(size, file, line, flags): __stdcall, four dwords, `ret 0x10` (0x0076E597).
+        using Alloc = void*(__stdcall*)(uint32_t, const char*, int32_t, uint32_t);
+        char* data = static_cast<char*>(reinterpret_cast<Alloc>(WXL_SITE("SMemAlloc", 0))(size, "WarcraftXL", 0, 0));
+        if (!data) return nullptr;
+        std::memcpy(data, bytes, size);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_data"), data);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjNames"), static_cast<char*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjNameOffsets"), static_cast<uint32_t*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjDefs"), static_cast<void*>(nullptr));
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_mapObjDefCount"), uint32_t{0});
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_areaOffsets"), reinterpret_cast<uint32_t*>(data + area_offsets));
+        return data;
+    }
+
+    wxl_bool map_area_low_add(void* detail, const wxl_core_area_low* a)
+    {
+        if (!IsClient() || !OnMainThread() || !detail || !a || a->index >= 4096) return WXL_FALSE;
+        char* data = Read<char*>(detail, WXL_FIELD("CMapLowDetail", "m_data"));
+        if (!data) return WXL_FALSE;
+        // CMap::AllocAreaLow(): cdecl, nothing, a bare `ret` (0x007C0ABF); null when the heap is full.
+        void* area = x86::CallFree<void*>(WXL_SITE("CMap::AllocAreaLow", 0));
+        if (!area) return WXL_FALSE;
+        Put(area, WXL_FIELD("CMapAreaLow", "m_heights"), reinterpret_cast<int16_t*>(data + a->heights));
+        Put(area, WXL_FIELD("CMapAreaLow", "m_holes"), a->holes ? reinterpret_cast<uint16_t*>(data + a->holes) : nullptr);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_indexCount"), a->index_count);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_index.x"), a->column);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_index.y"), a->row);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_topLeft.x"), a->top_left[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_topLeft.y"), a->top_left[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.x"), a->box_min[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.y"), a->box_min[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.b.z"), a->box_min[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.x"), a->box_max[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.y"), a->box_max[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_bbox.t.z"), a->box_max[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.x"), a->center[0]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.y"), a->center[1]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.c.z"), a->center[2]);
+        Put(area, WXL_FIELD("CMapAreaLow", "m_sphere.r"), a->radius);
+        Put(detail, WXL_FIELD("CMapLowDetail", "m_areas") + sizeof(void*) * a->index, area);
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_chunk_parts(const void* chunk, wxl_core_map_chunk* out)
+    {
+        if (!IsClient() || !chunk || !out) return WXL_FALSE;
+        out->begin   = Read<const void*>(chunk, WXL_FIELD("CMapChunk", "m_chunkInfoBeginPtr"));
+        out->header  = Read<void*>(chunk, WXL_FIELD("CMapChunk", "m_header"));
+        out->index_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_aIndex.x"));
+        out->index_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_aIndex.y"));
+        return WXL_TRUE;
+    }
+
+    wxl_bool map_chunk_split_set(void* chunk, const wxl_core_chunk_split* split)
+    {
+        if (!IsClient() || !chunk || !split) return WXL_FALSE;
+        Put(chunk, WXL_FIELD("CMapChunk", "m_layers"), split->layers);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_additionalShadowmap"), split->alpha);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_shadowMap"), split->shadow);
+        Put(chunk, WXL_FIELD("CMapChunk", "m_mcrfPtr"), split->refs);
+        return WXL_TRUE;
+    }
+
+    void map_chunk_create_refs(void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t map_objs)
+    {
+        // CMapChunk::CreateRefs(area, refs, doodads, map objects): __thiscall, four dwords, `ret 0x10`
+        // (0x007C647A).
+        if (!IsClient() || !OnMainThread() || !chunk || !area || (!refs && (doodads || map_objs))) return;
+        x86::CallMember<void>(WXL_SITE("CMapChunk::CreateRefs", 0), chunk, area, const_cast<uint32_t*>(refs), doodads, map_objs);
+    }
+
+    const float* terrain_vertex_constants()
+    {
+        return IsClient() ? reinterpret_cast<const float*>(WXL_STATIC("CMapRenderChunk::s_vertexShaderConsts")) : nullptr;
+    }
+
+    void* cvar_lookup(const char* name)
+    {
+        // CVar::Lookup(name): cdecl, one dword (0x00767440); the hash compares without case.
+        if (!IsClient() || !OnMainThread() || !name) return nullptr;
+        return x86::CallFree<void*>(WXL_SITE("CVar::Lookup", 0), name);
+    }
+
+    void* cvar_register(const char* name, const char* help, uint32_t flags, const char* value, void* callback,
+                        uint32_t category)
+    {
+        // CVar::Register(name, help, flags, value, callback, category, setCommand, arg, unk):
+        // cdecl, nine dwords (0x00767FC0), as the client's code registers its own variables.
+        if (!IsClient() || !OnMainThread() || !name || !value) return nullptr;
+        return x86::CallFree<void*>(WXL_SITE("CVar::Register", 0), name, help, flags, value, callback, category,
+                                    uint8_t(0), static_cast<void*>(nullptr), uint8_t(0));
+    }
+
+    wxl_bool cvar_set(void* cvar, const char* value)
+    {
+        // CVar::Set(value, setValue, setReset, setDefault, setNeedsSave): __thiscall, `ret 0x14`
+        // (0x007668C0); always answers true, whether the callback took the value or not.
+        if (!IsClient() || !OnMainThread() || !cvar || !value) return WXL_FALSE;
+        x86::CallMember<bool>(WXL_SITE_AT("CVar::Set", 0x007668C0, 0), cvar, value, uint8_t(1), uint8_t(0), uint8_t(0),
+                              uint8_t(1));
+        return WXL_TRUE;
+    }
+
+    void cvar_write_flags(void* cvar, uint32_t flags)
+    {
+        if (!IsClient() || !OnMainThread() || !cvar) return;
+        std::memcpy(static_cast<uint8_t*>(cvar) + WXL_FIELD("CVar", "m_flags"), &flags, sizeof flags);
+    }
+
+    // --- interface.def: an interface's signature ------------------------------------------
+
+    int32_t interface_check_signature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)
+    {
+        // FrameXML_CheckSignature(toc, extra, modulus, digest): cdecl, four dwords (0x008165E0).
+        // Its detour is the FrameXML.CheckSignature gate, which lets this call through.
+        if (!IsClient() || !OnMainThread() || !toc || !digest) return -1;
+        return x86::CallFree<int32_t>(WXL_SITE("FrameXML_CheckSignature", 0), toc, extra, modulus, digest);
+    }
+
+    wxl_bool interface_signature_digest(const char* toc, const char* extra, uint8_t* digest)
+    {
+        // CalculateSignatureMD5 (0x008164D0) takes `extra` in ESI; its steps are made here
+        // instead, by the same calls: MD5Init, ProcessFileForMakeSign(ctx, toc, ""), the bytes of
+        // `extra` read whole through the client's files, MD5Final(digest, ctx).
+        if (!IsClient() || !OnMainThread() || !toc || !digest) return WXL_FALSE;
+        alignas(8) uint8_t context[WXL_TYPE_SIZE("MD5_CTX")];
+        x86::CallFree<void>(WXL_SITE("MD5Init", 0), static_cast<void*>(context));
+        x86::CallFree<int32_t>(WXL_SITE("ProcessFileForMakeSign", 0), static_cast<void*>(context), toc, "");
+        if (extra && *extra)
+        {
+            if (void* file = file_open(extra))
+            {
+                std::vector<uint8_t> bytes(static_cast<std::size_t>(file_size(file)));
+                const uint32_t got = bytes.empty() ? 0 : file_read(file, bytes.data(), static_cast<uint32_t>(bytes.size()));
+                file_close(file);
+                if (got && got == bytes.size())
+                    x86::CallFree<void>(WXL_SITE("MD5Update", 0), static_cast<void*>(context),
+                                        static_cast<const uint8_t*>(bytes.data()), got);
+            }
+        }
+        x86::CallFree<void>(WXL_SITE("MD5Final", 0), digest, static_cast<void*>(context));
+        return WXL_TRUE;
+    }
+
     uint32_t m2_children(const void* model, void** out, uint32_t capacity)
     {
         if (!IsClient() || !model) return 0;
@@ -987,6 +1508,54 @@ namespace wxl::core::binding
         return WXL_TRUE;
     }
 
+    // --- M2: the scene's animate list (the animate gates) ---------------------------------------
+
+    wxl_bool m2_is_animate_thread(const void* function)
+    {
+        return IsClient() && function && reinterpret_cast<std::uintptr_t>(function) == WXL_SITE("CM2Scene::AnimateThread", 0)
+                   ? WXL_TRUE
+                   : WXL_FALSE;
+    }
+
+    uint32_t m2_animate_list(const void* scene, void** out, uint32_t capacity)
+    {
+        if (!IsClient() || !scene) return 0;
+        // A list the client keeps acyclic; the bound only stops a walk through a broken one.
+        constexpr uint32_t kMost = 1u << 20;
+        uint32_t           count = 0;
+        for (void* model = Read<void*>(scene, WXL_FIELD("CM2Scene", "m_animateList")); model && count < kMost;
+             model       = Read<void*>(model, WXL_FIELD("CM2Model", "m_animateNext")))
+        {
+            if (out && count < capacity) out[count] = model;
+            ++count;
+        }
+        return count;
+    }
+
+    void* m2_swap_animate_list(void* scene, void* head)
+    {
+        if (!IsClient() || !scene) return nullptr;
+        void** slot = reinterpret_cast<void**>(static_cast<uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_animateList"));
+        void*  was  = *slot;
+        *slot       = head;
+        return was;
+    }
+
+    void m2_animate_model(void* model, void* scene)
+    {
+        if (!IsClient() || !model || !scene) return;
+        // As CM2Scene::Animate and AnimateThread call them (0x00821B1E, 0x00821B4E): __thiscall,
+        // (view, &diffuse, &emissive, alpha, alpha2), `ret 0x14`; diffuse (1,1,1), emissive
+        // (0,0,0), both alphas 1.
+        constexpr uint32_t kSimple    = 0x1000;
+        const float        diffuse[3] = {1.0f, 1.0f, 1.0f};
+        const float        emissive[3] = {0.0f, 0.0f, 0.0f};
+        const void*        view        = static_cast<const uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_view");
+        const bool         simple      = (Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & kSimple) != 0;
+        x86::CallMember<void>(simple ? WXL_SITE("CM2Model::AnimateMTSimple", 0) : WXL_SITE("CM2Model::AnimateMT", 0), model, view,
+                              static_cast<const void*>(diffuse), static_cast<const void*>(emissive), 1.0f, 1.0f);
+    }
+
     void m2_file_animate_bones(void* file)
     {
         if (!IsClient() || !file) return;
@@ -997,19 +1566,286 @@ namespace wxl::core::binding
         std::memcpy(count, &value, sizeof value);
     }
 
-    void* m2_create_world_model(const char*) { return nullptr; }
-    wxl_bool m2_place_world(void*, const wxl_m2_placement*) { return WXL_FALSE; }
-    void m2_unplace_world(void*) {}
-    void m2_set_transform(void*, const wxl_m2_placement*) {}
-    void m2_play_animation(void*, uint32_t, float) {}
-    wxl_bool m2_loaded(const void*) { return WXL_FALSE; }
-    uint32_t m2_animation_length(void*, uint32_t) { return 0; }
-    void m2_set_alpha(void*, float) {}
-    void m2_set_emitting(void*, wxl_bool) {}
-    wxl_bool m2_attachment_world(void*, uint32_t, wxl_vec3*) { return WXL_FALSE; }
-    wxl_bool m2_ground_height(const wxl_vec3*, float, float, float*) { return WXL_FALSE; }
-    wxl_bool m2_bones(void*, wxl_m2_bones*) { return WXL_FALSE; }
-    wxl_bool m2_file_bone(const void*, uint32_t, int16_t*, wxl_vec3*) { return WXL_FALSE; }
+    // --- M2: models of the world (wxl.m2's world calls) -----------------------------------------
+    //
+    // As the client places its spell effects (CEffect::PostInitialize, CGWorldFrame::
+    // SpellEffectEnumProc): the model's world matrix set by hand, a static map entity that culls
+    // it, and an enumeration callback the map calls while it draws, which animates the model and
+    // shows it while the map does.
+
+    // Every function the calls below reach, as calls_x86.def declares them for check_conventions.
+#define WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params) \
+    static_assert(WXL_SEAM_SITE(symbol, 0) != 0, #domain "." #name " resolves in Wow.exe");
+#include "wxl/core/binding/calls_x86.def"
+#undef WXL_BINDING_CALL_X86
+
+    namespace
+    {
+        constexpr uint32_t kWorldMatrix = 0x8000;  // m_fFlags: m_worldTransform set by hand (SetWorldTransform)
+        constexpr uint32_t kProjected   = 0x4;     // m_fFlags: projected batches lie on the terrain
+        constexpr uint32_t kShown       = 0x8;     // m_fFlags: drawn, for a model hung on nothing
+        constexpr uint32_t kAnimShown   = 0x10000; // m_fFlags: animated while drawn, likewise
+        constexpr std::size_t kMatrixSize = 16 * sizeof(float);
+        constexpr std::size_t kFileNameSize = 260; // CM2Shared::m_fileName
+
+        struct PendingAnim
+        {
+            uint32_t anim;
+            float    speed;
+        };
+
+        // Main thread only, as wxl.m2 calls it and the client calls back.
+        std::unordered_map<void*, PendingAnim> g_pendingAnims;
+        std::unordered_map<void*, void*>       g_worldEntities;
+
+        void PlayNow(void* model, uint32_t anim, float speed)
+        {
+            // CM2Model::HasSequence(id): __thiscall, `ret 4` (0x00825F36). The stand animation
+            // when the file has none of that id, as the client falls back.
+            if (!x86::CallMember<int32_t>(WXL_SITE_AT("CM2Model::HasSequence", 0x00825EE0, 0), model, anim)) anim = 0;
+            // CM2Model::SetBoneSequence(bone, sequence, variation, time, speed, blend, primary):
+            // __thiscall, `ret 0x1c` (0x00832ADA); bone 0xFFFFFFFF is every bone.
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetBoneSequence", 0), model, 0xFFFFFFFFu, anim, 0xFFFFFFFFu,
+                                  0u, speed, int32_t(1), int32_t(1));
+        }
+
+        /// The model's loaded callback: CM2Model::UpdateLoaded calls it cdecl (model, arg) and
+        /// pops both (0x0082519A).
+        void __cdecl OnWorldModelLoaded(void* model, void*)
+        {
+            const auto it   = g_pendingAnims.find(model);
+            PendingAnim anim{0, 1.0f};
+            if (it != g_pendingAnims.end())
+            {
+                anim = it->second;
+                g_pendingAnims.erase(it);
+            }
+            PlayNow(model, anim.anim, anim.speed);
+        }
+
+        /// What SpellEffectEnumProc does for its effect: a MAP_OBJECT_FUNC, cdecl (param, flags,
+        /// guid, param32), a bare `ret` (0x004F5959).
+        int32_t __cdecl WorldModelEnum(void*, uint32_t flags, uint64_t, uintptr_t param32)
+        {
+            void* model = reinterpret_cast<void*>(param32);
+            if (!model) return 1;
+            // CM2Model::SetAnimating(int): __thiscall, `ret 4` (0x00823F59).
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetAnimating", 0), model, int32_t(1));
+            // CM2Model::IsLoaded(wait, recursive): __thiscall, `ret 8` (0x00824F19).
+            if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::IsLoaded", 0), model, int32_t(0), int32_t(0)) &&
+                !Read<void*>(model, WXL_FIELD("CM2Model", "m_attachParent")))
+            {
+                const uint32_t visible = flags & 1;
+                uint32_t       f       = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags"));
+                f = (f & ~kShown) | (visible << 3);
+                f = (f & ~kAnimShown) | (visible << 16);
+                std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+            }
+            return 1;
+        }
+
+        /// The placement's matrix, built by the client's own C44Matrix members as the recompiled
+        /// client builds it: identity, turned around z, y and x, scaled, then moved.
+        void PlacementMatrix(const wxl_m2_placement& at, float* m)
+        {
+            std::memset(m, 0, kMatrixSize);
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+            // C44Matrix::RotateAroundZ/Y/X(angle), Scale(float): __thiscall, `ret 4` each
+            // (0x004C33B9, 0x004C3379, 0x004C3339, 0x004C1C3D).
+            if (at.yaw != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundZ", 0), m, at.yaw);
+            if (at.pitch != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundY", 0), m, at.pitch);
+            if (at.roll != 0.0f) x86::CallMember<void>(WXL_SITE("C44Matrix::RotateAroundX", 0), m, at.roll);
+            x86::CallMember<void>(WXL_SITE_AT("C44Matrix::Scale", 0x004C1BF0, 0), m, at.scale > 0.0f ? at.scale : 1.0f);
+            m[12] = at.position.x;
+            m[13] = at.position.y;
+            m[14] = at.position.z;
+        }
+
+        /// CM2Model::SetWorldTransform(const C44Matrix&) (0x004D8630), as the fork writes it.
+        void SetWorldTransform(void* model, const float* m)
+        {
+            uint8_t* base = static_cast<uint8_t*>(model);
+            uint32_t f    = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) | kWorldMatrix;
+            std::memcpy(base + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+            std::memcpy(base + WXL_FIELD("CM2Model", "m_worldTransform"), m, kMatrixSize);
+        }
+    }
+
+    void* m2_create_world_model(const char* path)
+    {
+        if (!IsClient() || !path || !*path) return nullptr;
+        void* scene = *reinterpret_cast<void* const*>(WXL_STATIC("World::s_m2Scene"));
+        if (!scene) return nullptr;
+        // CM2Scene::CreateModel(path, flags): __thiscall, `ret 8` (0x0081F8FF).
+        void* model = x86::CallMember<void*>(WXL_SITE("CM2Scene::CreateModel", 0), scene, path, uint32_t(0));
+        // CM2Model::SetLoadedCallback(fn, arg): __thiscall, `ret 8` (0x008251C5); it calls back at
+        // once when the model has loaded already.
+        if (model)
+            x86::CallMember<void>(WXL_SITE("CM2Model::SetLoadedCallback", 0), model, &OnWorldModelLoaded,
+                                  static_cast<void*>(nullptr));
+        return model;
+    }
+
+    wxl_bool m2_place_world(void* model, const wxl_m2_placement* placement)
+    {
+        if (!IsClient() || !model || !placement || map_id() < 0) return WXL_FALSE;
+        if (!*reinterpret_cast<void* const*>(WXL_STATIC("World::s_m2Scene"))) return WXL_FALSE;
+        m2_detach_model(model);
+        float matrix[16];
+        PlacementMatrix(*placement, matrix);
+        SetWorldTransform(model, matrix);
+        uint8_t* base = static_cast<uint8_t*>(model);
+        uint32_t f    = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) | kProjected;
+        std::memcpy(base + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+        float world[16];
+        std::memcpy(world, base + WXL_FIELD("CM2Model", "m_worldTransform"), sizeof world);
+
+        void*& entity = g_worldEntities[model];
+        if (!entity)
+        {
+            // CMap::ObjectCreateStatic(model, matrix, func, funcParam, param32): cdecl, a bare
+            // `ret` (0x00782342).
+            using CreateStatic = void*(__cdecl*)(void*, const float*, int32_t(__cdecl*)(void*, uint32_t, uint64_t, uintptr_t),
+                                                 void*, uintptr_t);
+            entity = reinterpret_cast<CreateStatic>(WXL_SITE("CMap::ObjectCreateStatic", 0))(
+                model, world, &WorldModelEnum, nullptr, reinterpret_cast<uintptr_t>(model));
+            if (!entity)
+            {
+                g_worldEntities.erase(model);
+                return WXL_FALSE;
+            }
+        }
+
+        float box[6]    = {};  // CAaBox: b, t
+        float sphere[4] = {};  // CAaSphere: c, r
+        float light[3]  = {};
+        if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::IsLoaded", 0), model, int32_t(0), int32_t(0)))
+        {
+            // CM2Model::GetBoundingBox() / GetBoundingSphere(): __thiscall with the hidden return
+            // pointer, `ret 4` (0x004F5E70, 0x004F5EF7).
+            x86::CallMember<void*>(WXL_SITE("CM2Model::GetBoundingBox", 0), model, static_cast<void*>(box));
+            x86::CallMember<void*>(WXL_SITE("CM2Model::GetBoundingSphere", 0), model, static_cast<void*>(sphere));
+            light[0] = sphere[0], light[1] = sphere[1], light[2] = sphere[2];
+        }
+        light[2] = 1.0f;
+        // CMap::ObjectUpdate(entity, matrix, box, sphere, light, bool, flags): cdecl, a bare
+        // `ret` (0x007804F4).
+        using Update = void(__cdecl*)(void*, float*, float*, float*, float*, int32_t, uint32_t);
+        reinterpret_cast<Update>(WXL_SITE("CMap::ObjectUpdate", 0))(entity, world, box, sphere, light, 0, 0xFFFFFFFFu);
+        return WXL_TRUE;
+    }
+
+    void m2_unplace_world(void* model)
+    {
+        const auto it = g_worldEntities.find(model);
+        if (it == g_worldEntities.end()) return;
+        void* entity = it->second;
+        g_worldEntities.erase(it);
+        if (!IsClient() || !model) return;
+        // World::ObjectDestroy(entity): cdecl, a bare `ret` (0x00782731).
+        if (entity) x86::CallFree<void>(WXL_SITE("World::ObjectDestroy", 0), entity);
+        uint32_t f = Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & ~(kShown | kAnimShown);
+        std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_fFlags"), &f, sizeof f);
+    }
+
+    void m2_set_transform(void* model, const wxl_m2_placement* placement)
+    {
+        if (!IsClient() || !model || !placement) return;
+        float matrix[16];
+        PlacementMatrix(*placement, matrix);
+        SetWorldTransform(model, matrix);
+    }
+
+    void m2_play_animation(void* model, uint32_t anim, float speed)
+    {
+        if (!IsClient() || !model) return;
+        if (!Loaded(model))
+        {
+            g_pendingAnims[model] = PendingAnim{anim, speed};
+            return;
+        }
+        PlayNow(model, anim, speed);
+    }
+
+    wxl_bool m2_loaded(const void* model) { return IsClient() && model && Loaded(model) ? WXL_TRUE : WXL_FALSE; }
+
+    uint32_t m2_animation_length(void* model, uint32_t anim)
+    {
+        if (!IsClient() || !model || !Loaded(model)) return 0;
+        if (!x86::CallMember<int32_t>(WXL_SITE_AT("CM2Model::HasSequence", 0x00825EE0, 0), model, anim)) return 0;
+        // CM2Model::GetSequenceInfo(id, variation, M2SequenceInfo&): __thiscall, `ret 0xc` (0x0082D11A).
+        alignas(4) uint8_t info[WXL_TYPE_SIZE("M2SequenceInfo")] = {};
+        x86::CallMember<void>(WXL_SITE("CM2Model::GetSequenceInfo", 0), model, anim, 0u, static_cast<void*>(info));
+        return Read<uint32_t>(info, WXL_FIELD("M2SequenceInfo", "m_duration"));
+    }
+
+    void m2_set_alpha(void* model, float alpha)
+    {
+        if (IsClient() && model)
+            std::memcpy(static_cast<uint8_t*>(model) + WXL_FIELD("CM2Model", "m_baseAlpha"), &alpha, sizeof alpha);
+    }
+
+    void m2_set_emitting(void* model, wxl_bool emitting)
+    {
+        if (!IsClient() || !model) return;
+        // CM2Model::SetEmittersEnabled(int) / SetRibbonsEnabled(uint): __thiscall, `ret 4`
+        // (0x00827A3C, 0x00824270).
+        x86::CallMember<void>(WXL_SITE("CM2Model::SetEmittersEnabled", 0), model, int32_t(emitting ? 1 : 0));
+        x86::CallMember<void>(WXL_SITE("CM2Model::SetRibbonsEnabled", 0), model, uint32_t(emitting ? 1 : 0));
+    }
+
+    wxl_bool m2_attachment_world(void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (!IsClient() || !model || !out || !Loaded(model) || !Read<void*>(model, WXL_FIELD("CM2Model", "m_scene")))
+            return WXL_FALSE;
+        // CM2Model::HasAttachment(id): __thiscall, `ret 4` (0x00827437).
+        if (!x86::CallMember<int32_t>(WXL_SITE("CM2Model::HasAttachment", 0), model, attachment)) return WXL_FALSE;
+        // CM2Model::GetAttachmentPosition(id): __thiscall with the hidden return pointer, `ret 8`
+        // (0x0083140C).
+        wxl_vec3 position{};
+        x86::CallMember<void*>(WXL_SITE("CM2Model::GetAttachmentPosition", 0), model, static_cast<void*>(&position),
+                               attachment);
+        *out = position;
+        return WXL_TRUE;
+    }
+
+    // --- M2: bones for wxl.m2's bone watchers, on the animate threads -----------------------------
+
+    wxl_bool m2_bones(void* model, wxl_m2_bones* out)
+    {
+        if (!IsClient() || !model || !out || !Loaded(model)) return WXL_FALSE;
+        const uint8_t* shared   = static_cast<const uint8_t*>(Via(model, WXL_FIELD("CM2Model", "m_shared")));
+        const void*    scene    = Via(model, WXL_FIELD("CM2Model", "m_scene"));
+        float*         matrices = Read<float*>(model, WXL_FIELD("CM2Model", "m_boneMatrices"));
+        const void*    header   = shared ? Via(shared, WXL_FIELD("CM2Shared", "m_data")) : nullptr;
+        if (!shared || !scene || !matrices || !header) return WXL_FALSE;
+        const char* name = reinterpret_cast<const char*>(shared + WXL_FIELD("CM2Shared", "m_fileName"));
+        out->model       = model;
+        out->file        = const_cast<uint8_t*>(shared);
+        out->path        = wxl_str{name, static_cast<uint32_t>(strnlen(name, kFileNameSize))};
+        out->bone_count  = Read<uint32_t>(header, WXL_FIELD("M2Data", "m_bones.m_count"));
+        out->matrices    = matrices;
+        std::memcpy(out->model_matrix, static_cast<const uint8_t*>(model) + WXL_FIELD("CM2Model", "m_matrixF4"),
+                    sizeof out->model_matrix);
+        std::memcpy(out->view_to_world, static_cast<const uint8_t*>(scene) + WXL_FIELD("CM2Scene", "m_viewInv"),
+                    sizeof out->view_to_world);
+        out->time_ms = Read<uint32_t>(scene, WXL_FIELD("CM2Scene", "m_time"));
+        return WXL_TRUE;
+    }
+
+    wxl_bool m2_file_bone(const void* file, uint32_t index, int16_t* parent, wxl_vec3* pivot)
+    {
+        if (!IsClient() || !file) return WXL_FALSE;
+        const void* header = Via(file, WXL_FIELD("CM2Shared", "m_data"));
+        if (!header) return WXL_FALSE;
+        uint32_t       count = 0;
+        const uint8_t* bones = Array<uint8_t>(header, WXL_FIELD("M2Data", "m_bones.m_count"), count);
+        if (!bones || index >= count) return WXL_FALSE;
+        const uint8_t* bone = bones + static_cast<std::size_t>(index) * WXL_TYPE_SIZE("M2CompBone");
+        if (parent) *parent = Read<int16_t>(bone, WXL_FIELD("M2CompBone", "m_parentIndex"));
+        if (pivot) *pivot = Read<wxl_vec3>(bone, WXL_FIELD("M2CompBone", "m_pivot"));
+        return WXL_TRUE;
+    }
 
     wxl_bool object_position(const void* object, wxl_vec3* out)
     {
@@ -1122,6 +1958,46 @@ namespace wxl::core::binding
         return CallMember<const void*>(WXL_SITE("CGUnit_C::GetAura", 0), object, index);
     }
 
+    wxl_bool unit_is_outdoors(const void* object)
+    {
+        // __thiscall, no argument: World::QueryOutdoors(m_worldObject); 0 or 1 in EAX
+        // (`neg eax; sbb eax, eax; neg eax` at 0x0071B7FF), a bare `ret`.
+        if (!IsClient() || !OnMainThread() || !object) return WXL_FALSE;
+        return CallMember<int32_t>(WXL_SITE("CGUnit_C::IsOutdoors", 0), object) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool unit_can_attack(const void* unit, const void* target)
+    {
+        // CGUnit_C::CanAttack(const CGUnit_C*): __thiscall, `ret 4`; the answer is AL alone.
+        if (!IsClient() || !OnMainThread() || !unit || !target) return WXL_FALSE;
+        return CallMember<bool>(WXL_SITE("CGUnit_C::CanAttack", 0), unit, target) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool unit_can_interact(const void* unit, const void* target)
+    {
+        // CGUnit_C::CanInteractNow(const CGUnit_C*): __thiscall, `ret 4`; the answer is AL alone.
+        if (!IsClient() || !OnMainThread() || !unit || !target) return WXL_FALSE;
+        return CallMember<bool>(WXL_SITE("CGUnit_C::CanInteractNow", 0), unit, target) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool gameobject_can_use(const void* object)
+    {
+        // CGGameObject_C::CanHighlight: __thiscall, no argument (a virtual of the object, called
+        // here at its address); its type helper's CanUseNow(error, distance, text): __thiscall,
+        // `ret 0xC`, virtual slot 7 (`call [eax + 0x1C]` in CanChangeCursor, 0x0070F9BE); both
+        // answer AL alone.
+        if (!IsClient() || !OnMainThread() || !object) return WXL_FALSE;
+        if (!CallMember<bool>(WXL_SITE("CGGameObject_C::CanHighlight", 0), object)) return WXL_FALSE;
+        const void* helper = Read<const void*>(object, WXL_FIELD("CGGameObject_C", "m_typeData"));
+        if (!helper) return WXL_FALSE;
+        const uintptr_t canUseNow = (*reinterpret_cast<const uintptr_t* const*>(helper))[7];
+        uint32_t        error     = 0;
+        float           distance  = 0.0f;
+        const char*     text      = nullptr;
+        if (CallMember<bool>(canUseNow, helper, &error, &distance, &text)) return WXL_TRUE;
+        return error == 240 ? WXL_TRUE : WXL_FALSE; // ERR_USE_TOO_FAR: usable once in reach
+    }
+
     const void* item_stats(const void* object)
     {
         // __thiscall, no argument: g_itemDBCache.GetRecord(entry, no guid, no callback).
@@ -1221,6 +2097,268 @@ namespace wxl::core::binding
                    : WXL_FALSE;
     }
 
+    wxl_bool action_face(const void* player, float facing)
+    {
+        // CGInputControl::CanTurn(CGUnit_C*): __stdcall, `ret 4`; int in EAX.
+        // CGUnit_C::OnSetRawFacingLocal(uint32_t time, float facing): __thiscall, `ret 8`, called
+        // so by CameraTurnPlayer (0x005FB33A: the facing then the time pushed, ECX the mover).
+        using CanTurnFn = int32_t(__stdcall*)(const void* unit);
+        if (!IsClient() || !OnMainThread() || !player) return WXL_FALSE;
+        const uint64_t mover = *reinterpret_cast<const uint64_t*>(WXL_STATIC("CGUnit_C::s_activeMover"));
+        if (mover != object_guid(player)) return WXL_FALSE;
+        if (!reinterpret_cast<CanTurnFn>(WXL_SITE("CGInputControl::CanTurn", 0))(player)) return WXL_FALSE;
+        CallMember<void>(WXL_SITE("CGUnit_C::OnSetRawFacingLocal", 0), player, os_time_ms(), facing);
+        return WXL_TRUE;
+    }
+
+    // --- Camera ---------------------------------------------------------------------------
+
+    namespace
+    {
+        // CSimpleCamera's facing is a C33Matrix of three rows, forward, the client's right, up.
+        constexpr std::size_t kFacing = WXL_FIELD("CSimpleCamera", "m_facing.a0");
+
+        wxl_vec3 Row(const void* camera, uint32_t row)
+        {
+            return Read<wxl_vec3>(camera, kFacing + row * sizeof(wxl_vec3));
+        }
+
+        using camera_facing::Dot;
+
+        /// v * m, the client's operator*(C3Vector, C33Matrix): v's components weigh m's rows.
+        wxl_vec3 Times(const wxl_vec3& v, const float (&m)[9])
+        {
+            return wxl_vec3{v.x * m[0] + v.y * m[3] + v.z * m[6], v.x * m[1] + v.y * m[4] + v.z * m[7],
+                            v.x * m[2] + v.y * m[5] + v.z * m[8]};
+        }
+
+        /// The rotation from the camera's parent to the world, when it has one: ParentToWorld,
+        /// __thiscall with the C33Matrix returned through a hidden pointer, `ret 4`.
+        bool ParentRotation(const void* camera, float (&m)[9])
+        {
+            if (!Read<uint64_t>(camera, WXL_FIELD("CGCamera", "m_relativeTo"))) return false;
+            CallMember<void*>(WXL_SITE("CGCamera::ParentToWorld", 0), camera, static_cast<void*>(m));
+            return true;
+        }
+    }
+
+    void* camera_world(void)
+    {
+        if (!IsClient()) return nullptr;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        return frame ? Read<void*>(frame, WXL_FIELD("CGWorldFrame", "m_camera")) : nullptr;
+    }
+
+    wxl_bool camera_read(const void* camera, wxl_core_camera* out)
+    {
+        if (!IsClient() || !camera || !out) return WXL_FALSE;
+        out->position = Read<wxl_vec3>(camera, WXL_FIELD("CSimpleCamera", "m_position"));
+        out->forward  = Row(camera, 0);
+        out->left     = Row(camera, 1);
+        out->up       = Row(camera, 2);
+        float parent[9];
+        if (ParentRotation(camera, parent))
+        {
+            // CGCamera::Forward/Right/Up: the row times ParentToWorld().
+            out->forward = Times(out->forward, parent);
+            out->left    = Times(out->left, parent);
+            out->up      = Times(out->up, parent);
+        }
+        // CGCamera::FOV: m_targetFov + m_fov, clamped to [0, 3.1241393].
+        out->fov_base    = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_fov"));
+        const float fov  = Read<float>(camera, WXL_FIELD("CGCamera", "m_targetFov")) + out->fov_base;
+        out->fov         = fov < 0.0f ? 0.0f : (fov >= 3.1241393f ? 3.1241393f : fov);
+        out->near_z      = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_nearZ"));
+        out->far_z       = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_farZ"));
+        out->aspect      = Read<float>(camera, WXL_FIELD("CSimpleCamera", "m_aspect"));
+        out->pivot       = Read<wxl_vec3>(camera, WXL_FIELD("CGCamera", "m_targetPosition"));
+        out->pivot.z    += Read<float>(camera, WXL_FIELD("CGCamera", "m_height"));
+        out->followed    = Read<uint64_t>(camera, WXL_FIELD("CGCamera", "m_targetGUID"));
+        out->cinematic   = Read<const void*>(camera, WXL_FIELD("CGCamera", "m_model")) ? 1u : 0u;
+        return WXL_TRUE;
+    }
+
+    void camera_write(void* camera, const wxl_core_camera* view)
+    {
+        if (!IsClient() || !camera || !view) return;
+        // The rows SetFacing(forward) builds, turned by the roll: the view matrix takes its up
+        // from the third (SetGxProjectionAndView), so the world and the pick turn with it.
+        wxl_vec3 rows[3];
+        if (!camera_facing::Facing(view->forward, view->roll, rows)) return;
+        float parent[9];
+        if (ParentRotation(camera, parent))
+        {
+            // The facing is kept in the parent's frame: each world row times the inverse
+            // rotation, which is the transpose, so its dot with each of the parent's rows.
+            for (wxl_vec3& row : rows)
+            {
+                const wxl_vec3 world = row;
+                row = wxl_vec3{Dot(world, wxl_vec3{parent[0], parent[1], parent[2]}),
+                               Dot(world, wxl_vec3{parent[3], parent[4], parent[5]}),
+                               Dot(world, wxl_vec3{parent[6], parent[7], parent[8]})};
+            }
+        }
+        char* bytes = static_cast<char*>(camera);
+        std::memcpy(bytes + WXL_FIELD("CSimpleCamera", "m_position"), &view->position, sizeof(wxl_vec3));
+        std::memcpy(bytes + kFacing, rows, sizeof rows);
+        std::memcpy(bytes + WXL_FIELD("CSimpleCamera", "m_fov"), &view->fov_base, sizeof(float));
+    }
+
+    wxl_bool world_trace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
+    {
+        // World::Intersect(const C3Vector&, const C3Vector&, C3Vector*, float*, uint32_t,
+        // HitTestDebug*): cdecl, a tail jump to CMap::Intersect (0x0077F314), which reads its six
+        // arguments and returns with a bare `ret`; bool in AL.
+        using IntersectFn = int32_t(__cdecl*)(const wxl_vec3* start, const wxl_vec3* end, wxl_vec3* hit,
+                                              float* fraction, uint32_t flags, void* debug);
+        if (!IsClient() || !OnMainThread() || !hit || map_id() < 0) return WXL_FALSE;
+        float fraction = 1.0f;
+        wxl_vec3 point{};
+        const int32_t met = reinterpret_cast<IntersectFn>(WXL_SITE("World::Intersect", 0))(&start, &finish, &point,
+                                                                                           &fraction, flags, nullptr);
+        if (!(met & 0xFF)) return WXL_FALSE;
+        *hit = point;
+        return WXL_TRUE;
+    }
+
+    // --- Input ----------------------------------------------------------------------------
+
+    namespace
+    {
+        // CGxDevice::CursorSetVisible(int) is the device vtable's slot 73 (+0x124):
+        // CGInputControl::UpdateMouseMode calls it so (`mov edx, [eax+0x124]; call edx` at
+        // 0x005FA8FA), and every device overrides it (CGxDeviceD3d at 0x0068E750).
+        constexpr std::size_t kCursorSetVisibleSlot = 0x124 / sizeof(void*);
+        using CursorSetVisibleFn = void(__fastcall*)(void* self, void* edx, int32_t visible);
+
+        void* Device() { return *reinterpret_cast<void* const*>(WXL_STATIC("g_theGxDevicePtr")); }
+    }
+
+    wxl_bool input_cursor_visible(void)
+    {
+        const void* device = IsClient() ? Device() : nullptr;
+        return device && Read<int32_t>(device, WXL_FIELD("CGxDevice", "m_cursorVisible")) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    void input_cursor_set_visible(wxl_bool visible)
+    {
+        void* device = IsClient() ? Device() : nullptr;
+        if (!device) return;
+        const void* const* vtable = Read<const void* const*>(device, 0);
+        reinterpret_cast<CursorSetVisibleFn>(const_cast<void*>(vtable[kCursorSetVisibleSlot]))(device, nullptr,
+                                                                                               visible ? 1 : 0);
+    }
+
+    void input_cursor_restore(void)
+    {
+        // CGInputControl::UpdateMouseMode(int force): __thiscall, `ret 4` (0x005FA90B).
+        if (!IsClient()) return;
+        const void* control = *reinterpret_cast<const void* const*>(WXL_STATIC("CGInputControl::s_inputControl"));
+        if (control)
+            CallMember<void>(WXL_SITE("CGInputControl::UpdateMouseMode", 0), control, int32_t(1));
+        else
+            input_cursor_set_visible(WXL_TRUE);
+    }
+
+    wxl_bool input_pointer_over_world(void)
+    {
+        if (!IsClient()) return WXL_FALSE;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        const void* top   = *reinterpret_cast<const void* const*>(WXL_STATIC("CSimpleTop::s_instance"));
+        if (!frame || !top) return WXL_FALSE;
+        return Read<const void*>(top, WXL_FIELD("CSimpleTop", "m_mouseFocus")) == frame ? WXL_TRUE : WXL_FALSE;
+    }
+
+    // --- The game's mouse look -------------------------------------------------------------
+
+    uint32_t input_pending_action(const void* control)
+    {
+        if (!IsClient() || !control) return 0;
+        return Read<uint32_t>(control, WXL_FIELD("CGInputControl", "m_pendingDefaultAction"));
+    }
+
+    void input_clear_pending_action(void* control)
+    {
+        if (!IsClient() || !control) return;
+        const uint32_t none = 0; // INPUT_RELEASE_NONE
+        std::memcpy(static_cast<char*>(control) + WXL_FIELD("CGInputControl", "m_pendingDefaultAction"), &none, sizeof none);
+    }
+
+    wxl_bool input_default_action(uint32_t button)
+    {
+        // CGWorldFrame::PerformDefaultAction(MOUSEBUTTON): __thiscall, `ret 4` (0x004F7A38).
+        if (!IsClient() || !OnMainThread()) return WXL_FALSE;
+        const void* frame = *reinterpret_cast<const void* const*>(WXL_STATIC("CGWorldFrame::s_currentWorldFrame"));
+        if (!frame) return WXL_FALSE;
+        CallMember<void>(WXL_SITE("CGWorldFrame::PerformDefaultAction", 0), frame, button);
+        return WXL_TRUE;
+    }
+
+    void input_mouse_look_stop(void)
+    {
+        // CGInputControl::UnsetControlBit(bit, time, keepSmoothing): __thiscall, `ret 0xC`
+        // (0x005FA46C, 0x005FA6A6). Its gate lets bits it did not keep go through.
+        if (!IsClient() || !OnMainThread()) return;
+        void* control = *reinterpret_cast<void* const*>(WXL_STATIC("CGInputControl::s_inputControl"));
+        if (!control) return;
+        if (!(Read<uint32_t>(control, WXL_FIELD("CGInputControl", "m_flags")) & 0x3u)) return;
+        input_clear_pending_action(control);
+        CallMember<int32_t>(WXL_SITE("CGInputControl::UnsetControlBit", 0), control, 0x3u, os_time_ms(), int32_t(0));
+    }
+
+    uint32_t input_click_hit(const void* frame, uint64_t* guid, wxl_vec3* point)
+    {
+        // As CGWorldFrame::PerformDefaultAction reads it (0x004F7880): the active player, not
+        // charmed; a name plate under the pointer (CGUnit_C::GetNamePlateFocus reads the static);
+        // then m_defaultActionHitKind (0 none, 1 ground, 2 a model, 3 a map object).
+        if (guid) *guid = 0;
+        if (point) *point = wxl_vec3{0.0f, 0.0f, 0.0f};
+        if (!IsClient() || !frame) return 0;
+        const void* player = local_player_object();
+        if (!player || unit_charmed_by(player)) return 0;
+        const void* plate = *reinterpret_cast<const void* const*>(WXL_STATIC("CGUnit_C::s_namePlateFocus"));
+        if (plate)
+        {
+            if (guid) *guid = Read<uint64_t>(plate, WXL_FIELD("CGNamePlateFrame", "m_guid"));
+            return 4;
+        }
+        const uint32_t kind = Read<uint32_t>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHitKind"));
+        if (kind > 3) return 0;
+        if (guid) *guid = Read<uint64_t>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHit.m_guid"));
+        if (point) *point = Read<wxl_vec3>(frame, WXL_FIELD("CGWorldFrame", "m_defaultActionHit.m_point"));
+        // A ground or map-object hit passes its guid on only when it names a game object.
+        if (guid && (kind == 1 || kind == 3))
+        {
+            const uint32_t high = static_cast<uint32_t>(*guid >> 32);
+            if ((high & 0xF0000000u) != 0x10000000u || (high & 0x0FF00000u) != 0x0FC00000u) *guid = 0;
+        }
+        return kind;
+    }
+
+    wxl_bool input_spell_targeting(void)
+    {
+        // Spell_C_IsTargeting (0x007FD620) answers s_targetingSpell != nullptr.
+        if (!IsClient()) return WXL_FALSE;
+        return *reinterpret_cast<const void* const*>(WXL_STATIC("s_targetingSpell")) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    // --- Pose -----------------------------------------------------------------------------
+
+    void model_bone_flags(void* model, uint32_t bone, uint32_t flags, uint32_t mask)
+    {
+        // CM2Model::SetBoneFlags(boneId, flags, mask): __thiscall, `ret 0xC` (0x00826642).
+        if (!IsClient() || !model) return;
+        CallMember<void>(WXL_SITE("CM2Model::SetBoneFlags", 0), model, bone, flags, mask);
+    }
+
+    void model_bone_transform(void* model, uint32_t bone, const float* matrix)
+    {
+        // CM2Model::SetBoneProceduralTransform(boneId, const C44Matrix&): __thiscall, `ret 8`
+        // (0x00827357); the matrix is copied.
+        if (!IsClient() || !model || !matrix) return;
+        CallMember<void>(WXL_SITE("CM2Model::SetBoneProceduralTransform", 0), model, bone, matrix);
+    }
+
     // --- Memory ---------------------------------------------------------------------------
 
     namespace
@@ -1311,7 +2449,9 @@ namespace wxl::core::binding
         if (!IsClient() || !fn) return 0;
         const uint8_t* device = static_cast<const uint8_t*>(GxDevice());
         if (!device) return 0;
-        // EGxApi: 1 is Direct3D 9, 2 Direct3D 9Ex; the others hold no IDirect3D resources.
+        // EGxApi: 1 is Direct3D 9, 2 Direct3D 9Ex; the others hold no IDirect3D resources, nor
+        // does a D3D9 device the Vulkan renderer draws (its records are the renderer's).
+        if (gx::VulkanActive()) return 0;
         const int32_t api = Read<int32_t>(device, WXL_FIELD("CGxDevice", "m_api"));
         if (api != 1 && api != 2) return 0;
 
@@ -1392,6 +2532,12 @@ namespace wxl::core::binding
         return DescribeArchive(Read<const uint8_t*>(archive, 4), out) ? WXL_TRUE : WXL_FALSE;
     }
 
+    wxl_bool archive_record_of(void* record, wxl_core_archive* out)
+    {
+        if (!IsClient() || !record || !out) return WXL_FALSE;
+        return DescribeArchive(static_cast<const uint8_t*>(record), out) ? WXL_TRUE : WXL_FALSE;
+    }
+
     uint32_t client_dbs(wxl_core_db_fn fn, void* user)
     {
         if (!IsClient() || !fn) return 0;
@@ -1452,6 +2598,24 @@ namespace
     // The allocator of model data: 16-byte aligned blocks of Storm's heap (SMemAlloc).
     using AllocA16Fn = void*(__cdecl*)(uint32_t size, const char* file, int32_t line);
     using FreeA16Fn  = void(__cdecl*)(void* block);
+
+    /// PumpBlpTextureAsync(texture, data) (0x004B7BD0): the texture in EAX (`mov esi, eax` at
+    /// 0x004B7BE3), the data the one stack dword ([ebp+8]), popped by the caller, as
+    /// FinalizeAsyncBlpTextureLoad calls it (0x004B7E8E: `mov eax, esi; call; add esp, 4`).
+    /// Kept out of line: the block sets EAX, which a frame of the caller's must not hold.
+    __declspec(noinline) int32_t CallPumpBlp(void* texture, const void* data)
+    {
+        const std::uintptr_t site   = WXL_SITE("PumpBlpTextureAsync", 0);
+        int32_t              result = 0;
+        __asm {
+            mov  eax, dword ptr [texture]
+            push dword ptr [data]
+            call dword ptr [site]
+            add  esp, 4
+            mov  dword ptr [result], eax
+        }
+        return result;
+    }
 }
 
 namespace wxl::core::binding
@@ -1534,6 +2698,111 @@ namespace wxl::core::binding
     {
         if (!IsClient() || !texture) return nullptr;
         return static_cast<const char*>(texture) + WXL_FIELD("CTexture", "m_filename");
+    }
+
+    uint32_t m2_cache_evict(const char* leaf, void** out, uint32_t capacity)
+    {
+        if (!IsClient() || !leaf || !*leaf) return 0;
+        // CM2Cache's 1021 buckets at +0x10, each a CM2Shared chained through m_next (+0x148) and
+        // m_previous (+0x144), the address of the link that points at it: CM2Cache::ClearSharedHash
+        // (0x0081BF50: `lea edx, [ecx+0x10]`, `mov edi, 0x3fd`, [eax+0x144], [eax+0x148]).
+        constexpr std::uintptr_t kCache    = WXL_STATIC_AT("s_cache", 0x00D3FCF0);
+        constexpr std::size_t    kBuckets  = 0x10;
+        constexpr uint32_t       kCount    = 0x3FD;
+        constexpr std::size_t    kPrevious = 0x144;
+        constexpr std::size_t    kNext     = 0x148;
+        static_assert(WXL_FIELD("CM2Shared", "m_fileNameWithoutPath") == 0x140, "m_previous follows it");
+
+        uint32_t evicted = 0;
+        for (uint32_t i = 0; i < kCount; ++i)
+        {
+            uint8_t* shared = *reinterpret_cast<uint8_t**>(kCache + kBuckets + i * 4);
+            while (shared)
+            {
+                uint8_t*    next = Read<uint8_t*>(shared, kNext);
+                const char* name = Read<const char*>(shared, WXL_FIELD("CM2Shared", "m_fileNameWithoutPath"));
+                if (name && _stricmp(name, leaf) == 0)
+                {
+                    // As ~CM2Shared unlinks it (0x0083D5B0).
+                    uint8_t** previous = Read<uint8_t**>(shared, kPrevious);
+                    if (previous) *previous = next;
+                    if (next) std::memcpy(next + kPrevious, &previous, sizeof previous);
+                    const void* none = nullptr;
+                    std::memcpy(shared + kPrevious, &none, sizeof none);
+                    std::memcpy(shared + kNext, &none, sizeof none);
+                    if (out && evicted < capacity) out[evicted] = shared;
+                    ++evicted;
+                }
+                shared = next;
+            }
+        }
+        return evicted;
+    }
+
+    wxl_bool unit_update_display(void* object)
+    {
+        if (!IsClient() || !object) return WXL_FALSE;
+        const uint32_t type = object_type_id(object);
+        if (type != WXL_OBJECT_UNIT && type != WXL_OBJECT_PLAYER) return WXL_FALSE;
+        // CGUnit_C::UpdateDisplayInfo(force): __thiscall, `ret 4`, reached through the unit's and
+        // the player's vtables only (SMSG_FORCE_DISPLAY_UPDATE's `unit->UpdateDisplayInfo(1)`).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::UpdateDisplayInfo", 0), object, int32_t(1));
+        return WXL_TRUE;
+    }
+
+    uint32_t texture_reload(const char* name, uint32_t* busy, uint32_t* atlas)
+    {
+        if (busy) *busy = 0;
+        if (atlas) *atlas = 0;
+        if (!IsClient() || !name || !*name) return 0;
+        // s_textureList, a TSExplicitList<CTexture>: its terminator's m_next at +8, each texture's
+        // TSLink m_link at +0x64, its m_next at +4; an end pointer has its low bit set (TSList::IsEnd
+        // 0x00407900). The CTexture constructor links each one there (0x004B880D). m_flags +0x28
+        // (0x004B87B2), m_asyncObject +0x40, m_atlas +0x5C (0x004B87E4, 0x004B8800).
+        constexpr std::uintptr_t kList        = WXL_STATIC_AT("s_textureList", 0x00AC3348);
+        constexpr std::size_t    kLink        = 0x64;
+        constexpr std::size_t    kAsyncObject = 0x40;
+        constexpr std::size_t    kAtlas       = 0x5C;
+        static_assert(WXL_FIELD("CTexture", "m_filename") == kLink + 8, "m_filename follows m_link");
+
+        char path[MAX_PATH];
+        if (std::snprintf(path, sizeof path, "%s.blp", name) >= static_cast<int>(sizeof path)) return 0;
+
+        std::vector<uint8_t> data;
+        bool                 tried    = false;
+        uint32_t             reloaded = 0;
+        const auto           end      = [](const uint8_t* node) { return !node || (reinterpret_cast<std::uintptr_t>(node) & 1); };
+        for (uint8_t* texture = *reinterpret_cast<uint8_t**>(kList + 8); !end(texture);
+             texture          = Read<uint8_t*>(texture, kLink + 4))
+        {
+            const char* own = reinterpret_cast<const char*>(texture + WXL_FIELD("CTexture", "m_filename"));
+            if (_stricmp(own, name) != 0 && _stricmp(own, path) != 0) continue;
+            if (Read<const void*>(texture, kAsyncObject))
+            {
+                if (busy) ++*busy;
+                continue;
+            }
+            if (Read<const void*>(texture, kAtlas))
+            {
+                if (atlas) ++*atlas;
+                continue;
+            }
+            if (!tried)
+            {
+                tried      = true;
+                void* file = file_open(path);
+                if (file)
+                {
+                    data.resize(static_cast<std::size_t>(file_size(file)));
+                    const uint32_t got = data.empty() ? 0 : file_read(file, data.data(), static_cast<uint32_t>(data.size()));
+                    file_close(file);
+                    if (got != data.size()) data.clear();
+                }
+            }
+            if (data.empty()) break;
+            if (CallPumpBlp(texture, data.data())) ++reloaded;
+        }
+        return reloaded;
     }
 
     const char* map_obj_path(const void* map_obj)
@@ -1704,5 +2973,202 @@ namespace wxl::core::binding
         }
         reinterpret_cast<DuelReplyFn>(WXL_SITE("CGDuelInfo::CancelDuel", 0))();
         At<uint64_t>(WXL_STATIC("s_duelArbiter")) = 0;
+    }
+    // --- the map's ground (binding/terrain.def) ----------------------------------------------
+
+    wxl_bool terrain_present(void)
+    {
+        if (!IsClient() || !OnMainThread() || map_id() < 0) return WXL_FALSE;
+        if (!*reinterpret_cast<const int32_t*>(WXL_STATIC("CMap::bActive"))) return WXL_FALSE;
+        return *reinterpret_cast<const int32_t*>(WXL_STATIC("CMap::bDungeon")) ? WXL_FALSE : WXL_TRUE;
+    }
+
+    void* terrain_chunk(int32_t chunk_x, int32_t chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || chunk_x < 0 || chunk_y < 0 || chunk_x >= 1024 || chunk_y >= 1024)
+            return nullptr;
+        // CMap::m_areaTable[64 * tile row + tile column], as CMap::GetChunkFacets indexes it.
+        const auto* table = reinterpret_cast<void* const*>(WXL_STATIC("CMap::m_areaTable"));
+        const void* area  = table[64 * (chunk_y >> 4) + (chunk_x >> 4)];
+        if (!area || Read<const void*>(area, WXL_FIELD("CMapArea", "m_asyncObject"))) return nullptr;
+        const std::size_t slot = WXL_FIELD("CMapArea", "m_mapChunks") +
+                                 sizeof(void*) * static_cast<std::size_t>(16 * (chunk_y & 15) + (chunk_x & 15));
+        return Read<void*>(area, slot);
+    }
+
+    void* map_area_chunk(const void* area, int32_t chunk_x, int32_t chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || !area || chunk_x < 0 || chunk_y < 0 || chunk_x > 15 || chunk_y > 15)
+            return nullptr;
+        return Read<void*>(area, WXL_FIELD("CMapArea", "m_mapChunks") +
+                                     sizeof(void*) * static_cast<std::size_t>(16 * chunk_y + chunk_x));
+    }
+
+    /// Whether `chunk` is committed, readable memory of a chunk's size: a value left in a
+    /// register, or a freed chunk's page, is not.
+    bool ChunkMemory(const void* chunk)
+    {
+        const std::uintptr_t at = reinterpret_cast<std::uintptr_t>(chunk);
+        if (at < 0x10000 || (at & 3)) return false;
+        MEMORY_BASIC_INFORMATION info{};
+        const std::size_t        size     = WXL_FIELD("CMapChunk", "m_soundEmitters") + sizeof(void*);
+        const DWORD              readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        return VirtualQuery(chunk, &info, sizeof info) && info.State == MEM_COMMIT &&
+               !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (info.Protect & readable) &&
+               at + size <= reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    }
+
+    wxl_bool terrain_chunk_place(const void* chunk, int32_t* chunk_x, int32_t* chunk_y)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk_x || !chunk_y || !ChunkMemory(chunk)) return WXL_FALSE;
+        *chunk_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        *chunk_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        return *chunk_x >= 0 && *chunk_x < 1024 && *chunk_y >= 0 && *chunk_y < 1024 ? WXL_TRUE : WXL_FALSE;
+    }
+
+    wxl_bool terrain_chunk_view(void* chunk, wxl_core_terrain_chunk* out)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk || !out || !ChunkMemory(chunk)) return WXL_FALSE;
+        // Only a live chunk: its own place on the map leads back to it through the tile's slot.
+        const int32_t cx = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        const int32_t cy = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        if (terrain_chunk(cx, cy) != chunk) return WXL_FALSE;
+        const void* header = Read<const void*>(chunk, WXL_FIELD("CMapChunk", "m_header"));
+        out->chunk_x = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.x"));
+        out->chunk_y = Read<int32_t>(chunk, WXL_FIELD("CMapChunk", "m_cOffset.y"));
+        out->heights = Read<float*>(chunk, WXL_FIELD("CMapChunk", "m_height"));
+        out->normals = Read<int8_t*>(chunk, WXL_FIELD("CMapChunk", "m_normals"));
+        out->base_z  = Read<float>(chunk, WXL_FIELD("CMapChunk", "m_topLeftCoords.z"));
+        out->holes   = header ? Read<uint16_t>(header, WXL_FIELD("SMChunk", "m_holes")) : 0u;
+        return out->heights && out->normals ? WXL_TRUE : WXL_FALSE;
+    }
+
+    void terrain_chunk_rebuild(void* chunk, wxl_bool doodads)
+    {
+        if (!IsClient() || !OnMainThread() || !chunk) return;
+        // CMapChunk::CreateBounds: __thiscall, no argument, a bare `ret` (0x007C5220).
+        x86::CallMember<void>(WXL_SITE("CMapChunk::CreateBounds", 0), chunk);
+        char* render = Read<char*>(chunk, WXL_FIELD("CMapChunk", "m_renderChunk"));
+        if (render)
+        {
+            // CMapRenderChunk::AddBatch(chunk1, chunk2, position, flags): __thiscall, `ret 0x10`
+            // (0x007B7AF0); it copies the position before it reads the chunks' boxes.
+            void*    first  = Read<void*>(render, WXL_FIELD("CMapRenderChunk", "m_mapChunks[0]"));
+            void*    second = Read<void*>(render, WXL_FIELD("CMapRenderChunk", "m_mapChunks[1]"));
+            wxl_vec3 at     = Read<wxl_vec3>(render, WXL_FIELD("CMapRenderChunk", "m_vec1"));
+            const uint32_t flags = Read<uint8_t>(render, WXL_FIELD("CMapRenderChunk", "m_unkFlags"));
+            if (first) x86::CallMember<void>(WXL_SITE("CMapRenderChunk::AddBatch", 0), render, first, second, &at, flags);
+            const void* buffers = Read<const void*>(render, WXL_FIELD("CMapRenderChunk", "m_chunkBuf"));
+            char*       vertex  = buffers ? Read<char*>(buffers, WXL_FIELD("CMapChunkBuf", "m_vertexBuf")) : nullptr;
+            if (vertex) vertex[WXL_FIELD("CGxBuf", "m_hasData")] = 0;
+        }
+        if (doodads)
+        {
+            const std::size_t at   = WXL_FIELD("CMapChunk", "m_detailDoodadInst");
+            void*             inst = Read<void*>(chunk, at);
+            if (inst)
+            {
+                // CDetailDoodad::FreeInst(inst): cdecl, one dword, a bare `ret` (0x007B3960).
+                x86::CallFree<void>(WXL_SITE("CDetailDoodad::FreeInst", 0), inst);
+                void* none = nullptr;
+                std::memcpy(static_cast<char*>(chunk) + at, &none, sizeof none);
+            }
+        }
+    }
+
+    void terrain_forget_collision(void)
+    {
+        if (!IsClient() || !OnMainThread()) return;
+        // Movement.cpp's s_queryBox, a CAaBox (b then t): one that holds no point.
+        float* box = reinterpret_cast<float*>(WXL_STATIC_AT("s_queryBox", 0x00CA1660));
+        for (int i = 0; i < 3; ++i)
+        {
+            box[i]     = 3.4028235e38f;
+            box[3 + i] = -3.4028235e38f;
+        }
+    }
+
+    void unit_fall_local(const void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        const void* movement = Read<const void*>(unit, WXL_FIELD("CGUnit_C", "m_movement"));
+        if (!movement) return;
+        // CMovement_C::OnFallLocal(eventTime): __thiscall, `ret 4` (0x006ECCF0).
+        x86::CallMember<void>(WXL_SITE("CMovement_C::OnFallLocal", 0), movement, os_time_ms());
+    }
+
+    // --- NetClient: a message of a mod's, sent as the client sends its own -----------------------
+
+    wxl_bool net_send(const void* message, uint32_t size)
+    {
+        if (!IsClient() || !OnMainThread() || !message || size < 4) return WXL_FALSE;
+        // ClientServices::Send2 ends the client (SErrDisplayAppFatalMessage) when there is no
+        // connection: ask first.
+        if (!*reinterpret_cast<void* const*>(WXL_STATIC("ClientServices::s_currentConnection"))) return WXL_FALSE;
+        // A CDataStore of 0x18 bytes over the message, as the client wraps received bytes:
+        // CDataStore::CDataStore(data, size) (__thiscall, `ret 8`, 0x004669A0) sets its vtable,
+        // m_alloc -1 (nothing to free) and m_read 0. ClientServices::Send2(msg) (__cdecl, 0x006B0B50)
+        // hands it to NetClient::Send, which frames, encrypts and sends it.
+        alignas(4) uint8_t store[0x18] = {};
+        x86::CallMember<void*>(WXL_SITE_AT("CDataStore::CDataStore", 0x004669A0, 0), store,
+                               const_cast<uint8_t*>(static_cast<const uint8_t*>(message)), size);
+        x86::CallFree<void>(WXL_SITE("ClientServices::Send2", 0), static_cast<void*>(store));
+        return WXL_TRUE;
+    }
+
+    // --- Animation: a unit's animation as the client plays it --------------------------------
+
+    void unit_play_animation(void* unit, uint32_t anim, uint32_t flags)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        // CGUnit_C::PlayBaseAnimation(animId, flags): __thiscall, `ret 8` (0x007385C0).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::PlayBaseAnimation", 0), unit, anim, static_cast<int32_t>(flags));
+    }
+
+    void unit_update_animation(void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        // CGUnit_C::UpdateBaseAnimation(animFlags, mask): __thiscall, `ret 8` (0x0073AC30).
+        x86::CallMember<void>(WXL_SITE("CGUnit_C::UpdateBaseAnimation", 0), unit, 0u, int32_t(-1));
+    }
+
+    uint32_t unit_shown_animation(const void* unit)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return 0xFFFFFFFFu;
+        // CGUnit_C::GetCurrentTorsoAnimId(): __thiscall, bare `ret` (0x00717260).
+        return x86::CallMember<uint32_t>(WXL_SITE("CGUnit_C::GetCurrentTorsoAnimId", 0), unit);
+    }
+
+    void unit_animation_speed(void* unit, uint32_t anim, float speed)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        void* model = Read<void*>(unit, WXL_FIELD("CGObject_C", "m_worldModel"));
+        if (!model || (Read<uint32_t>(model, WXL_FIELD("CM2Model", "m_fFlags")) & 1u) == 0) return;
+        const int32_t torso = Read<int32_t>(unit, WXL_FIELD("CGUnit_C", "m_torsoKeyBone"));
+        const uint32_t bones[2] = {0xFFFFFFFFu, static_cast<uint32_t>(torso)};
+        for (int i = 0; i < (torso == -1 ? 1 : 2); ++i)
+        {
+            // CM2Model::GetBoneSequenceId(bone): __thiscall, `ret 4` (0x008267E0).
+            if (x86::CallMember<uint32_t>(WXL_SITE("CM2Model::GetBoneSequenceId", 0), model, bones[i]) != anim) continue;
+            // CGUnit_C::SetKeyBoneSequenceSpeed(model, bone, speed, force): __thiscall, `ret 0x10` (0x00735CC0).
+            x86::CallMember<void>(WXL_SITE("CGUnit_C::SetKeyBoneSequenceSpeed", 0), unit, model, bones[i], speed, int32_t(0));
+        }
+    }
+
+    uint32_t unit_animation_length(const void* unit, uint32_t anim)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return 0;
+        void* model = Read<void*>(unit, WXL_FIELD("CGObject_C", "m_worldModel"));
+        return model ? m2_animation_length(model, anim) : 0;
+    }
+
+    void unit_lift_local(void* unit, float z)
+    {
+        if (!IsClient() || !OnMainThread() || !unit) return;
+        void* movement = Read<void*>(unit, WXL_FIELD("CGUnit_C", "m_movement"));
+        if (!movement) return;
+        // CMovement_C's position, a CPassenger's: its z.
+        std::memcpy(static_cast<char*>(movement) + WXL_FIELD("CPassenger", "m_position") + 2 * sizeof(float), &z, sizeof z);
     }
 }

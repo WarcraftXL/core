@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The AddOns domain: a seam on the client's clearing of loose interface folders.
+
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including addons.def"
+#endif
+
+// Moves interface folders aside on disk so that only the archives' copies load: Interface\GlueXML
+// and Interface\FrameXML when they exist, and each Interface\AddOns\Blizzard* folder holding its
+// .toc (DeleteInterfaceAddOns, through OsFileList), each renamed to <name>.old after an older
+// .old is removed; the file hash is rebuilt when one moved. Called once by CGlueMgr::Resume, as
+// the login screens start, before GlueXML.toc is judged. A free function of no argument, a bare
+// `ret`: cdecl.
+//
+// Gated: raises InterfaceCleanupRequest; a handler that refuses it keeps the folders where they
+// are, and the function does not run.
+WXL_SEAM_GATE(AddOns, DeleteInterfaceFiles, "DeleteInterfaceFiles", void, cdecl, ())
+WXL_SEAM_RAISES(AddOns, DeleteInterfaceFiles, InterfaceCleanupRequest)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

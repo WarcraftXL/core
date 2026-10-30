@@ -52,7 +52,9 @@ def expected_line(point, indent):
 def body_line(text, point):
     """(index of the line holding the body's '{', the indentation of the body) in `text`."""
     stripped = table.cxx.strip_cxx(text)
-    found = table.definition_at(stripped, point.name, 1)
+    # An overload is told from its namesakes by where the fork defines it.
+    start = max(1, point.line - 2) if point.overload is not None else 1
+    found = table.definition_at(stripped, point.base_name, start)
     if not found:
         return None, None
     brace = found[1]

@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The MapChunk domain: seams on CMapChunk, one chunk of a loaded terrain tile.
+
+#ifndef WXL_SEAM_BEFORE
+#error "define WXL_SEAM_BEFORE(domain, name, symbol, ret, conv, params) before including mapchunk.def"
+#endif
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including mapchunk.def"
+#endif
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including mapchunk.def"
+#endif
+
+// Frees what a chunk holds (its render chunk, its ground clutter, its liquids, its links to
+// doodads, map objects, lights and sounds) before the chunk itself is freed. Its two callers are
+// CMapArea::PurgeChunk (a chunk leaving the view, CMapArea::Update and PurgeChunks) and
+// CMapArea::Purge (its tile unloaded). __thiscall, no argument, a bare `ret` (0x007C35CE). Before raises
+// TerrainChunkUnloaded while the chunk still answers its place.
+WXL_SEAM_BEFORE(MapChunk, Purge, "CMapChunk::Purge", void, thiscall, (void* self))
+WXL_SEAM_RAISES(MapChunk, Purge, TerrainChunkUnloaded)
+
+// Walks a chunk's sub-chunks (MCNR MCSH MCVT MCRF MCSE MCLY MCLQ MCAL MCCV) from its MCNK header
+// (m_chunkInfoBeginPtr) into the chunk's pointers. Its one caller is CMapChunk::Create
+// (0x007C64C4), which then reads the header's counts, makes the bounds, the liquids and the
+// sounds, and the references (CreateRefs). __thiscall, one dword (a3: the chunk's first use, sizes
+// fixed in place), `ret 4` (0x007C3B39). After points a chunk of a split tile (see
+// MapArea.ProcessIffChunks) at its _tex0 MCNK's layers, alpha maps and shadow, sets its header's
+// layer count (at most 4), alpha size and reference counts, and folds its 64 holes into 16.
+WXL_SEAM_AFTER(MapChunk, ProcessIffChunks, "CMapChunk::ProcessIffChunks", void, thiscall, (void* self, bool a3))
+
+// Places a chunk's map objects, then its doodads, from one list of placement indices: the first
+// `doodad_refs` name MDDF entries, the next `map_obj_refs` MODF entries. Its one caller is
+// CMapChunk::Create (0x007C657B), with m_mcrfPtr and the header's counts. __thiscall, four
+// dwords, `ret 0x10` (0x007C647A). Gate: for a chunk of a split tile it takes the call and makes
+// the client's own two calls, map objects from _obj0's MCRW then doodads from its MCRD, in the
+// order the client places them from one list; references it cannot follow are left out. For
+// any tile, placements of a model the client cannot load (an M2 of magic MD21 or a version past
+// 264, a WMO root past 17 or not in its files) are left out the same way, each such file logged
+// once; a chunk whose models all load is not taken.
+WXL_SEAM_GATE(MapChunk, CreateRefs, "CMapChunk::CreateRefs", void, thiscall, (void* self, void* area, uint32_t* mcrf_ptr, uint32_t doodad_refs, uint32_t map_obj_refs))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

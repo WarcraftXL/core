@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Camera domain of the client binding: the world camera, and the world's geometry as the
+// camera's own collision tests it. Main thread only, as the camera's update is.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including camera.def"
+#endif
+
+// The world camera: CGWorldFrame::GetActiveCamera, the camera of s_currentWorldFrame. Null with
+// no world frame (the login and character screens).
+WXL_BINDING(camera_world, void*, (void), (), 0)
+
+// Reads a CGCamera: its position, its facing rows taken to world coordinates (CGCamera::Forward,
+// Right and Up, through ParentToWorld when it is relative to a vehicle or a transport), FOV(),
+// m_fov, the clip planes, the aspect, the pivot and what it follows. False for a null camera.
+WXL_BINDING(camera_read, wxl_bool, (const void* camera, wxl_core_camera* out), (camera, out), WXL_FALSE)
+
+// Places a CGCamera: m_position from `position`, m_facing built from `forward` as
+// CSimpleCamera::SetFacing builds it (no roll), taken into the camera's parent's frame when it is
+// relative to one, and m_fov from `fov_base`. The other members are not read.
+WXL_BINDING(camera_write, void, (void* camera, const wxl_core_camera* view), (camera, view), (void)0)
+
+// The first point of the world's geometry on a segment: World::Intersect(start, finish, hit,
+// fraction, flags, no debug), the line test the camera's collision and the spells' line of sight
+// run. False when it meets nothing, and with nothing loaded.
+WXL_BINDING(world_trace, wxl_bool, (wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit), (start, finish, flags, hit), WXL_FALSE)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

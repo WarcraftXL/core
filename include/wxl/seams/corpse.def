@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Corpse domain: seams on CGCorpse_C, the corpse a player leaves.
+
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including corpse.def"
+#endif
+
+// The target's circle under a corpse, as CGUnit_C::RenderTargetSelection draws a unit's: the
+// virtual ClearTrackedObjects calls for the selected corpse, in the dead colour
+// (s_deadSelectionColor), the box scaled by the corpse and at most 10 yards. Before tells
+// wxl.selectioncircle the target's circle comes, under no unit; After ends it. A member:
+// thiscall, no stack argument.
+WXL_SEAM(Corpse, RenderTargetSelection, "CGCorpse_C::RenderTargetSelection", void, thiscall, (const void* self))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

@@ -13,10 +13,15 @@
 // for that one: a present with no frame open -- the loading screen's, or the paint that found
 // nothing to draw into -- raises nothing, so a mod never sees an end without its begin.
 // About once a second, while a mod watches the address space (wxl.footprint), Before also
-// raises MemoryPressure when the largest free block just fell under the threshold.
+// raises MemoryPressure when the largest free block just fell under the threshold. For the frame
+// it ends, Before raises RenderPoint with WXL_RENDER_POINT_AFTER_UI (the interface drawn), then,
+// while a mod listens, opens a frame of the runtime's Dear ImGui, raises ImGuiFrame for the mods'
+// windows and draws them, before FrameEnd.
 WXL_SEAM_BEFORE(Gx, ScenePresent, "GxScenePresent", void, cdecl, ())
 WXL_SEAM_RAISES(Gx, ScenePresent, FrameEnd)
 WXL_SEAM_RAISES(Gx, ScenePresent, MemoryPressure)
+WXL_SEAM_RAISES(Gx, ScenePresent, ImGuiFrame)
+WXL_SEAM_RAISES(Gx, ScenePresent, RenderPoint)
 
 // Releases everything the D3D9 device made that a Reset would invalidate: textures to recreate,
 // shaders, the vertex and index pools. Three callers. Two are the device's resets, each
@@ -42,6 +47,25 @@ WXL_SEAM_RAISES(Gx, NotifyOnDeviceRestored, SwapchainRestored)
 // "<path>\\<profile>\\<name>.bls" at the best profile the device takes, falling back to lower
 // ones. Before raises ShaderLoad, only while someone listens. thiscall `(shaders, target, path,
 // name, permutations)`, `ret 0x14`.
+// A draw of the Direct3D 9 (and 9Ex) device, before its state reaches the device and after it
+// drew: wxl.terrain's layers scale a terrain chunk's texture coordinates through the engine's
+// state for that draw, and give it back. The Vulkan device does the same through its backend's
+// draw_begin and draw_end.
+WXL_SEAM(Gx, D3dDraw, "CGxDeviceD3d::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
+WXL_SEAM(Gx, D3d9ExDraw, "CGxDeviceD3d9Ex::Draw", void, thiscall, (void* self, const void* batch, int32_t count))
+
+// The Direct3D 9 device (and 9Ex, which shares the bodies on the stock client) making a program
+// from its record's bytecode: wxl.gx's shader providers' answer is put in the record for the call
+// and the client's own given back after it. thiscall `(shader)`, `ret 4`.
+WXL_SEAM(Gx, D3dIShaderCreatePixel, "CGxDeviceD3d::IShaderCreatePixel", void, thiscall, (void* self, void* shader))
+WXL_SEAM(Gx, D3dIShaderCreateVertex, "CGxDeviceD3d::IShaderCreateVertex", void, thiscall, (void* self, void* shader))
+// The 9Ex device's own bodies on the recompiled client; the stock client's 9Ex device runs the two
+// above, which take it.
+WXL_SEAM(Gx, D3d9ExIShaderCreatePixel, "CGxDeviceD3d9Ex::IShaderCreatePixel", void, thiscall, (void* self, void* shader))
+WXL_SEAM_X64_ONLY(Gx, D3d9ExIShaderCreatePixel, "the stock client's 9Ex device makes its programs in CGxDeviceD3d::IShaderCreatePixel, which Gx.D3dIShaderCreatePixel takes")
+WXL_SEAM(Gx, D3d9ExIShaderCreateVertex, "CGxDeviceD3d9Ex::IShaderCreateVertex", void, thiscall, (void* self, void* shader))
+WXL_SEAM_X64_ONLY(Gx, D3d9ExIShaderCreateVertex, "the stock client's 9Ex device makes its programs in CGxDeviceD3d::IShaderCreateVertex, which Gx.D3dIShaderCreateVertex takes")
+
 WXL_SEAM_BEFORE(Gx, IShaderLoad, "CGxDevice::IShaderLoad", void, thiscall, (void* self, void* shaders, uint32_t target, const char* path, const char* name, uint32_t permutations))
 WXL_SEAM_RAISES(Gx, IShaderLoad, ShaderLoad)
 

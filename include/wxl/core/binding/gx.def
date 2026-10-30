@@ -26,6 +26,10 @@ WXL_BINDING(gx_window_size, wxl_bool, (uint32_t* width, uint32_t* height), (widt
 // device of another API.
 WXL_BINDING(gx_d3d9_device, void*, (void), (), 0)
 
+// The API of the client's device: its EGxApi (0 OpenGL, 1 Direct3D 9, 2 Direct3D 9Ex, 6 Vulkan on
+// the recompiled client), -1 with no device. What wxl.gx's api answers from.
+WXL_BINDING(gx_device_api, int32_t, (void), (), -1)
+
 // Makes the client send all of its device state again before its next draw: what a mod calls
 // after it set state on the device behind the client's copy of it. Nothing without a D3D9 device.
 WXL_BINDING(gx_invalidate_state, void, (void), (), (void)0)
@@ -34,6 +38,66 @@ WXL_BINDING(gx_invalidate_state, void, (void), (), (void)0)
 // model hangs on, the numbers of the device's draw and its viewport. False when the device drew
 // nothing for it (no context, a lost device).
 WXL_BINDING(gx_model_draw, wxl_bool, (const void* render, wxl_model_batch_args* out), (render, out), WXL_FALSE)
+
+// How the world is being drawn, for wxl.draw: the device's native projection (m_projNative, D3D's,
+// z 0 to 1), the top of its view stack, its viewport (m_viewport, 0 to 1 of the window) and the
+// window's size (m_curWindowRect), and CWorldScene::s_activeWorldView, the point the world's draws
+// are made from. Read between two draws of the world, it is what they are drawn with. False with
+// no device.
+WXL_BINDING(gx_world_view, wxl_bool, (wxl_core_world_view* out), (out), WXL_FALSE)
+
+// The device's texture (a CGxTex*) of a texture handle (a CTexture*, as texture_open answers),
+// made on the device and filled as the engine does before its first draw with it
+// (CGxDevice::ITexMarkAsUpdated, the device's own): null while the file is still loading, or with
+// no device. For wxl.draw, which draws with it outside the engine's states.
+WXL_BINDING(gx_texture_ready, void*, (void* texture), (texture), 0)
+
+// Vertex program constants rows `first` to `first + count - 1`, as the engine sets them
+// (GxShaderConstantsSet(GxSh_Vertex, ...)): kept by the device and sent at its next draw.
+WXL_BINDING(gx_vertex_constants_set, void, (uint32_t first, const float* rows, uint32_t count), (first, rows, count), (void)0)
+
+// Pixel program constants rows `first` to `first + count - 1`, as the engine sets them
+// (GxShaderConstantsSet(GxSh_Pixel, ...)): kept by the device and sent at its next draw.
+WXL_BINDING(gx_pixel_constants_set, void, (uint32_t first, const float* rows, uint32_t count), (first, rows, count), (void)0)
+
+// The texture (CGxTex*) the engine's state binds on stage `stage` (GxRs_Texture0 + stage, 0 to
+// 15); null for none or without a device.
+WXL_BINDING(gx_texture_stage, void*, (uint32_t stage), (stage), 0)
+
+// Binds `texture` (CGxTex*, or null) on stage `stage` through the engine's state (GxRsSet), sent
+// to the device at its next draw.
+WXL_BINDING(gx_texture_stage_set, void, (uint32_t stage, void* texture), (stage, texture), (void)0)
+
+// Makes `texture` (CGxTex*) repeat in u and v, as the client does for terrain layers
+// (GxTexSetWrap(texture, GxTex_Wrap, GxTex_Wrap)).
+WXL_BINDING(gx_texture_wrap, void, (void* texture), (texture), (void)0)
+
+// A render state's value as the engine holds it (m_appRenderStates[which], its first int): EGxBlend
+// for GxRs_BlendingMode (6), 0 or 1 for GxRs_DepthWrite (15). 0 without a device.
+WXL_BINDING(gx_render_state, int32_t, (uint32_t which), (which), 0)
+
+// Sets a render state through the engine (GxRsSet(which, int)), sent to the device at its next draw.
+WXL_BINDING(gx_render_state_set, void, (uint32_t which, int32_t value), (which, value), (void)0)
+
+// The device draws `batch` (a CGxBatch) `count` times with the engine's state as it stands
+// (CGxDevice::Draw, the device vtable's slot 42): another draw of what was just drawn.
+WXL_BINDING(gx_draw, void, (const void* batch, int32_t count), (batch, count), (void)0)
+
+// A program's record (CGxShader): its name ("Terrain1:6"), its target (EGxShTarget: 0 vertex, 4
+// pixel) and the bytecode the device makes it from (m_code). False for a null record.
+WXL_BINDING(gx_shader_record, wxl_bool, (const void* shader, wxl_core_shader_record* out), (shader, out), WXL_FALSE)
+
+// Sets the bytecode a program's record holds (m_code's data and count); the caller puts the
+// record's own back before anything frees it.
+WXL_BINDING(gx_shader_code_set, void, (void* shader, const void* code, uint32_t size), (shader, code, size), (void)0)
+
+// The matrix at the top of the device's transform stack `xform` (EGxXform: GxXform_Tex0 + i for
+// texture stage i), 16 floats row by row; false without a device.
+WXL_BINDING(gx_xform_get, wxl_bool, (uint32_t xform, float* matrix), (xform, matrix), WXL_FALSE)
+
+// The top of transform stack `xform` set to `matrix` as the engine sets it (GxXformSet): sent at
+// the device's next draw.
+WXL_BINDING(gx_xform_set, void, (uint32_t xform, const float* matrix), (xform, matrix), (void)0)
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

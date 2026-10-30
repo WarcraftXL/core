@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// What the renderer's test files share: the checks and their count.
+
+#pragma once
+
+namespace wxl::vk::test
+{
+    /// Counts a check; prints the ones that fail.
+    void Check(bool ok, const char* what);
+
+    /// Whether an environment variable is set to something.
+    bool Environment(const char* name);
+
+    /// The pure cases of the present module and the frame's pieces: no device needed.
+    void PresentPureCases();
+
+    /// The frame capture's reader on captures made up in the client's format.
+    void CaptureCases();
+
+    /// The live cases on the machine's driver: the present pass, the frame loop, the swapchain on a
+    /// headless surface, Dear ImGui drawn offscreen. False when no device could be made.
+    bool PresentLiveCases();
+
+    /// The engine's draws through the renderer: the tables and the engine reading (pure), then
+    /// formats, blends, stages, programs, pools, uploads and a capture replayed on the driver.
+    void DrawPureCases();
+    bool DrawLiveCases();
+
+    /// V4's cases on the driver: readbacks in a frame, a multisampled scene, point sizes,
+    /// pipelines compiled on workers, linked from parts, and compiled ahead from the last launch.
+    bool V4LiveCases();
+
+    /// Where the renderer follows D3D9 to the pixel: the software cursor in the screenshot, an
+    /// overlay under it when multisampled, GxRs_Multisample 0 (the engine's state read: pure; the
+    /// pixels by D3D9's rule, or the fallback counted: live).
+    void ParityPureCases();
+    bool ParityLiveCases();
+
+    /// The translator of the client's DX9 programs: what it refuses, its cache and pack (pure); and
+    /// programs assembled here drawn on the driver against D3D9's formulas (live).
+    void TranslatePureCases();
+    bool TranslateLiveCases();
+
+    /// wxl.render and wxl.highlight on the driver: passes, batches drawn again, the scene's copies,
+    /// buffers, GPU zones, the device made again, and the highlight against the Direct3D 9 algorithm.
+    bool RenderLiveCases();
+
+    /// V7 on the driver: the bone palette read by skinned programs (past 64 bones, beside the
+    /// fixed-function pixel program, in a batch drawn again), 32-bit index pools, 4096 and 8192
+    /// textures, wxl.render's compute pipelines, dispatches and palettes.
+    bool V7LiveCases();
+
+    /// V5: the session's distributions, the charges by cause and the profiler's zones (pure); each
+    /// pass timed on the GPU, pools written in place in the BAR heap, the earlier launch's programs
+    /// and pipelines made at the start, a program's part for a texture made in the background (live).
+    void V5PureCases();
+    bool V5LiveCases();
+
+    /// wxl.draw: its geometry (pure) and its passes on the driver (live).
+    void ShapesPureCases();
+    bool ShapesLiveCases();
+
+    /// Every program the renderer makes held to spirv-val's Vulkan 1.3 rules; false when the
+    /// build has no validator (SPIRV-Tools is built in the native test tree only).
+    bool SpirvValidation();
+}

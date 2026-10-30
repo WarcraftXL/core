@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// Memory the CPU writes for one frame and the GPU reads in that frame: the bytes of the textures
+// and buffers on their way to the device (staging), and each draw's data (its address pushed to
+// the shaders). One list of mapped chunks per frame in flight; a frame takes its slot's list
+// back once the slot's previous frame has completed, and grows it with a chunk when it needs
+// more. Nothing waits, nothing is freed while the GPU may read it. A chunk past a slot's first
+// that no frame of the slot has used for a while (a zone's load is over) is given back: every
+// mapped byte costs the 32-bit client address space.
+
+#pragma once
+
+#include "gx/vk/resources/Resources.hpp"
+
+#include <cstdint>
+#include <vector>
+
+namespace wxl::vk::resources
+{
+    class Ring
+    {
+    public:
+        struct Span
+        {
+            VkBuffer        buffer = VK_NULL_HANDLE;
+            VkDeviceSize    offset = 0;
+            uint8_t*        data = nullptr;
+            VkDeviceAddress address = 0; ///< when the ring was made with device addresses
+        };
+
+        struct Stats
+        {
+            uint64_t bytes = 0;  ///< handed out in the current frame
+            uint64_t chunks = 0; ///< alive, over every slot
+            uint64_t peak = 0;   ///< the most one frame took
+            uint64_t mapped = 0; ///< bytes of the chunks alive, over every slot (all mapped)
+            uint64_t trimmed = 0; ///< chunks given back after going unused
+        };
+
+        /// Frames of a slot a chunk past its first may go unused before it is given back.
+        static constexpr uint32_t kIdleFrames = 600;
+
+        Ring() = default;
+        Ring(const Ring&)            = delete;
+        Ring& operator=(const Ring&) = delete;
+        ~Ring() { Destroy(); }
+
+        /// @p slots frames in flight, chunks of @p chunk bytes of @p usage (with addresses when it says
+        /// so), in memory of @p access (Upload, or DeviceUpload for what the GPU reads in place).
+        bool Create(Allocator& allocator, VkBufferUsageFlags usage, VkDeviceSize chunk, uint32_t slots, Access access = Access::Upload);
+        /// The GPU must be done with every chunk (or the device lost).
+        void Destroy();
+        bool Ready() const { return allocator_ != nullptr; }
+
+        /// The frame of @p slot begins: what its previous frame took is free again.
+        void Begin(uint32_t slot);
+
+        /// @p size bytes aligned to @p align in the current frame; false when no memory could be had.
+        bool Allocate(VkDeviceSize size, VkDeviceSize align, Span& out);
+
+        /// What the frame wrote is made visible to the GPU (non-coherent memory); before the submission.
+        void Flush();
+
+        const Stats& Counters() const { return stats_; }
+
+    private:
+        struct Chunk
+        {
+            Buffer       buffer;
+            VkDeviceSize used = 0;
+            uint32_t     idle = 0; ///< the slot's frames since it was last used
+        };
+
+        Allocator*         allocator_ = nullptr;
+        VkBufferUsageFlags usage_ = 0;
+        Access             access_ = Access::Upload;
+        VkDeviceSize       chunk_ = 0;
+        std::vector<Chunk> slots_[3];
+        uint32_t           slot_ = 0;
+        uint32_t           slot_count_ = 0;
+        size_t             current_ = 0; ///< the chunk of the slot being filled
+        Stats              stats_;
+    };
+}

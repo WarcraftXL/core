@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The Circle domain of the client binding: the texture the game draws its selection circles
+// with, and textures a mod gives them instead (wxl.selectioncircle). Main thread only.
+
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including circle.def"
+#endif
+
+// Puts `texture` (a CTexture*) in CGObject_C::s_selectionTexture, the texture
+// CGObject_C::SetCircleRenderStates binds for every selection circle, and answers the one it
+// held. The game makes its own at CGObject_C::Initialize (Textures\UnitSelectTexture.blp) and
+// keeps it for the session.
+WXL_BINDING(circle_swap_texture, void*, (void* texture), (texture), 0)
+
+// A texture made from a file, as the game makes a model's: CreateTexture(path, the global
+// status), clamped, loaded later; null when the client makes none. The caller owns the handle.
+WXL_BINDING(texture_open, void*, (const char* path), (path), 0)
+
+// Lets go of a texture handle: HandleClose. The texture goes when its last handle does.
+WXL_BINDING(texture_close, void, (void* texture), (texture), (void)0)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

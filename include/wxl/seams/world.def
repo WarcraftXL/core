@@ -40,7 +40,8 @@ WXL_SEAM_RAISES(World, EnterWorld, WorldEnter)
 
 // Static, no arguments: cdecl. Before raises WorldLeave, with the map entered and where the
 // world is loaded around (World::s_currentWorldPos), unless a /reload is running or the player
-// was not in the world.
+// was not in the world; outside a /reload it first takes the models mods placed in the world
+// (wxl.m2's place_model) out of it, before the map they are entities of goes.
 WXL_SEAM_BEFORE(World, LeaveWorld, "CGGameUI::LeaveWorld", void, cdecl, ())
 WXL_SEAM_RAISES(World, LeaveWorld, WorldLeave)
 

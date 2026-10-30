@@ -53,7 +53,7 @@
 // WXL_SEAM_X64_ONLY rows follow their seam, for one whose body needs what only the recompiled
 // client has: the x86 runtime attaches no detour for it and does not announce its events, so a
 // mod asking wxl_host.raises is told no and a subscription to them is refused; `why` is the line
-// the runtime's log gives. No row is x64 only today.
+// the runtime's log gives. Rows x64 only: Gx.D3d9ExIShaderCreatePixel and Vertex.
 //
 // Include with the four row shapes defined; WXL_SEAM_RAISES, WXL_SEAM_WITNESS and
 // WXL_SEAM_X64_ONLY default to nothing.
@@ -92,6 +92,7 @@
 #include "wxl/seams/player.def"
 #include "wxl/seams/gameui.def"
 #include "wxl/seams/maparea.def"
+#include "wxl/seams/mapchunk.def"
 #include "wxl/seams/framescript.def"
 #include "wxl/seams/netclient.def"
 #include "wxl/seams/input.def"
@@ -129,6 +130,15 @@
 
 #include "wxl/seams/m2.def"
 #include "wxl/seams/component.def"
+#include "wxl/seams/camera.def"
+#include "wxl/seams/inputcontrol.def"
+#include "wxl/seams/corpse.def"
+#include "wxl/seams/projecttex.def"
+#include "wxl/seams/framexml.def"
+#include "wxl/seams/addons.def"
+#include "wxl/seams/worldscene.def"
+#include "wxl/seams/maprenderchunk.def"
+#include "wxl/seams/maplowdetail.def"
 
 #ifdef WXL_SEAM_RAISES_DEFAULTED
     #undef WXL_SEAM_RAISES

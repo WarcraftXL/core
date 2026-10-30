@@ -13,13 +13,30 @@
 #include "profile/Profile.hpp"
 #include "runtime/Attachment.hpp"
 #include "runtime/Code.hpp"
+#include "runtime/Listening.hpp"
 #include "runtime/Session.hpp"
 #include "services/DataService.hpp"
 #include "services/M2Service.hpp"
 #include "services/FootprintService.hpp"
 #include "services/ScriptService.hpp"
 #include "services/Assets.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
+#include "services/AnimationService.hpp"
+#include "services/PoseService.hpp"
+#include "services/HighlightService.hpp"
+#include "services/RenderService.hpp"
+#include "services/SelectionCircleService.hpp"
+#include "services/CVarService.hpp"
+#include "services/TerrainService.hpp"
+#include "services/ShaderCode.hpp"
+#include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
+#include "services/DrawService.hpp"
 #include "services/StorageService.hpp"
+#include "services/Hashes.hpp"
+#include "services/NetService.hpp"
+#include "services/RelayService.hpp"
 
 #include "wxl/core/init.h"
 #include "wxl/host/mod_host.hpp"
@@ -106,6 +123,10 @@ namespace
         wxl::core::services::storage::RemoveRedirectsOf(token);
         // Its providers, served names and transforms: no call into its code starts again.
         wxl::core::services::assets::ReleaseOf(token);
+        // Its overrides, its hashes in flight, its relayed services and requests.
+        wxl::core::services::storage::RemoveOverridesOf(token);
+        wxl::core::services::hashes::ForgetMod(token);
+        wxl::core::services::relay::ForgetMod(token);
         wxl::core::services::data::ForgetMod(token);
         // The models it made come off what they hang on and are given back.
         wxl::core::services::m2::ForgetMod(token);
@@ -113,15 +134,35 @@ namespace
         wxl::core::services::footprint::ForgetMod(token);
         // Its watches go with it: the client stops reporting what no other mod watches.
         wxl::core::objects::Service().DropWatches(token);
+        // The camera goes back to the client, the pointer is let go.
+        wxl::core::services::camera::ForgetMod(token);
+        wxl::core::services::input::ForgetMod(token);
+        // Its heads go back to their animations, its highlights come off, the game's circles
+        // get back the look it changed.
+        wxl::core::services::pose::ForgetMod(token);
+        wxl::core::services::highlight::ForgetMod(token);
+        wxl::core::services::render::ForgetMod(token);
+        wxl::core::services::selectioncircle::ForgetMod(token);
+        // Its console variables are released; they stay, with their values.
+        wxl::core::services::cvar::ForgetMod(token);
+        // Its edits of the ground come off; another mod's, or the original, show again.
+        wxl::core::services::terrain::ForgetMod(token);
+        // Its layer provider goes: the chunks loaded from now on are drawn as the client draws them.
+        wxl::core::services::terrain_layers::ForgetMod(token);
+        // Its tile provider goes: split tiles loaded from now on come without its files.
+        wxl::core::services::terrain_tiles::ForgetMod(token);
+        wxl::core::services::shader_code::ForgetMod(token);
+        // Its shapes go.
+        wxl::core::services::draw::ForgetMod(token);
+        // Its animations on units end; the game chooses theirs again.
+        wxl::core::services::animation::ForgetMod(token);
+        // Its opcode numbers are given back: their messages stop reaching anyone.
+        wxl::core::services::net::ForgetMod(token);
     }
 
     /// An event gained its first handler or lost its last: the flag the client tests before a
-    /// seam whose body would only raise it.
-    void OnListenChanged(void*, wxl_event event, bool listening)
-    {
-        if (static_cast<uint32_t>(event) < static_cast<uint32_t>(WXL_EV_COUNT))
-            wxl_core_listening[event] = listening ? 1 : 0;
-    }
+    /// busy seam that raises it (runtime/Listening.hpp).
+    void OnListenChanged(void*, wxl_event event, bool listening) { wxl::core::listening::ModsListen(event, listening); }
 
     // Heap-allocated and never freed: the wxl_host table points into it, and a mod disabled
     // rather than unloaded stays mapped with that pointer to the end of the process.

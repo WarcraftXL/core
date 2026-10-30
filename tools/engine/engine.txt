@@ -1,0 +1,102 @@
+# The engine types the SDK publishes in sdk/engine/include/wxl/engine/, one header per group.
+#
+# generate_engine.py compiles the group's headers of the client fork for x86 and x64, reads the
+# layouts back and writes each type with its members at the fork's offsets, its size and offsets
+# held by static_asserts and its layout hash. Nothing in sdk/engine/include/wxl/engine/ but
+# support.hpp and check.hpp is written by hand.
+#
+#   group <stem> <fork header>[, <fork header>...]   [# what the header covers]
+#     <fork type> [as <Name>]       a struct of the fork; Name defaults to the type with :: as _
+#   witness <Name>.<member> <x86 address>
+#                                   a function of Wow.exe 12340 that addresses the member: its
+#                                   disassembly must hold the member's x86 offset (--binary)
+#   comment-differs <Name>.<member> # why the fork's /* NNNN */ comment is not the x86 offset
+#
+# A type embedded by another must be listed (or be a template of support.hpp), or the member is
+# bytes; a pointer to an unlisted type is a pointer to void. Appending a type changes no other
+# type's hash; changing one changes the hash of every type that embeds it.
+
+group math Engine/Source/Tempest/C2Vector.h, Engine/Source/Tempest/C3Vector.h, Engine/Source/Tempest/C4Vector.h, Engine/Source/Tempest/C4Quaternion.h, Engine/Source/Tempest/CAaBox.h, Engine/Source/Tempest/CAaSphere.h, Engine/Source/Tempest/C44Matrix.h, Engine/Source/Tempest/CImVector.h, Engine/Source/Tempest/CRange.h, Engine/Source/Tempest/C2iVector.h, Engine/Source/Tempest/C4Plane.h, Engine/Source/Tempest/CRect.h, Engine/Source/Tempest/CiRect.h  # vectors, boxes, matrices, colours
+  C2Vector
+  C3Vector
+  C4Vector
+  C4Quaternion
+  CAaBox
+  CAaSphere
+  C44Matrix
+  CImVector
+  CiRange
+  C2iVector
+  C4Plane
+  CRect
+  CiRect
+
+group m2 Engine/Source/Model2/M2Data.h, Engine/Source/Model2/M2Shared.h, Engine/Source/Model2/M2Model.h, Engine/Source/Model2/CM2SceneRender.h  # models: the file's data once parsed, the shared model, an instance, the scene's renderer
+  fixed16
+  ubyte4
+  M2CompQuat
+  M2Bounds
+  M2Loop
+  M2Sequence
+  M2CompBone
+  M2Vertex
+  M2Color
+  M2Texture
+  M2TextureWeight
+  M2TextureTransform
+  M2Material
+  M2Attachment
+  M2Event
+  M2Light
+  M2Camera
+  M2Ribbon
+  M2Particle
+  M2Batch
+  M2SkinSection
+  M2SkinProfile
+  M2Data
+  CM2SequenceLoad
+  CM2Shared
+  CM2Model
+  CM2SceneRender
+
+group gx Engine/Source/Gx/Types.h, Engine/Source/Gx/CGxFormat.h, Engine/Source/Gx/CGxMatrixStack.h, Engine/Source/Gx/CGxGammaRamp.h, Engine/Source/Gx/CGxBuf.h, Engine/Source/Gx/CGxPool.h, Engine/Source/Gx/CGxTexFlags.h, Engine/Source/Gx/CGxTex.h, Engine/Source/Gx/CGxDevice/CGxDevice.h  # the graphics device and its buffers and textures
+  CGxFormat
+  CGxCaps
+  CGxBuf
+  CGxPool
+  CGxTexFlags
+  CGxTex
+  CGxMatrixStack
+  CGxGammaRamp
+  CGxDevice::TextureTarget
+  CGxDevice
+
+group texture Engine/Source/Services/Texture.h  # the client's texture objects
+  CTexture
+
+group object WoW/Source/Object/WGUID.h, WoW/Source/Object/Movement.h, WoW/Source/Object/Object.h, WoW/Source/Object/Unit.h, WoW/Source/Object/Player.h, WoW/Source/Object/ObjectClient/Object_C.h, WoW/Source/Object/ObjectClient/Unit_C.h, WoW/Source/Object/ObjectClient/Player_C.h  # world objects: guid, movement, object, unit, player, and their descriptor blocks
+  WOWGUID
+  CMovementShared
+  CMovement_C
+  CGObjectData
+  CGUnitData
+  CGPlayerData
+  CGObject
+  CGUnit
+  CGPlayer
+  CGObject_C
+  CGUnit_C
+  CGPlayer_C
+
+# Read from Wow.exe: each function addresses the member at its offset.
+witness CM2Shared.m_flags 0x0083CF00
+witness CM2Shared.m_asyncObject 0x0083D340
+witness CM2Shared.m_data 0x0083CF00
+witness CM2Shared.m_fileSize 0x0083CF00
+witness CM2Shared.m_lowPrioritySequenceBuffers 0x0083CF00
+witness CM2Shared.m_lowPrioritySequenceCapacity 0x0083CF00
+witness CM2Shared.m_lowPrioritySequenceCount 0x0083CF00
+witness CM2Shared.m_fileName 0x0083CF00
+witness M2Data.m_sequences 0x0083CF00
+witness M2Data.m_flags 0x0083CF00

@@ -33,6 +33,14 @@ extern "C" {
 /// of a global set through the script rows of the binding. Answers how many results it pushed.
 typedef int32_t(WXL_CALL* wxl_script_native_fn)(void* state);
 
+/// Where the client's script state stands, as script_mark keeps it and script_unwind brings it
+/// back: what the client's protected call keeps before it calls. Its words are the client's; the
+/// runtime only hands the mark back.
+typedef struct wxl_script_mark
+{
+    uintptr_t words[12];
+} wxl_script_mark;
+
 /// A function told one name, as the client's SFile::List calls its callback: cdecl on x86
 /// (`call [ebp+0xc]; add esp, 8` at 0x0042509D). Answers nonzero to be told the next.
 typedef int32_t(WXL_CALL* wxl_core_name_fn)(const char* name, void* user);
@@ -90,6 +98,28 @@ typedef struct wxl_core_db
 
 typedef void(WXL_CALL* wxl_core_db_fn)(const wxl_core_db* db, void* user);
 
+/// The world camera, as camera_read gives it and camera_write takes it. Directions are in world
+/// coordinates, whatever the camera is relative to. `left` is the camera's second row, which the
+/// client calls its right: +y for a camera looking down +x.
+typedef struct wxl_core_camera
+{
+    wxl_vec3 position;
+    wxl_vec3 forward;
+    wxl_vec3 left;
+    wxl_vec3 up;
+    float    fov;       ///< what it draws with: CGCamera::FOV(), m_fov plus m_targetFov, clamped
+    float    fov_base;  ///< m_fov alone, which camera_write sets
+    float    near_z;
+    float    far_z;
+    float    aspect;
+    wxl_vec3 pivot;     ///< m_targetPosition raised by m_height
+    uint64_t followed;  ///< m_targetGUID, 0 when it follows nothing
+    uint32_t cinematic; ///< nonzero while a model camera (m_model) has the view
+    float    roll;      ///< radians around `forward`, positive to the camera's right, which
+                        ///< camera_write turns the facing by (wxl/core/camera_facing.hpp);
+                        ///< camera_read leaves it as it is
+} wxl_core_camera;
+
 /// A model file (CM2Shared) as the loader holds it: the path it was opened by, its parsed header
 /// (or its bytes, before the parse), how many bytes that is, and its skin profile once one has
 /// been read.
@@ -120,6 +150,129 @@ typedef struct wxl_core_m2_skeleton
     uint32_t        key_bone_count;
     float*          matrices;
 } wxl_core_m2_skeleton;
+
+/**
+ * @brief A loaded terrain chunk (CMapChunk), as terrain_chunk_view gives it. `heights` and
+ * `normals` point into the tile's file buffer, which lives while the tile is loaded: 145 heights
+ * relative to `base_z` (MCVT) and 145 normals as three signed bytes in 127ths (MCNR), both in
+ * the grid's vertex order (wxl/terrain/grid.hpp). Writable; the client reads both live.
+ */
+typedef struct wxl_core_terrain_chunk
+{
+    int32_t chunk_x;  ///< m_cOffset.x: the chunk's column on the map
+    int32_t chunk_y;  ///< m_cOffset.y: its row
+    float*  heights;  ///< m_height
+    int8_t* normals;  ///< m_normals
+    float   base_z;   ///< m_topLeftCoords.z: what the heights are relative to
+    uint32_t holes;   ///< m_header->m_holes: the 16-bit hole mask
+} wxl_core_terrain_chunk;
+
+/// A terrain render chunk's layers (binding terrain_render_chunk): CMapRenderChunk.
+typedef struct wxl_core_render_chunk
+{
+    uint32_t    layers;            ///< m_layersCount: 0 to 4
+    uint32_t    render_flags;      ///< m_renderFlags: 0x4 the first layer specular (its texture stage a reflection map)
+    uint32_t    layer_flags[4];    ///< each layer's m_flags (MCLY's)
+    uint32_t    layer_texture[4];  ///< each layer's m_textureId: its MTEX index
+    const void* batch;             ///< &m_batch: what every draw of the chunk's layers hands the device
+    const void* map_chunk;         ///< m_mapChunks[0]: the CMapChunk it draws
+    const void* map_chunk2;        ///< m_mapChunks[1]: the second, for a chunk drawn with its neighbour; null for none
+    uint32_t    pair;              ///< m_unkFlags & 3: 1 the second below the first (alpha maps 64 x 128), 2 beside it (128 x 64)
+} wxl_core_render_chunk;
+
+/// The map's WDT as the client loaded it (binding map_wdt).
+typedef struct wxl_core_wdt
+{
+    const char* path;      ///< CMap::wdtFilename
+    uint32_t*   flags;     ///< &CMap::header.m_flags: MPHD's flags, as the client reads them
+    uint32_t*   tiles;     ///< CMap::m_areaInfo: MAIN, 4096 x {flags (1: the tile exists), unused}, 64 * y + x
+    const char* map_path;  ///< CMap::mapPath ("World\Maps\<map>")
+    const char* map_name;  ///< CMap::mapName
+} wxl_core_wdt;
+
+/// The ADT an area of the map was read from (binding terrain_area_file): CMapArea.
+typedef struct wxl_core_area_file
+{
+    int32_t     tile_x; ///< m_index.x
+    int32_t     tile_y; ///< m_index.y
+    const void* data;   ///< m_fileBuffer: the whole file, MVER first
+    uint32_t    size;   ///< m_fileSize
+} wxl_core_area_file;
+
+/// What a split tile's area is pointed at (binding map_area_split_set): CMapArea's fields, then
+/// CMapArea::LoadTextures(texture_names, texture_names_size). Null pointers and zero counts for
+/// what the tile has not.
+typedef struct wxl_core_area_split
+{
+    void*     chunk_info;         ///< m_chunkInfo: 256 SMChunkInfo, an index of the root's MCNKs
+    void*     doodad_defs;        ///< m_doodadDef: MDDF
+    void*     map_obj_defs;       ///< m_mapObjDef: MODF
+    uint32_t  doodad_count;       ///< m_doodadDefCount
+    uint32_t  map_obj_count;      ///< m_mapObjDefCount
+    char*     model_names;        ///< m_m2FileNames: MMDX
+    char*     map_obj_names;      ///< m_wmoFileNames: MWMO
+    uint32_t* model_offsets;      ///< m_modelFilenamesOffsets: MMID
+    uint32_t* map_obj_offsets;    ///< m_wmoFilenamesOffsets: MWID
+    int32_t*  texture_flags;      ///< m_textureFlags: MTXF
+    char*     texture_names;      ///< MTEX, handed to CMapArea::LoadTextures
+    uint32_t  texture_names_size;
+} wxl_core_area_split;
+
+/// Where a chunk being made reads from (binding map_chunk_parts): CMapChunk.
+typedef struct wxl_core_map_chunk
+{
+    const void* begin;   ///< m_chunkInfoBeginPtr: its MCNK in the tile's file buffer
+    void*       header;  ///< m_header: the MCNK header (SMChunk)
+    int32_t     index_x; ///< m_aIndex.x: its column in its tile (0-15)
+    int32_t     index_y; ///< m_aIndex.y
+} wxl_core_map_chunk;
+
+/// A split tile's chunk pointed into its _tex0 and _obj0 (binding map_chunk_split_set): CMapChunk.
+typedef struct wxl_core_chunk_split
+{
+    void* layers; ///< m_layers: MCLY
+    void* alpha;  ///< m_additionalShadowmap: MCAL
+    void* shadow; ///< m_shadowMap: MCSH
+    void* refs;   ///< m_mcrfPtr: MCRD (CreateRefs is answered by the runtime for such a chunk)
+} wxl_core_chunk_split;
+
+/// One far-terrain area of a WDL (binding map_area_low_add): what CMapLowDetail::Load sets on a
+/// CMapAreaLow, offsets from the start of the WDL as the client keeps it (m_data).
+typedef struct wxl_core_area_low
+{
+    uint32_t index;        ///< 64 * row + column: its place in m_areas, as MAOF's
+    int32_t  column;       ///< m_index.x
+    int32_t  row;          ///< m_index.y
+    uint32_t heights;      ///< MARE's data: m_heights
+    uint32_t holes;        ///< MAHO's data, 0 for none: m_holes
+    uint32_t index_count;  ///< m_indexCount: 12 a cell not a hole, 3072 without MAHO
+    float    top_left[2];  ///< m_topLeft
+    float    box_min[3];   ///< m_bbox.b
+    float    box_max[3];   ///< m_bbox.t
+    float    center[3];    ///< m_sphere.c
+    float    radius;       ///< m_sphere.r
+} wxl_core_area_low;
+
+/// A program's record (binding gx_shader_record): CGxShader.
+typedef struct wxl_core_shader_record
+{
+    const char* name;   ///< m_key.m_str: "<program>:<permutation>"
+    int32_t     target; ///< m_target: EGxShTarget, 0 vertex, 4 pixel
+    const void* code;   ///< m_code.m_data
+    uint32_t    size;   ///< m_code.m_count, in bytes
+} wxl_core_shader_record;
+
+/// How the world is being drawn (binding gx_world_view): the engine's matrices, rows a..d of
+/// C44Matrix, which a point taken from `eye` is multiplied by on the left: clip = [p 1] * view *
+/// projection.
+typedef struct wxl_core_world_view
+{
+    float    projection[16]; ///< CGxDevice::m_projNative
+    float    view[16];       ///< m_xforms[GxXform_View] at its level
+    float    viewport[6];    ///< m_viewport: x min, x max, y min, y max (0 to 1 of the window, y up), z min, z max
+    float    window[2];      ///< m_curWindowRect's maxX and maxY: the window's size
+    wxl_vec3 eye;            ///< CWorldScene::s_activeWorldView
+} wxl_core_world_view;
 
 /// One string per row of wxl/core/binding.def, "name: ret (params)", in table order. The
 /// client hands its copy over in wxl_core_init and the runtime compares it with its own, so a
@@ -154,13 +307,15 @@ typedef struct wxl_core_init
 
 /**
  * @brief One byte per event of wxl/events.h, nonzero while at least one handler is subscribed
- *        to it.
+ *        to it, or while the runtime's own work rides on the seam that raises it.
  *
- * The runtime writes it whenever an event gains its first handler or loses its last; the client
- * reads it, through wxl::seam::Listening (wxl/seams/seams.h), before calling a seam whose body
- * would only raise that event, so a seam nobody listens to costs a load and a branch instead of
- * a call into the runtime. All zero until WarcraftXLInit has loaded the mods. Indexed by
- * wxl_event; the client and the runtime come from one tree, so they agree on the count.
+ * The runtime writes it whenever an event gains its first handler or loses its last, and holds
+ * it up while one of its services needs the seam called (wxl.highlight keeps the model batches of
+ * M2.DrawBatch while a highlight is set); the client reads it, through wxl::seam::Listening
+ * (wxl/seams/seams.h), before calling a busy seam that raises that event, so a seam nobody needs
+ * costs a load and a branch instead of a call into the runtime. All zero until WarcraftXLInit has
+ * loaded the mods. Indexed by wxl_event; the client and the runtime come from one tree, so they
+ * agree on the count.
  */
 WXL_CORE_API extern volatile uint8_t wxl_core_listening[];
 

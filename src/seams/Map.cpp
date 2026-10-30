@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The Map seams: what the runtime does when the client places a map doodad, on both builds.
+// The Map seams: what the runtime does when the client places a map doodad and unloads a map,
+// on both builds.
 
 #include "wxl/seams/seams.h"
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
+#include "services/TerrainService.hpp"
+#include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -69,4 +73,32 @@ namespace wxl::seam::Map::CreateDoodadDefInMapObj
     {
         Placed(result, name);
     }
+}
+
+namespace wxl::seam::Map::LoadWdt
+{
+    void WXL_CALL After()
+    {
+        wxl::core::services::terrain_layers::WdtLoaded();
+        // Tiles a later client's WDT announces that the files do not have are not loaded.
+        wxl::core::services::terrain_tiles::WdtLoaded();
+    }
+}
+
+namespace wxl::seam::Map::Unload
+{
+    void WXL_CALL Before()
+    {
+        // The ground goes with the map: the edits of it are dropped before its chunks are freed.
+        wxl_terrain_cleared_args args{};
+        wxl::core::services::terrain::MapUnloading(args);
+        wxl::core::services::terrain_layers::MapUnloading();
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (host && host->Listening(WXL_EV_TerrainEditsCleared)) host->Raise(WXL_EV_TerrainEditsCleared, &args);
+    }
+}
+
+namespace wxl::seam::Map::FreeArea
+{
+    void WXL_CALL Before(void* area) { wxl::core::services::terrain_tiles::AreaFreeing(area); }
 }

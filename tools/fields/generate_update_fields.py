@@ -167,6 +167,13 @@ FOOTER = """
     #undef WXL_UPDATE_FIELD_WATCH
     #undef WXL_UPDATE_FIELD_WATCH_DEFAULTED
 #endif
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif
 """
 
 

@@ -32,7 +32,11 @@ namespace
         const size_t length = std::strlen(b);
         if (a.size() != length) return false;
         for (size_t i = 0; i < length; ++i)
-            if ((a[i] | 0x20) != b[i]) return false;
+        {
+            // Letters in any case; anything else as it is ('_' is not a letter's other case).
+            const char c = a[i] >= 'A' && a[i] <= 'Z' ? static_cast<char>(a[i] | 0x20) : a[i];
+            if (c != b[i]) return false;
+        }
         return true;
     }
 }
@@ -53,6 +57,8 @@ namespace wxl::core::settings
             other,
             log,
             profile,
+            gx,
+            engine,
         };
         Section  section = Section::other;
         unsigned number = 0;
@@ -77,8 +83,10 @@ namespace wxl::core::settings
                     continue;
                 }
                 const std::string_view name = Trim(line.substr(1, line.size() - 2));
-                section = SameWord(name, "log") ? Section::log
+                section = SameWord(name, "log")       ? Section::log
                           : SameWord(name, "profile") ? Section::profile
+                          : SameWord(name, "gx")      ? Section::gx
+                          : SameWord(name, "engine")  ? Section::engine
                                                       : Section::other;
                 if (section == Section::profile) out.has_profile = true;
                 continue;
@@ -93,6 +101,84 @@ namespace wxl::core::settings
             }
             const std::string_view key   = Trim(line.substr(0, equals));
             const std::string_view value = Trim(line.substr(equals + 1));
+
+            if (section == Section::gx)
+            {
+                if (SameWord(key, "api"))
+                {
+                    if (SameWord(value, "vulkan")) out.gx_api = GxApi::vulkan;
+                    else if (SameWord(value, "d3d9")) out.gx_api = GxApi::d3d9;
+                    else Problem(out, number, "not vulkan or d3d9:", value);
+                }
+                else if (SameWord(key, "validation"))
+                {
+                    if (value == "0" || value == "1") out.gx_validation = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
+                else if (SameWord(key, "gpu"))
+                {
+                    if (!value.empty() && value.size() < sizeof out.gx_gpu)
+                    {
+                        std::memcpy(out.gx_gpu, value.data(), value.size());
+                        out.gx_gpu[value.size()] = '\0';
+                    }
+                    else Problem(out, number, "not a device index or a part of its name (1 to 63 characters):", value);
+                }
+                else if (SameWord(key, "frames_in_flight"))
+                {
+                    if (value == "1" || value == "2" || value == "3") out.gx_frames = static_cast<unsigned>(value[0] - '0');
+                    else Problem(out, number, "not 1, 2 or 3:", value);
+                }
+                else if (SameWord(key, "present_filter"))
+                {
+                    if (SameWord(value, "linear")) out.gx_nearest = false;
+                    else if (SameWord(value, "nearest")) out.gx_nearest = true;
+                    else Problem(out, number, "not linear or nearest:", value);
+                }
+                else if (SameWord(key, "async_pipelines") || SameWord(key, "vk_rebar") || SameWord(key, "vk_prewarm") ||
+                         SameWord(key, "vk_gpu_times"))
+                {
+                    bool& flag = SameWord(key, "async_pipelines") ? out.gx_async
+                                 : SameWord(key, "vk_rebar")      ? out.gx_rebar
+                                 : SameWord(key, "vk_prewarm")    ? out.gx_prewarm
+                                                                  : out.gx_gpu_times;
+                    if (value == "0" || value == "1") flag = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
+                else
+                {
+                    Problem(out, number,
+                            "an unknown key of [gx] (api, validation, gpu, frames_in_flight, present_filter, async_pipelines, vk_rebar, "
+                            "vk_prewarm, vk_gpu_times):",
+                            key);
+                }
+                continue;
+            }
+
+            if (section == Section::engine)
+            {
+                if (SameWord(key, "animate_threads"))
+                {
+                    unsigned threads = 0;
+                    bool     digits  = !value.empty() && value.size() <= 2;
+                    for (char c : value) digits = digits && c >= '0' && c <= '9';
+                    if (digits)
+                        for (char c : value) threads = threads * 10 + static_cast<unsigned>(c - '0');
+                    if (SameWord(value, "auto")) out.animate_threads = kAnimateAuto;
+                    else if (digits && (threads == 0 || (threads >= 2 && threads <= kAnimateMost))) out.animate_threads = threads;
+                    else Problem(out, number, "not auto, 0 or 2 to 16:", value);
+                }
+                else if (SameWord(key, "trim_alloc"))
+                {
+                    if (value == "0" || value == "1") out.trim_alloc = value == "1";
+                    else Problem(out, number, "not 0 or 1:", value);
+                }
+                else
+                {
+                    Problem(out, number, "an unknown key of [engine] (animate_threads, trim_alloc):", key);
+                }
+                continue;
+            }
 
             if (section == Section::profile)
             {

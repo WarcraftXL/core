@@ -5,6 +5,9 @@
 
 #include "wxl/seams/seams.h"
 
+#include "gx/Memory.hpp"
+#include "gx/Pacing.hpp"
+
 #include "common/Log.hpp"
 #include "objects/Objects.hpp"
 #include "runtime/Attachment.hpp"
@@ -14,7 +17,24 @@
 #include "runtime/Stages.hpp"
 #include "services/DataService.hpp"
 #include "services/Assets.hpp"
+#include "services/CameraService.hpp"
+#include "services/ImGuiService.hpp"
+#include "services/InputService.hpp"
+#include "services/AnimationService.hpp"
+#include "services/PoseService.hpp"
+#include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
+#include "services/TextureService.hpp"
+#include "services/CVarService.hpp"
+#include "services/TerrainService.hpp"
+#include "services/ShaderCode.hpp"
+#include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
+#include "services/DrawService.hpp"
 #include "services/M2Service.hpp"
+#include "services/Hashes.hpp"
+#include "services/NetService.hpp"
+#include "services/RelayService.hpp"
 #include "services/StorageService.hpp"
 
 #include "wxl/host/mod_host.hpp"
@@ -25,6 +45,10 @@ namespace wxl::seam::Client::Destroy
     {
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;
+
+        // How the session's frames came, and the graphics memory as it leaves it, the device still up.
+        wxl::core::gx::pacing::Report("of the session");
+        wxl::core::gx::memory::Report("at exit");
 
         // The last thing a mod is told, and the only chance it has to put something away. It
         // runs here rather than at DLL_PROCESS_DETACH because by then the loader lock is held,
@@ -37,14 +61,32 @@ namespace wxl::seam::Client::Destroy
         wxl::core::attachment::ReleaseAll();
         wxl::core::points::ReleaseAll();
         wxl::core::services::storage::CloseEverything();
+        wxl::core::services::hashes::Stop();
+        wxl::core::services::relay::Clear();
+        wxl::core::services::net::Clear();
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::data::Clear();
         wxl::core::services::m2::Clear();
+        wxl::core::services::camera::Clear();
+        wxl::core::services::input::Clear();
+        wxl::core::services::pose::Clear();
+        wxl::core::services::imgui::Shutdown();
+        wxl::core::services::highlight::Clear();
+        wxl::core::services::selectioncircle::Clear();
+        wxl::core::services::texture::Clear();
+        wxl::core::services::cvar::Clear();
+        wxl::core::services::terrain::Clear();
+        wxl::core::services::terrain_layers::Clear();
+        wxl::core::services::terrain_tiles::Clear();
+        wxl::core::services::shader_code::Clear();
+        wxl::core::services::draw::Clear();
+        wxl::core::services::animation::Clear();
         for (wxl::host::ModHost::ModToken token = 1; token <= host->Loaded().size(); ++token)
         {
             wxl::core::objects::Service().DropWatches(token);
             wxl::core::services::storage::RemoveSearchPathsOf(token);
             wxl::core::services::storage::RemoveRedirectsOf(token);
+            wxl::core::services::storage::RemoveOverridesOf(token);
         }
 
         host->UnloadAll();

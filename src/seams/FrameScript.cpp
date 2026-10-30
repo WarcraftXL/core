@@ -11,7 +11,10 @@
 #include "runtime/Stages.hpp"
 #include "seams/Chat.hpp"
 #include "seams/Gameplay.hpp"
+#include "services/CVarService.hpp"
 #include "services/ScriptService.hpp"
+#include "services/DrawService.hpp"
+#include "services/TextureService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -129,7 +132,9 @@ namespace wxl::seam::FrameScript::Destroy
             wxl_script_vm_args args{};
             args.context      = g_context;
             args.native_state = wxl::core::binding::script_state();
-            host->Raise(WXL_EV_ScriptVmClosing, &args);
+            // A handler may call into the state, through wxl.script or the state it is handed.
+            auto raise = [&] { host->Raise(WXL_EV_ScriptVmClosing, &args); };
+            wxl::core::services::script::Keep("the ScriptVmClosing handlers", raise, nullptr);
         }
         wxl::core::services::script::OnContextClosing();
         wxl::core::seams::gameplay::Forget();
@@ -153,6 +158,11 @@ namespace wxl::seam::FrameScript::CreateEvents
         {
             g_live = true;
             wxl::core::services::script::OnContextReady(g_context, state);
+            // WxlTexture, for the interface the context is coming up for.
+            wxl::core::services::texture::OnScriptReady();
+            // WxlDraw: shapes in the world for the interface's add-ons, a frame at a time.
+            wxl::core::services::draw::OnScriptReady();
+            wxl::core::services::cvar::OnContextReady();
         }
         wxl::core::services::script::OnClientEventsInstalled(names, count);
         wxl::core::seams::gameplay::Install(names, count);
@@ -169,7 +179,8 @@ namespace wxl::seam::FrameScript::CreateEvents
         wxl_script_vm_args args{};
         args.context      = g_context;
         args.native_state = state;
-        host->Raise(WXL_EV_ScriptVmReady, &args);
+        auto raise = [&] { host->Raise(WXL_EV_ScriptVmReady, &args); };
+        wxl::core::services::script::Keep("the ScriptVmReady handlers", raise, nullptr);
     }
 }
 

@@ -6,6 +6,9 @@
 // Every row but one is a non-static member: thiscall, `self` first. The mount display's mirror
 // handler is a free function whose address is taken: cdecl.
 
+#ifndef WXL_SEAM
+#error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including unit.def"
+#endif
 #ifndef WXL_SEAM_AFTER
 #error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including unit.def"
 #endif
@@ -54,6 +57,37 @@ WXL_SEAM_RAISES(Unit, SendMovementUpdate, PlayerMoveStop)
 WXL_SEAM_BEFORE(Unit, MountDisplayIDUpdateHandler, "MountDisplayIDUpdateHandler", int32_t, cdecl, (uint64_t guid, uint32_t field_offset, uint32_t field_size, const void* old_value, void* param))
 WXL_SEAM_RAISES(Unit, MountDisplayIDUpdateHandler, UnitMountChanged)
 WXL_SEAM_WITNESS(Unit, MountDisplayIDUpdateHandler, 0x004D5254)
+
+// Readies a unit's model for the frame's animation: its render facing, the twist of its torso and
+// head while it turns, its pitch. A virtual of CGObject_C, called for every object in view by
+// CGWorldFrame::UpdateObject (0x004F8D10) right before the object animates; the player's
+// override calls this one first. thiscall (frame), `ret 4` (0x0073E40D). After applies the head
+// turns of wxl.pose over what the game just set on the head bone, follows the animations of
+// wxl.animation on the unit (ending, playing again, handing back) and raises UnitAnimationEnded
+// for those that ended, and lifts the active player onto ground wxl.terrain raised under them.
+WXL_SEAM_AFTER(Unit, PreAnimate, "CGUnit_C::PreAnimate", void, thiscall, (void* self, void* frame))
+WXL_SEAM_RAISES(Unit, PreAnimate, UnitAnimationEnded)
+
+// The circles the game projects on the ground under a unit (wxl.selectioncircle). Each draws
+// between the device's RsPush and RsPop: CGObject_C::SetCircleRenderStates binds the static
+// CGObject_C::s_selectionTexture (Textures\UnitSelectTexture.blp) added onto the ground, then
+// ProjectTex::Render2d projects it over a box around the unit, in a colour. Before tells the
+// service which circle comes and for which unit, and puts a mod's texture in the static's place;
+// After puts the game's back. Members: thiscall, no stack argument.
+//
+// The target's circle, a virtual called by CGWorldFrame::ClearTrackedObjects in the world pass
+// for the unit CGObject_C::PreAnimate noted (CGGameUI::m_lockedTarget, unless it is the active
+// player or the ObjectSelectionCircle CVar is 0): the reaction's colour
+// (CGUnit_C::GetSelectionHighlightColor), and while the player attacks it a second, closing ring.
+WXL_SEAM(Unit, RenderTargetSelection, "CGUnit_C::RenderTargetSelection", void, thiscall, (const void* self))
+
+// The pet's new target: a ring closing on it for a second after the pet changes target, called
+// by ClearTrackedObjects for the unit PreAnimate noted (CGPetInfo::GetTarget).
+WXL_SEAM(Unit, RenderPetTargetSelection, "CGUnit_C::RenderPetTargetSelection", void, thiscall, (const void* self))
+
+// The move marker: the pulsing circle where click-to-move or an attack move goes, drawn by the
+// active mover from CGUnit_C::Render (every unit's, returning at once for the others).
+WXL_SEAM(Unit, RenderAutoTrackCursor, "CGUnit_C::RenderAutoTrackCursor", void, thiscall, (void* self))
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

@@ -110,6 +110,19 @@ the first frame. `check_conventions.py` closes that: it reads the function out o
 compares what the instructions do with what the row claims. x86 only -- the x64 realisation is
 direct source calls with no convention of its own.
 
+Besides the seams, it reads two more tables of the same shape: the x86 points
+(`include/wxl/points/x86.def`, generated) and the client functions the x86 binding calls by hand
+(`include/wxl/core/binding/calls_x86.def`, `WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv,
+params)`), whose rows declare the convention `BindingX86.cpp` calls them with. The point table's
+`WXL_POINT_X86_PARENT` rows that are no point are read as `Parent.<Ident>` rows, and the runtime's
+recompiled parent bodies (`src/deinlined/<Parent>.gen.cpp`) as one `Deinlined.<shim>` row per
+stock function their `namespace stock` names, with the convention the body calls it with. Each
+body is then held to Wow.exe's own parent: every function it calls is one the parent calls, every
+function the parent calls is one it calls (or a lone `ret`, an empty function of the release
+client), and every global and string it names is one the parent's instructions reach.
+`--points`, `--calls` and `--deinlined` name others; by default all three are read when `--seams`
+is core's own.
+
 ## What it decides, per row
 
 It resolves the row's `symbol` column against `include/wxl/offsets/generated/functions.def`, the
@@ -140,6 +153,28 @@ Two things it is careful about, because both mislead by hand:
   be an instruction boundary -- a function entry, never a byte before a call -- and stops at the
   switch table a `jmp dword ptr [reg*4 + 0x...]` points into, which otherwise decodes as
   plausible instructions reading registers the function never takes.
+
+## Answers
+
+A seam whose After is handed the function's answer (a `WXL_SEAM` or `WXL_SEAM_AFTER` row whose
+`ret` is not void, and whose After body in `src/seams/<Domain>.cpp` uses its first parameter) must
+be a function that gives one. The fork can say a function answers what the stock client does not:
+`CMapArea::PrepareChunk` returns its chunk in the fork and nothing in Wow.exe, which ends on the call
+to `CMapChunk::Create` and leaves in EAX whatever Create did. The check reads every caller: after the
+call, on every path inside the caller, EAX is written before it is read (a later call writes it
+too). When that holds at every call site, no caller uses an answer, the row is refused, and the
+After must find what it needs another way (PrepareChunk's reads its tile's slot). A path that
+leaves the caller, or reads EAX, keeps the row.
+
+## Dropped calls
+
+`include/wxl/tuning/drops_x86.def` lists the calls the x86 runtime writes a five-byte NOP over
+(`[engine] trim_alloc`: SMemAlloc's and SMemFree's `_msize`). Each row is held to three facts read
+from Wow.exe: the bytes at its address are a five-byte `call` to its callee, inside the function it
+names; every `ret` of the callee before its padding pops nothing, so the caller's own cleanup of
+the arguments it pushed stays balanced; and on every path after the call, inside the caller, EAX is
+written before it is read (the same walk as the answers' above), so nothing uses what the callee
+answered. That the callee does nothing else is written by hand beside the row.
 
 ## Witnesses
 

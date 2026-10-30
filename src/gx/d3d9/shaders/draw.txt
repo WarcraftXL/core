@@ -1,0 +1,12 @@
+# wxl.draw's Direct3D 9 programs, compiled when the runtime is built by wxl-core-d3d9-shaders
+# (tools/shaders/compile_d3d9.cpp) into generated/d3d9_draw_shaders.inc, on both architectures:
+# the stock client and the recompiled one on Direct3D 9 draw shapes with them. A tree built where
+# the tool cannot run (an x64 tree cross-built without CMAKE_CROSSCOMPILING_EMULATOR) takes the
+# copy kept in generated/ beside this file, which a build that ran the tool checks it against.
+#
+#   <name> <file> <profile> <entry> <constants> <samplers>   (as shaders.txt)
+
+DrawVs               draw.hlsl       vs_3_0  DrawVs        c240-c245  0
+DrawPs               draw.hlsl       ps_3_0  DrawPs        -          0
+SurfacePs            draw.hlsl       ps_3_0  SurfacePs     c200-c205  1
+ParticlePs           draw.hlsl       ps_3_0  ParticlePs    c200-c205  1

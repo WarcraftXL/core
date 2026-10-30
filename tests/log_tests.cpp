@@ -2,12 +2,15 @@
 // Copyright (c) 2026 WarcraftXL
 //
 // The log: a launch's file kept for the next, the oldest pruned, levels by tag, continuation
-// lines, and WarcraftXL.ini. Run with a scratch folder:
+// lines, WarcraftXL.ini and the graphics API its [gx] section selects. Run with a scratch folder:
 //
 //     wxl-core-log-tests <scratch>
 
 #include "common/Log.hpp"
+#include "gx/Select.hpp"
 #include "runtime/Settings.hpp"
+
+#include "wxl/core/gx_vk.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -237,6 +240,89 @@ int main(int argc, char** argv)
                   std::strstr(bad.problems[4], "lan") && std::strstr(bad.problems[5], "line 7") &&
                   std::strstr(bad.problems[5], "[profile]"),
               "each value that does not read, and an unknown key, is noted with its line");
+
+        // [gx]: the API over the client's request, Vulkan's validation and device.
+        using wxl::core::settings::GxApi;
+        Check(none.gx_api == GxApi::client && !none.gx_validation && !none.gx_gpu[0] && none.gx_frames == 2 && !none.gx_nearest &&
+                  none.gx_async,
+              "without a [gx] section the client's own choice stands, two frames in flight, bilinear, pipelines compiled on workers");
+        const char gxText[] = "[GX]\n"
+                              "api = Vulkan ; tried first\n"
+                              "validation = 1\n"
+                              "gpu = GeForce RTX\n"
+                              "frames_in_flight = 3\n"
+                              "present_filter = Nearest\n"
+                              "Async_Pipelines = 0\n"
+                              "vk_rebar = 0\n"
+                              "VK_PREWARM = 0\n"
+                              "vk_gpu_times = 0 ; no timestamps\n";
+        wxl::core::settings::Settings gx;
+        wxl::core::settings::Parse(gxText, sizeof gxText - 1, gx);
+        Check(gx.gx_api == GxApi::vulkan && gx.gx_validation && std::strcmp(gx.gx_gpu, "GeForce RTX") == 0 &&
+                  gx.gx_frames == 3 && gx.gx_nearest && !gx.gx_async && !gx.gx_rebar && !gx.gx_prewarm && !gx.gx_gpu_times &&
+                  gx.problem_count == 0,
+              "[gx] api, validation, gpu, frames_in_flight, present_filter, async_pipelines, vk_rebar, vk_prewarm and vk_gpu_times, in "
+              "any case, a comment after a value");
+        Check(none.gx_rebar && none.gx_prewarm && none.gx_gpu_times, "ReBAR rings, the prewarm and the GPU's pass times are on by default");
+        const char gxRange[] = "[gx]\n"
+                               "frames_in_flight = 4\n"
+                               "present_filter = cubic\n";
+        wxl::core::settings::Settings gxr;
+        wxl::core::settings::Parse(gxRange, sizeof gxRange - 1, gxr);
+        Check(gxr.gx_frames == 2 && !gxr.gx_nearest && gxr.problem_count == 2 && std::strstr(gxr.problems[0], "1, 2 or 3") &&
+                  std::strstr(gxr.problems[1], "linear or nearest"),
+              "frames in flight outside 1-3 and an unknown filter are noted, the defaults kept");
+        const char gxBad[] = "[gx]\n"
+                             "api = d3d11\n"
+                             "validation = on\n"
+                             "gpu =\n"
+                             "vsync = 1\n"
+                             "api = d3d9\n";
+        wxl::core::settings::Settings gxb;
+        wxl::core::settings::Parse(gxBad, sizeof gxBad - 1, gxb);
+        Check(gxb.gx_api == GxApi::d3d9 && !gxb.gx_validation && !gxb.gx_gpu[0] && gxb.problem_count == 4 &&
+                  std::strstr(gxb.problems[0], "d3d11") && std::strstr(gxb.problems[1], "on") &&
+                  std::strstr(gxb.problems[2], "line 4") && std::strstr(gxb.problems[3], "[gx]"),
+              "each [gx] value that does not read, and an unknown key, is noted; the last api line holds");
+
+        using wxl::core::settings::kAnimateAuto;
+        Check(none.animate_threads == kAnimateAuto && none.trim_alloc, "[engine] animate_threads auto and trim_alloc on by default");
+        const char engineText[] = "[Engine]\n"
+                                  "animate_threads = 6 ; six\n"
+                                  "TRIM_ALLOC = 0\n";
+        wxl::core::settings::Settings en;
+        wxl::core::settings::Parse(engineText, sizeof engineText - 1, en);
+        Check(en.animate_threads == 6 && !en.trim_alloc && en.problem_count == 0, "[engine] animate_threads and trim_alloc, in any case");
+        const char engineZero[] = "[engine]\nanimate_threads = 0\n";
+        wxl::core::settings::Settings ez;
+        wxl::core::settings::Parse(engineZero, sizeof engineZero - 1, ez);
+        Check(ez.animate_threads == 0 && ez.problem_count == 0, "animate_threads = 0 leaves the client's own two threads");
+        const char engineBad[] = "[engine]\n"
+                                 "animate_threads = 1\n"
+                                 "animate_threads = 17\n"
+                                 "animate_threads = many\n"
+                                 "trim_alloc = yes\n"
+                                 "fast = 1\n";
+        wxl::core::settings::Settings eb;
+        wxl::core::settings::Parse(engineBad, sizeof engineBad - 1, eb);
+        Check(eb.animate_threads == kAnimateAuto && eb.trim_alloc && eb.problem_count == 5 && std::strstr(eb.problems[0], "2 to 16") &&
+                  std::strstr(eb.problems[3], "0 or 1") && std::strstr(eb.problems[4], "[engine]"),
+              "1 thread, more than 16, a word, a value that is not 0 or 1 and an unknown key of [engine] are noted, the defaults kept");
+
+        using wxl::core::gx::SelectApi;
+        Check(SelectApi(WXL_GX_API_D3D9, GxApi::client).api == WXL_GX_API_D3D9 &&
+                  !SelectApi(WXL_GX_API_D3D9, GxApi::client).why &&
+                  SelectApi(WXL_GX_API_VULKAN, GxApi::client).api == WXL_GX_API_VULKAN &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::client).api == WXL_GX_API_D3D9EX,
+              "without [gx] api the client's request stands, D3D9 by default");
+        Check(SelectApi(WXL_GX_API_D3D9, GxApi::vulkan).api == WXL_GX_API_VULKAN &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::vulkan).api == WXL_GX_API_VULKAN &&
+                  std::strstr(SelectApi(WXL_GX_API_D3D9EX, GxApi::vulkan).why, "D3D9Ex") &&
+                  SelectApi(WXL_GX_API_OPENGL, GxApi::vulkan).api == WXL_GX_API_OPENGL,
+              "[gx] api = vulkan takes D3D9 and D3D9Ex to Vulkan, and leaves OpenGL");
+        Check(SelectApi(WXL_GX_API_VULKAN, GxApi::d3d9).api == WXL_GX_API_D3D9 &&
+                  SelectApi(WXL_GX_API_D3D9EX, GxApi::d3d9).api == WXL_GX_API_D3D9EX,
+              "[gx] api = d3d9 takes a Vulkan request to D3D9 and leaves D3D9Ex");
 
         Level level;
         Check(wxl::log::ParseLevel(" WARN ", level) && level == Level::Warn && wxl::log::ParseLevel("1", level) &&

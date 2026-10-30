@@ -7,14 +7,41 @@
 #include "objects/Objects.hpp"
 #include "points/Points.hpp"
 #include "profile/Profile.hpp"
+#include "services/EngineService.hpp"
+#if defined(_M_IX86)
+#include "deinlined/Deinlined.hpp"
+#include "gx/x86/Adapter.hpp"
+#endif
 #include "runtime/Attachment.hpp"
 #include "runtime/Code.hpp"
 #include "runtime/Crash.hpp"
 #include "runtime/Frame.hpp"
+#include "runtime/Listening.hpp"
+#include "gx/Vulkan.hpp"
 #include "runtime/Stages.hpp"
 #include "seams/Gameplay.hpp"
 #include "seams/Table.hpp"
 #include "services/ActionService.hpp"
+#include "services/CameraService.hpp"
+#include "services/InputService.hpp"
+#include "services/WorldService.hpp"
+#include "services/ImGuiService.hpp"
+#include "services/AnimationService.hpp"
+#include "services/NetService.hpp"
+#include "net/Zlib.hpp"
+#include "services/PoseService.hpp"
+#include "services/HighlightService.hpp"
+#include "services/SelectionCircleService.hpp"
+#include "services/TextureService.hpp"
+#include "imaging/Imaging.hpp"
+#include "services/CVarService.hpp"
+#include "services/TerrainService.hpp"
+#include "services/DrawService.hpp"
+#include "gx/d3d9/Device.hpp"
+#include "gx/d3d9/Shapes.hpp"
+#include "gx/shapes/Geometry.hpp"
+#include <imgui.h>
+#include <implot.h>
 #include "services/DataService.hpp"
 #include "services/FootprintService.hpp"
 #include "services/GxService.hpp"
@@ -22,6 +49,11 @@
 #include "services/M2Service.hpp"
 #include "services/ScriptService.hpp"
 #include "services/Assets.hpp"
+#include "services/Hashes.hpp"
+#include "services/RelayService.hpp"
+#include "services/RenderService.hpp"
+#include "tuning/Animate.hpp"
+#include "tuning/Drops.hpp"
 #include "services/StorageService.hpp"
 
 #include <chrono>
@@ -29,7 +61,17 @@
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
 #include "wxl/seams/seams.h"
+#include "wxl/core/camera_facing.hpp"
 #include "wxl/core/points.h"
+#include "wxl/core/gx_vk.h"
+#include "wxl/engine/gx.hpp"
+#include "services/ShaderCode.hpp"
+#include "services/TerrainLayers.hpp"
+#include "services/TerrainTiles.hpp"
+#include "services/SplitTile.hpp"
+#include "services/TerrainLowDetail.hpp"
+#include "services/ModelGate.hpp"
+#include "wxl/core/gx_vk.h"
 #include "wxl/core/profile.h"
 #include "wxl/core/storm.hpp"
 #include "wxl/objects/map.hpp"
@@ -37,32 +79,43 @@
 #include "wxl/core/filestack.hpp"
 #include "wxl/services/script.h"
 #include "wxl/services/storage.h"
+#include "wxl/terrain/grid.hpp"
 
 #if defined(_M_IX86)
     #include "binding/CallX86.hpp"
     #include "binding/ModelDrawX86.hpp"
+    #include "binding/HighlightDrawX86.hpp"
+    #include "gx/d3d9/Device.hpp"
+    #include "gx/d3d9/Highlight.hpp"
     #include "seams/Detour.hpp"
     #include "hook/Engine.hpp"
     #include "hook/Safety.hpp"
     #include "points/PointsX86.hpp"
     #include "seams/RegparmX86.hpp"
+#else
+    #include "gx/vk/render/Render.hpp"
 #endif
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <set>
+#include <deque>
 #include <string>
+#include <type_traits>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -129,8 +182,244 @@ namespace
         uint32_t movementFlags  = 0; ///< the movement block's flags
         float    facing         = 0.0f;
         uint32_t money          = 0; ///< the local block's coinage
+        // The animation rows: what the model shows, and what was asked of it.
+        uint32_t shownAnim      = 0;     ///< 0 Stand
+        bool     modelLoading   = false; ///< the model shows nothing yet
+        bool     refusePlay     = false; ///< the client plays nothing (a transition)
+        uint32_t plays          = 0;
+        uint32_t lastPlayFlags  = 0;
+        uint32_t updates        = 0;
+        float    animSpeed      = 1.0f;
+        uint32_t lifts          = 0;
         std::vector<uint32_t> block; ///< the descriptor block, empty for none
     };
+
+    /// The map's ground as wxl.terrain's rows read it: a block of 3 x 3 chunks, columns 500-502
+    /// and rows 600-602, flat at 100 yards, normals up as a map file has them, one hole.
+    struct FakeChunk
+    {
+        int32_t  cx = 0, cy = 0;
+        float    heights[wxl::terrain::kVertexCount]{};
+        int8_t   normals[wxl::terrain::kVertexCount * 3]{};
+        float    base   = 100.0f;
+        uint32_t holes  = 0;
+        bool     loaded = true;
+        int      rebuilds = 0;
+        int      clutterFreed = 0;
+
+        void Reset()
+        {
+            for (uint32_t i = 0; i < wxl::terrain::kVertexCount; ++i)
+            {
+                heights[i]         = 0.0f;
+                normals[3 * i]     = 0;
+                normals[3 * i + 1] = 0;
+                normals[3 * i + 2] = 127;
+            }
+        }
+    };
+    FakeChunk g_ground[9];
+    bool      g_groundPresent = false;
+    int       g_groundForgets = 0;
+    int       g_groundFalls   = 0;
+
+    FakeChunk* GroundChunk(int32_t cx, int32_t cy)
+    {
+        if (cx < 500 || cx > 502 || cy < 600 || cy > 602) return nullptr;
+        FakeChunk& chunk = g_ground[(cy - 600) * 3 + (cx - 500)];
+        return chunk.loaded ? &chunk : nullptr;
+    }
+
+    wxl_bool WXL_CALL FakeTerrainPresent(void) { return g_groundPresent ? WXL_TRUE : WXL_FALSE; }
+    void* WXL_CALL FakeTerrainChunk(int32_t cx, int32_t cy) { return GroundChunk(cx, cy); }
+    /// A tile holding the block's chunks at local columns and rows 0-2.
+    int g_groundArea = 0;
+
+    void* WXL_CALL FakeMapAreaChunk(const void* area, int32_t x, int32_t y)
+    {
+        return area == &g_groundArea ? GroundChunk(500 + x, 600 + y) : nullptr;
+    }
+
+    /// Whether a pointer is one of the fake chunks: the real rows refuse anything else.
+    bool IsGroundChunk(const void* chunk)
+    {
+        for (const FakeChunk& c : g_ground)
+            if (&c == chunk) return true;
+        return false;
+    }
+
+    wxl_bool WXL_CALL FakeTerrainPlace(const void* chunk, int32_t* x, int32_t* y)
+    {
+        if (!IsGroundChunk(chunk) || !x || !y) return WXL_FALSE;
+        *x = static_cast<const FakeChunk*>(chunk)->cx;
+        *y = static_cast<const FakeChunk*>(chunk)->cy;
+        return WXL_TRUE;
+    }
+
+    // wxl.terrain's layers: a render chunk of the test's, the client's vertex constants, and what the
+    // runtime sends the device through the engine (constant rows, texture stage matrices).
+    struct FakeRenderChunk
+    {
+        uint32_t layers = 0;
+        uint32_t render_flags = 0;
+        uint32_t flags[4] = {};
+        uint32_t textures[4] = {};
+        char     batch = 0;
+        const void* map_chunk = nullptr;
+        const void* map_chunk2 = nullptr;
+        uint32_t    pair = 0;
+    };
+    float                                           g_terrainConsts[37 * 4];
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_rowsSent;
+    float                                           g_stage[11][16];
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_stagesSet;
+    std::vector<uint8_t>                            g_areaFile(64, 0);
+
+    wxl_bool WXL_CALL FakeRenderChunkRead(const void* chunk, wxl_core_render_chunk* out)
+    {
+        if (!chunk || !out) return WXL_FALSE;
+        const auto* c = static_cast<const FakeRenderChunk*>(chunk);
+        *out              = wxl_core_render_chunk{};
+        out->layers       = c->layers;
+        out->render_flags = c->render_flags;
+        for (uint32_t i = 0; i < 4; ++i)
+        {
+            out->layer_flags[i]   = c->flags[i];
+            out->layer_texture[i] = c->textures[i];
+        }
+        out->batch      = &c->batch;
+        out->map_chunk  = c->map_chunk;
+        out->map_chunk2 = c->map_chunk2;
+        out->pair       = c->pair;
+        return WXL_TRUE;
+    }
+    wxl_bool WXL_CALL FakeAreaFile(const void* area, wxl_core_area_file* out)
+    {
+        if (!area || !out) return WXL_FALSE;
+        out->tile_x = 32;
+        out->tile_y = 48;
+        out->data   = g_areaFile.data();
+        out->size   = static_cast<uint32_t>(g_areaFile.size());
+        return WXL_TRUE;
+    }
+    const float* WXL_CALL FakeTerrainConsts() { return g_terrainConsts; }
+    void WXL_CALL FakeVertexConstantsSet(uint32_t first, const float* rows, uint32_t count)
+    {
+        g_rowsSent.push_back({first, std::vector<float>(rows, rows + 4 * count)});
+    }
+    wxl_bool WXL_CALL FakeXformGet(uint32_t xform, float* m)
+    {
+        if (xform > 10 || !m) return WXL_FALSE;
+        std::memcpy(m, g_stage[xform], sizeof g_stage[xform]);
+        return WXL_TRUE;
+    }
+    std::vector<std::pair<uint32_t, std::vector<float>>> g_pixelRowsSent;
+    void* g_stageTexture[16] = {};
+    int   g_texturesWrapped  = 0;
+    void WXL_CALL FakePixelConstantsSet(uint32_t first, const float* rows, uint32_t count)
+    {
+        g_pixelRowsSent.push_back({first, std::vector<float>(rows, rows + 4 * count)});
+    }
+    void* WXL_CALL FakeTextureStage(uint32_t stage) { return stage < 16 ? g_stageTexture[stage] : nullptr; }
+    void WXL_CALL FakeTextureStageSet(uint32_t stage, void* texture)
+    {
+        if (stage < 16) g_stageTexture[stage] = texture;
+    }
+    void WXL_CALL FakeTextureWrap(void*) { ++g_texturesWrapped; }
+
+    // Render states and the device's draws, for a chunk's second draw.
+    int32_t g_renderState[100] = {};
+    struct FakeDraw
+    {
+        const void* batch;
+        int32_t     blending, depthWrite;
+        void*       stage[16];
+        std::vector<float> pixelRows; ///< the last pixel rows sent before it
+        std::vector<std::pair<uint32_t, std::vector<float>>> vertexRows;
+    };
+    std::vector<FakeDraw> g_draws;
+    int32_t WXL_CALL FakeRenderState(uint32_t which) { return which < 100 ? g_renderState[which] : 0; }
+    void WXL_CALL FakeRenderStateSet(uint32_t which, int32_t value)
+    {
+        if (which < 100) g_renderState[which] = value;
+    }
+    void WXL_CALL FakeGxDraw(const void* batch, int32_t)
+    {
+        FakeDraw d{batch, g_renderState[6], g_renderState[15], {}, {}, g_rowsSent};
+        std::memcpy(d.stage, g_stageTexture, sizeof d.stage);
+        if (!g_pixelRowsSent.empty()) d.pixelRows = g_pixelRowsSent.back().second;
+        g_draws.push_back(d);
+        // The device's own draw seams fire for it, as they do on every device.
+        wxl::seam::Gx::D3dDraw::Before(nullptr, batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, batch, 1);
+    }
+    // The map's WDT as the client loaded it.
+    uint32_t g_wdtFlags = 0;
+    int      g_shadersValidated = 0;
+    uint32_t g_wdtTiles[4096 * 2] = {}; ///< MAIN as the client holds it
+
+    wxl_bool WXL_CALL FakeMapWdt(wxl_core_wdt* out)
+    {
+        out->path     = "World\\Maps\\Missing\\Missing.wdt";
+        out->flags    = &g_wdtFlags;
+        out->tiles    = g_wdtTiles;
+        out->map_path = "World\\Maps\\Missing";
+        out->map_name = "Missing";
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeValidateShaders() { ++g_shadersValidated; }
+
+    // A program's record (CGxShader), as the D3D9 device makes it.
+    struct FakeShader
+    {
+        const char* name;
+        int32_t     target;
+        const void* code;
+        uint32_t    size;
+    };
+    wxl_bool WXL_CALL FakeShaderRecord(const void* shader, wxl_core_shader_record* out)
+    {
+        if (!shader || !out) return WXL_FALSE;
+        const auto* f = static_cast<const FakeShader*>(shader);
+        *out = wxl_core_shader_record{f->name, f->target, f->code, f->size};
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeShaderCodeSet(void* shader, const void* code, uint32_t size)
+    {
+        auto* f = static_cast<FakeShader*>(shader);
+        f->code = code;
+        f->size = size;
+    }
+    void WXL_CALL FakeXformSet(uint32_t xform, const float* m)
+    {
+        if (xform > 10 || !m) return;
+        std::memcpy(g_stage[xform], m, sizeof g_stage[xform]);
+        g_stagesSet.push_back({xform, std::vector<float>(m, m + 16)});
+    }
+
+    wxl_bool WXL_CALL FakeTerrainView(void* chunk, wxl_core_terrain_chunk* out)
+    {
+        FakeChunk* c = static_cast<FakeChunk*>(chunk);
+        if (!IsGroundChunk(chunk) || !out || GroundChunk(c->cx, c->cy) != c) return WXL_FALSE;
+        out->chunk_x = c->cx;
+        out->chunk_y = c->cy;
+        out->heights = c->heights;
+        out->normals = c->normals;
+        out->base_z  = c->base;
+        out->holes   = c->holes;
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeTerrainRebuild(void* chunk, wxl_bool doodads)
+    {
+        FakeChunk* c = static_cast<FakeChunk*>(chunk);
+        ++c->rebuilds;
+        if (doodads) ++c->clutterFreed;
+    }
+    void WXL_CALL FakeForgetCollision(void) { ++g_groundForgets; }
+    void WXL_CALL FakeFallLocal(const void*) { ++g_groundFalls; }
+
+    /// A roof over the ground for the lift's traces, at this height; 0 for none.
+    float g_roofZ = 0.0f;
 
     /// A terrain click and a sprite click, as the GameUI rows read them.
     struct FakeTerrainClick
@@ -149,9 +438,11 @@ namespace
     /// A console variable, as the ConsoleVar rows read one.
     struct FakeCVar
     {
-        const char* name  = nullptr;
-        const char* value = nullptr;
-        uint32_t    flags = 0;
+        const char* name         = nullptr;
+        const char* value        = nullptr;
+        uint32_t    flags        = 0;
+        const char* defaultValue = nullptr;
+        const char* latched      = nullptr;
     };
 
     /// The glue screen the fake client shows.
@@ -195,6 +486,40 @@ namespace
     uint32_t WXL_CALL FakeTypeId(const void* object) { return Obj(object)->typeId; }
     uint32_t WXL_CALL FakeEntry(const void* object) { return Obj(object)->entry; }
     int32_t WXL_CALL FakeHealth(const void* object) { return Obj(object)->health; }
+
+    // The animation rows. The fake model has no EmoteWorkNoSheathe (136): it falls back to
+    // EmoteWork (62) unless the id is taken as given; every animation lasts a second.
+    void WXL_CALL FakePlayAnimation(void* object, uint32_t anim, uint32_t flags)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        ++o->plays;
+        o->lastPlayFlags = flags;
+        if (o->refusePlay || o->modelLoading) return;
+        o->shownAnim = (anim == 136 && !(flags & 0x4)) ? 62u : anim;
+        o->animSpeed = 1.0f;
+    }
+    void WXL_CALL FakeUpdateAnimation(void* object)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        ++o->updates;
+        o->shownAnim = 0;
+    }
+    uint32_t WXL_CALL FakeShownAnimation(const void* object)
+    {
+        return Obj(object)->modelLoading ? 0xFFFFFFFFu : Obj(object)->shownAnim;
+    }
+    void WXL_CALL FakeAnimationSpeed(void* object, uint32_t anim, float speed)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        if (o->shownAnim == anim) o->animSpeed = speed;
+    }
+    uint32_t WXL_CALL FakeAnimationLength(const void*, uint32_t) { return 1000; }
+    void WXL_CALL FakeLiftLocal(void* object, float z)
+    {
+        FakeObject* o = static_cast<FakeObject*>(object);
+        o->position.z = z;
+        ++o->lifts;
+    }
     uint32_t WXL_CALL FakeCastingSpellId(const void* object) { return Obj(object)->castingSpellId; }
     uint32_t WXL_CALL FakeChannelSpellId(const void* object) { return Obj(object)->channelSpellId; }
 
@@ -230,6 +555,214 @@ namespace
     const char* WXL_CALL FakeCVarName(const void* cvar) { return CVarOf(cvar)->name; }
     const char* WXL_CALL FakeCVarValue(const void* cvar) { return CVarOf(cvar)->value; }
     uint32_t WXL_CALL FakeCVarFlags(const void* cvar) { return CVarOf(cvar)->flags; }
+    const char* WXL_CALL FakeCVarDefault(const void* cvar) { return CVarOf(cvar)->defaultValue; }
+    const char* WXL_CALL FakeCVarLatched(const void* cvar) { return CVarOf(cvar)->latched; }
+
+    // The client's variable table, as ConsoleVar.cpp of the fork keeps it: a hash without case,
+    // CVar::Register, Set and InternalSet with the callback and the latch, the console's `set`
+    // as Config.wtf's lines reach it, and the deletion of a category.
+    struct FakeTableCVar : FakeCVar
+    {
+        std::string key, text, fallback, reset, pending;
+        bool        hasText = false, hasDefault = false, hasReset = false, hasPending = false;
+        void*       callback = nullptr;
+        void*       arg      = nullptr;
+        void Sync()
+        {
+            name         = key.c_str();
+            value        = hasText ? text.c_str() : nullptr;
+            defaultValue = hasDefault ? fallback.c_str() : nullptr;
+            latched      = hasPending ? pending.c_str() : nullptr;
+        }
+    };
+    using FakeCVarCallback = bool (*)(void*, const char*, const char*, void*);
+    std::map<std::string, std::unique_ptr<FakeTableCVar>> g_cvars;
+    std::vector<std::string>                              g_cvarCommands; // ConsoleCommandRegister's names
+    std::map<std::string, const char*>                    g_cvarHelp;     // kept by pointer, as the console does
+
+    std::string FakeCVarKey(const char* name)
+    {
+        std::string key(name ? name : "");
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return key;
+    }
+
+    FakeTableCVar* FakeFindCVar(const char* name)
+    {
+        const auto found = g_cvars.find(FakeCVarKey(name));
+        return found == g_cvars.end() ? nullptr : found->second.get();
+    }
+
+    bool FakeSameText(const std::string& a, const char* b)
+    {
+        return FakeCVarKey(a.c_str()) == FakeCVarKey(b);
+    }
+
+    void FakeInternalSet(FakeTableCVar& var, const char* text, bool setValue, bool setReset, bool setDefault)
+    {
+        wxl::seam::ConsoleVar::InternalSet::Before(&var, text, setValue, setReset, setDefault, 1);
+        if ((var.flags & 0x4) || !text) return;
+        if (setValue && (!var.hasText || !FakeSameText(var.text, text)))
+        {
+            var.text    = text;
+            var.hasText = true;
+        }
+        if (setReset && !var.hasReset)
+        {
+            var.reset    = text;
+            var.hasReset = true;
+        }
+        if (setDefault && !var.hasDefault)
+        {
+            var.fallback   = text;
+            var.hasDefault = true;
+        }
+        var.Sync();
+    }
+
+    void FakeSet(FakeTableCVar& var, const char* text, bool setValue, bool setReset, bool setDefault)
+    {
+        if (setValue)
+        {
+            if (var.callback && !reinterpret_cast<FakeCVarCallback>(var.callback)(&var, var.value, text, var.arg)) return;
+            if (var.flags & 0x2)
+            {
+                var.pending    = text;
+                var.hasPending = true;
+                var.Sync();
+                return;
+            }
+        }
+        FakeInternalSet(var, text, setValue, setReset, setDefault);
+    }
+
+    FakeTableCVar* FakeRegisterFull(const char* name, const char* help, uint32_t flags, const char* text, void* callback,
+                                    bool setCommand, bool unk)
+    {
+        if (!name || !*name || !text) return nullptr;
+        if (FakeTableCVar* var = FakeFindCVar(name))
+        {
+            const bool setReset   = !var->hasReset;
+            var->flags            = flags | (var->flags & ~0x30u);
+            const bool setDefault = !var->hasDefault;
+            var->callback         = callback;
+            bool setValue         = false;
+            if (callback && !reinterpret_cast<FakeCVarCallback>(callback)(var, var->value, var->value, nullptr)) setValue = true;
+            FakeSet(*var, text, setValue, setReset, setDefault);
+            if (!setCommand) var->flags |= 0x80000000u;
+            if (unk && !(var->flags & 0x80000000u)) var->flags |= 0x80u;
+            return var;
+        }
+        auto made     = std::make_unique<FakeTableCVar>();
+        made->key     = name;
+        made->callback = callback;
+        made->Sync();
+        FakeTableCVar* var = made.get();
+        g_cvars[FakeCVarKey(name)] = std::move(made);
+        if (setCommand)
+            FakeSet(*var, text, true, true, false);
+        else
+            FakeSet(*var, text, true, false, true);
+        var->flags = flags | 0x1u;
+        if (!setCommand) var->flags |= 0x80000000u;
+        if (unk && !(var->flags & 0x80000000u)) var->flags |= 0x80u;
+        if (std::find(g_cvarCommands.begin(), g_cvarCommands.end(), FakeCVarKey(name)) == g_cvarCommands.end())
+        {
+            g_cvarCommands.push_back(FakeCVarKey(name));
+            g_cvarHelp[FakeCVarKey(name)] = help;
+        }
+        return var;
+    }
+
+    /// A `SET name "value"` line of Config.wtf, as the stock client's SetCommandHandler takes it:
+    /// Set and InternalSet inlined, a name nobody has registered made archived with that value.
+    void FakeConfigLine(const char* name, const char* text)
+    {
+        FakeTableCVar* var = FakeFindCVar(name);
+        if (!var)
+        {
+            FakeRegisterFull(name, "", 0, text, nullptr, true, false);
+            return;
+        }
+        if (var->callback && !reinterpret_cast<FakeCVarCallback>(var->callback)(var, var->value, text, var->arg)) return;
+        if (var->flags & 0x2)
+        {
+            var->pending    = text;
+            var->hasPending = true;
+            var->Sync();
+            return;
+        }
+        if (var->flags & 0x4) return;
+        if (var->hasText && FakeSameText(var->text, text)) return;
+        var->text    = text;
+        var->hasText = true;
+        var->Sync();
+    }
+
+    void FakeDeleteCategory(uint32_t category)
+    {
+        for (auto it = g_cvars.begin(); it != g_cvars.end();)
+            if ((it->second->flags & 0x1) && (it->second->flags & 0x30) == category)
+                it = g_cvars.erase(it);
+            else
+                ++it;
+    }
+
+    void* WXL_CALL FakeCVarLookup(const char* name) { return FakeFindCVar(name); }
+    void* WXL_CALL FakeCVarRegister(const char* name, const char* help, uint32_t flags, const char* text, void* callback,
+                                    uint32_t)
+    {
+        return FakeRegisterFull(name, help, flags, text, callback, false, false);
+    }
+    wxl_bool WXL_CALL FakeCVarSet(void* cvar, const char* text)
+    {
+        if (!cvar || !text) return WXL_FALSE;
+        FakeSet(*static_cast<FakeTableCVar*>(cvar), text, true, false, false);
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeCVarWriteFlags(void* cvar, uint32_t flags)
+    {
+        if (cvar) static_cast<FakeCVar*>(cvar)->flags = flags;
+    }
+
+    // The client's signature check as the fake client answers it: the verdict to give, how many
+    // times it was asked, and whether the gate at its top let the runtime's own call through.
+    int32_t  g_sigVerdict     = 2;
+    uint32_t g_sigChecks      = 0;
+    uint32_t g_sigDigests     = 0;
+    bool     g_sigLetThrough  = false;
+
+    /// What the client's check does once the gate at its top has let it run: the digest written
+    /// for a verdict that gets that far (modified or signed).
+    int32_t FakeJudge(uint8_t* digest)
+    {
+        ++g_sigChecks;
+        if (g_sigVerdict >= WXL_INTERFACE_SIGNATURE_MODIFIED && digest) std::memset(digest, 0xAB, 16);
+        return g_sigVerdict;
+    }
+
+    /// The client's FrameXML_CheckSignature as the fork has it: the gate first, then the check.
+    int32_t (*g_sigClient)(const char*, const char*, const uint8_t*, uint8_t*) =
+        [](const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest) -> int32_t
+    {
+        int32_t  answer = -2;
+        uint8_t* out    = digest;
+        g_sigLetThrough = !wxl::seam::FrameXML::CheckSignature::Gate(&answer, &toc, &extra, &modulus, &out);
+        return g_sigLetThrough ? FakeJudge(digest) : answer;
+    };
+
+    int32_t WXL_CALL FakeCheckSignature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)
+    {
+        return g_sigClient(toc, extra, modulus, digest);
+    }
+
+    wxl_bool WXL_CALL FakeSignatureDigest(const char* toc, const char*, uint8_t* digest)
+    {
+        if (!toc || !digest) return WXL_FALSE;
+        ++g_sigDigests;
+        std::memset(digest, 0xCD, 16);
+        return WXL_TRUE;
+    }
 
     const char* WXL_CALL FakeGlueScreen(void) { return g_glueScreen; }
 
@@ -309,6 +842,7 @@ namespace
         std::vector<std::string>              ran;
         std::vector<std::vector<std::string>> eventTables; ///< every table installed, in order
         std::vector<FakeSignal>               signals;
+        uint32_t                              calls = 0; ///< calls running, as L->ci counts them
     };
 
     FakeVm  g_vm;
@@ -431,6 +965,39 @@ namespace
     void WXL_CALL FakeRun(const char* source, const char* name)
     {
         g_vm.ran.push_back(std::string(name) + ": " + source);
+        const std::string chunk(source);
+        // "leak:" leaves a value on the stack, as a C function of the client that pushes and
+        // returns outside a call would.
+        if (chunk.rfind("leak:", 0) == 0) FakePushNumber(&g_vm, 1.0);
+#if defined(_MSC_VER)
+        // "fault:" stops inside a call of the chunk, as GetBindingKey does before the client has
+        // loaded its key bindings (CGUIBindings::s_bindings null): the protected call, the chunk
+        // and the function stay open with their values on the stack.
+        if (chunk.rfind("fault:", 0) == 0)
+        {
+            g_vm.calls += 2;
+            FakePushString(&g_vm, "error handler", 13);
+            FakePushString(&g_vm, "chunk", 5);
+            FakePushString(&g_vm, "TURNLEFT", 8);
+            volatile int* nowhere = nullptr;
+            *nowhere              = 1;
+        }
+#endif
+    }
+
+    void WXL_CALL FakeMark(void* state, wxl_script_mark* mark)
+    {
+        *mark          = wxl_script_mark{};
+        mark->words[0] = Vm(state)->stack.size();
+        mark->words[1] = Vm(state)->calls;
+    }
+
+    wxl_bool WXL_CALL FakeUnwind(void* state, const wxl_script_mark* mark)
+    {
+        if (Vm(state)->calls == mark->words[1]) return WXL_FALSE;
+        Vm(state)->calls = static_cast<uint32_t>(mark->words[1]);
+        Vm(state)->stack.resize(mark->words[0]);
+        return WXL_TRUE;
     }
 
     void WXL_CALL FakeCreateEvents(const char** names, uint32_t count)
@@ -502,6 +1069,20 @@ namespace
     uint32_t WXL_CALL FakeMessageRead(const void* store)
     {
         return store ? static_cast<const FakeStore*>(store)->read : 0u;
+    }
+
+    /// What the fake client sent through net_send: the opcode as a u32 and the body.
+    std::vector<std::vector<uint8_t>>& NetSent()
+    {
+        static std::vector<std::vector<uint8_t>> sent;
+        return sent;
+    }
+
+    wxl_bool WXL_CALL FakeNetSend(const void* message, uint32_t size)
+    {
+        const uint8_t* at = static_cast<const uint8_t*>(message);
+        NetSent().emplace_back(at, at + size);
+        return WXL_TRUE;
     }
 
     /// A pending cast, as the spell rows read one.
@@ -584,10 +1165,14 @@ namespace
         fsk::StreamRecord* stream = nullptr;
     };
 
+    /// The record the fake's archive files are found in: what FindFile answers through `archive`.
+    char g_fakeRecord = 0;
+
     /// FindFile as the client runs it: the gate first, then a name behind two backslashes off
-    /// the disk at the base path, else the files it holds. Answers the path to open, and
-    /// whether that path is the file stack's.
-    bool FakeFind(const char* name, std::string& path, bool& stacked)
+    /// the disk at the base path, else the files it holds (in an archive, `g_fakeRecord`), then
+    /// the observing half. An open asks the archive back, an existence check does not. Answers
+    /// the path to open, and whether that path is the file stack's.
+    bool FakeFind(const char* name, std::string& path, bool& stacked, bool open = true)
     {
         char        buffer[260] = {};
         char*       out         = buffer;
@@ -596,7 +1181,7 @@ namespace
         uint32_t    type        = 3;
         uint32_t*   typeAt      = &type;
         void*       archive     = nullptr;
-        void**      archiveAt   = &archive;
+        void**      archiveAt   = open ? &archive : nullptr;
         int32_t     answer      = 0;
         const char* asked       = name;
         if (wxl::seam::Storage::FindFile::Gate(&answer, &asked, &out, &size, &flags, &typeAt, &archiveAt))
@@ -606,22 +1191,39 @@ namespace
             stacked = true;
             return true;
         }
-        stacked = false;
+        stacked    = false;
+        bool found = false;
         if (asked[0] == '\\' && asked[1] == '\\')
         {
             path = g_basePath + asked;
             const DWORD attributes = ::GetFileAttributesA(path.c_str());
-            return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+            found = attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+            type  = 0;
+            std::snprintf(buffer, sizeof buffer, "%s", asked);
         }
-        path = asked;
-        return FileNamed(asked) != nullptr;
+        else
+        {
+            path  = asked;
+            found = FileNamed(asked) != nullptr;
+            if (found && archiveAt) *archiveAt = &g_fakeRecord;
+        }
+        wxl::seam::Storage::FindFileResult::After(found ? 1 : 0, asked, buffer, size, flags, &type, archiveAt);
+        return found;
+    }
+
+    wxl_bool WXL_CALL FakeArchiveRecordOf(void* record, wxl_core_archive* out)
+    {
+        if (record != &g_fakeRecord || !out) return WXL_FALSE;
+        *out      = wxl_core_archive{};
+        out->path = "Data\\fake.MPQ";
+        return WXL_TRUE;
     }
 
     wxl_bool WXL_CALL FakeFileExists(const char* path)
     {
         std::string found;
         bool        stacked = false;
-        return path && FakeFind(path, found, stacked) ? WXL_TRUE : WXL_FALSE;
+        return path && FakeFind(path, found, stacked, false) ? WXL_TRUE : WXL_FALSE;
     }
 
     /// SFileOpenFile: SFile::OpenEx's gate, FindFile, then the open of what it found.
@@ -834,6 +1436,8 @@ namespace
     uint32_t g_gxHeight  = 1080;
 
     wxl_bool WXL_CALL FakeGxDeviceExists() { return g_gxDevice ? WXL_TRUE : WXL_FALSE; }
+    int               g_gxInvalidated = 0; ///< how often the runtime told the client its state changed
+    void WXL_CALL     FakeGxInvalidate() { ++g_gxInvalidated; }
     wxl_bool WXL_CALL FakeGxHasContext() { return g_gxDevice && g_gxContext ? WXL_TRUE : WXL_FALSE; }
     wxl_bool WXL_CALL FakeGxWindowVisible() { return g_gxDevice && g_gxVisible ? WXL_TRUE : WXL_FALSE; }
 
@@ -1135,6 +1739,32 @@ namespace
     wxl_model_batch_args g_gxDraw{};
     bool                 g_gxDrew = false;
 
+    /// The API the fake device runs on: Direct3D 9.
+    int32_t WXL_CALL FakeGxDeviceApi() { return 1; }
+
+    /// The world's view wxl.draw reads: pixels of a 1600 x 900 window on the clip space, from an eye
+    /// at (100, 200, 0); false until a check sets it up.
+    bool g_fakeWorldView = false;
+    wxl_bool WXL_CALL FakeGxWorldView(wxl_core_world_view* out)
+    {
+        if (!g_fakeWorldView || !out) return WXL_FALSE;
+        *out = wxl_core_world_view{};
+        for (int i = 0; i < 4; ++i) out->view[5 * i] = 1.0f;
+        out->projection[0]  = 2.0f / 1600.0f;
+        out->projection[5]  = -2.0f / 900.0f;
+        out->projection[10] = 0.001f;
+        out->projection[12] = -1.0f;
+        out->projection[13] = 1.0f;
+        out->projection[14] = 0.5f;
+        out->projection[15] = 1.0f;
+        const float box[6]  = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+        std::memcpy(out->viewport, box, sizeof box);
+        out->window[0] = 1600.0f;
+        out->window[1] = 900.0f;
+        out->eye       = wxl_vec3{100.0f, 200.0f, 0.0f};
+        return WXL_TRUE;
+    }
+
     wxl_bool WXL_CALL FakeGxModelDraw(const void* render, wxl_model_batch_args* out)
     {
         if (!render || !out || !g_gxDrew) return WXL_FALSE;
@@ -1279,6 +1909,113 @@ namespace
 
     void* WXL_CALL FakeModelParent(const void* model) { return model ? AsFake(const_cast<void*>(model))->parent : nullptr; }
 
+    // --- The scene's animate list (the M2 BeginThread and WaitThread gates) ---------------------
+
+    /// A model of a fake scene's animate list: how often, on which thread and with which floating
+    /// point state it was animated, and a stand-in for its bones' work (the bench's).
+    struct FakeAnimModel : FakeM2Model
+    {
+        FakeAnimModel*            next = nullptr;
+        std::atomic<int>          animated{0};
+        DWORD                     thread = 0;
+        wxl::core::tuning::FloatState state;
+        uint32_t                  work = 0; ///< bones to pose, the bench's
+        float                     out  = 0.0f;
+    };
+
+    struct FakeAnimScene
+    {
+        FakeAnimModel* head = nullptr;
+    };
+
+    /// CM2Scene::AnimateThread, as the fake client names it.
+    void FakeAnimateThread(void*) {}
+
+    wxl_bool WXL_CALL FakeIsAnimateThread(const void* function)
+    {
+        return function == reinterpret_cast<const void*>(&FakeAnimateThread) ? WXL_TRUE : WXL_FALSE;
+    }
+
+    uint32_t WXL_CALL FakeAnimateList(const void* scene, void** out, uint32_t capacity)
+    {
+        uint32_t count = 0;
+        for (FakeAnimModel* m = scene ? static_cast<const FakeAnimScene*>(scene)->head : nullptr; m; m = m->next)
+        {
+            if (out && count < capacity) out[count] = static_cast<FakeM2Model*>(m);
+            ++count;
+        }
+        return count;
+    }
+
+    void* WXL_CALL FakeSwapAnimateList(void* scene, void* head)
+    {
+        if (!scene) return nullptr;
+        auto* s   = static_cast<FakeAnimScene*>(scene);
+        void* was = s->head ? static_cast<FakeM2Model*>(s->head) : nullptr;
+        s->head   = head ? static_cast<FakeAnimModel*>(static_cast<FakeM2Model*>(head)) : nullptr;
+        return was;
+    }
+
+    /// A model's bones posed: a chain of 4x4 products, about what CM2Model::AnimateMT does per bone.
+    float FakePose(uint32_t bones, float seed)
+    {
+        float m[16], r[16];
+        for (int i = 0; i < 16; ++i) m[i] = seed + static_cast<float>(i) * 0.01f;
+        for (uint32_t b = 0; b < bones; ++b)
+        {
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    r[i * 4 + j] = m[i * 4] * m[j] + m[i * 4 + 1] * m[4 + j] + m[i * 4 + 2] * m[8 + j] + m[i * 4 + 3] * m[12 + j];
+            for (int i = 0; i < 16; ++i) m[i] = r[i] * 0.25f + 0.1f;
+        }
+        return m[0];
+    }
+
+    void WXL_CALL FakeAnimateModel(void* model, void* scene)
+    {
+        if (!model || !scene) return;
+        auto* m   = static_cast<FakeAnimModel*>(static_cast<FakeM2Model*>(model));
+        m->thread = GetCurrentThreadId();
+        m->state  = wxl::core::tuning::CaptureFloat();
+        if (m->work) m->out = FakePose(m->work, 0.01f);
+        m->animated.fetch_add(1);
+    }
+
+    /// A fake scene of @p count models, every @p attachedEvery-th one attached to another.
+    struct AnimScene
+    {
+        FakeAnimScene              scene;
+        std::vector<FakeAnimModel> models;
+        FakeM2Model                parent;
+
+        AnimScene(uint32_t count, uint32_t attachedEvery, uint32_t work = 0) : models(count)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                models[i].next = i + 1 < count ? &models[i + 1] : nullptr;
+                models[i].work = work;
+                if (attachedEvery && i % attachedEvery == attachedEvery - 1) models[i].parent = &parent;
+            }
+            scene.head = count ? &models[0] : nullptr;
+        }
+
+        /// CM2Scene::Animate's threaded part, as the client runs it: BeginThread, its own loop over
+        /// the list (every other model; none while the gate hides it), WaitThread.
+        bool Frame(void* cache, void* function = reinterpret_cast<void*>(&FakeAnimateThread))
+        {
+            void* self = cache;
+            void* fn   = function;
+            void* arg  = &scene;
+            const bool taken = wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg);
+            for (FakeAnimModel* m = scene.head; m; m = m->next ? m->next->next : nullptr)
+                if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), &scene);
+            void* wait = cache;
+            const bool waited = wxl::seam::M2::WaitThread::Gate(&wait);
+            return taken && waited;
+        }
+    };
+
+
     void* WXL_CALL FakeModelSource(const void* model) { return model ? AsFake(const_cast<void*>(model))->source : nullptr; }
 
     void WXL_CALL FakeSetGeosets(void* model, uint32_t first, uint32_t last, wxl_bool visible)
@@ -1304,6 +2041,45 @@ namespace
     {
         FakeM2Model* fake = AsFake(const_cast<void*>(model));
         return fake ? (fake->file ? fake->file : fake) : nullptr;
+    }
+
+    // The client's model cache and texture list, as the reload rows reach them.
+    int g_evictAsked   = 0;
+    int g_displayAgain = 0;
+
+    uint32_t WXL_CALL FakeCacheEvict(const char* leaf, void** out, uint32_t capacity)
+    {
+        ++g_evictAsked;
+        if (!leaf || std::strcmp(leaf, "character.m2") != 0) return 0;
+        if (out && capacity) out[0] = &g_charModel; // the character model is its own file
+        return 1;
+    }
+
+    wxl_bool WXL_CALL FakeUpdateDisplay(void* object)
+    {
+        const FakeObject* unit = static_cast<const FakeObject*>(object);
+        if (!unit || (unit->typeId != WXL_OBJECT_UNIT && unit->typeId != WXL_OBJECT_PLAYER)) return WXL_FALSE;
+        ++g_displayAgain;
+        return WXL_TRUE;
+    }
+
+    uint32_t WXL_CALL FakeTextureReload(const char* name, uint32_t* busy, uint32_t* atlas)
+    {
+        if (busy) *busy = 0;
+        if (atlas) *atlas = 0;
+        if (name && _stricmp(name, "Textures\\Loading") == 0)
+        {
+            if (busy) *busy = 1;
+            return 0;
+        }
+        if (name && _stricmp(name, "Interface\\Icons\\Shared") == 0)
+        {
+            if (atlas) *atlas = 1;
+            return 0;
+        }
+        if (!name || _stricmp(name, "Textures\\Fake") != 0) return 0;
+        if (busy) *busy = 1;
+        return 2;
     }
 
     wxl_bool WXL_CALL FakeAttachmentPoint(const void* model, uint32_t attachment, wxl_vec3* out)
@@ -1355,6 +2131,81 @@ namespace
         copy->parent = parent, copy->source = source, copy->attachment = attachment, copy->toRoot = to_root;
         g_fakeLive.push_back(copy);
         ++g_fakeCopies;
+        return WXL_TRUE;
+    }
+
+    // --- wxl.m2's models of the world and bone watchers: what the binding was asked ------------
+
+    struct FakeWorldState
+    {
+        int              made     = 0;
+        int              placed   = 0;
+        int              unplaced = 0;
+        wxl_m2_placement placement{};
+        wxl_m2_placement transform{};
+        uint32_t         anim  = 0;
+        float            speed = 0.0f;
+        float            alpha = 1.0f;
+        int              emitting = -1;
+    };
+    FakeWorldState g_world;
+
+    void* WXL_CALL FakeCreateWorldModel(const char* path)
+    {
+        if (!path || !*path) return nullptr;
+        ++g_world.made;
+        FakeM2Model* model = new FakeM2Model{};
+        g_fakeLive.push_back(model);
+        return model;
+    }
+    wxl_bool WXL_CALL FakePlaceWorld(void* model, const wxl_m2_placement* placement)
+    {
+        if (!model || !placement || g_mapId < 0) return WXL_FALSE;
+        ++g_world.placed;
+        g_world.placement = *placement;
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeUnplaceWorld(void* model)
+    {
+        if (model) ++g_world.unplaced;
+    }
+    void WXL_CALL FakeSetTransform(void*, const wxl_m2_placement* placement) { g_world.transform = *placement; }
+    void WXL_CALL FakePlayAnimation(void*, uint32_t anim, float speed) { g_world.anim = anim, g_world.speed = speed; }
+    wxl_bool WXL_CALL FakeM2Loaded(const void* model)
+    {
+        return model && static_cast<const FakeM2Model*>(model)->loaded ? WXL_TRUE : WXL_FALSE;
+    }
+    uint32_t WXL_CALL FakeAnimationLength(void*, uint32_t anim) { return anim == 0 ? 1333u : 0u; }
+    void WXL_CALL FakeSetAlpha(void*, float alpha) { g_world.alpha = alpha; }
+    void WXL_CALL FakeSetEmitting(void*, wxl_bool emitting) { g_world.emitting = emitting ? 1 : 0; }
+    wxl_bool WXL_CALL FakeAttachmentWorld(void* model, uint32_t attachment, wxl_vec3* out)
+    {
+        if (model != &g_charModel || attachment != 32) return WXL_FALSE;
+        *out = wxl_vec3{100.0f, 200.0f, 31.5f};
+        return WXL_TRUE;
+    }
+
+    /// The bones of a fake model as the binding hands them to watchers: two files, told apart by
+    /// the model's `file` (null: the model is its own file), path "a.m2" or "b.m2".
+    int g_bonesAsked = 0;
+    wxl_bool WXL_CALL FakeM2Bones(void* model, wxl_m2_bones* out)
+    {
+        ++g_bonesAsked;
+        FakeM2Model* fake = AsFake(model);
+        if (!fake || !fake->loaded) return WXL_FALSE;
+        out->model      = model;
+        out->file       = fake->file ? fake->file : model;
+        out->path       = fake->texType == 2 ? wxl_str{"b.m2", 4} : wxl_str{"a.m2", 4};
+        out->bone_count = 3;
+        out->matrices   = &fake->matrices[0][0];
+        out->time_ms    = 42;
+        return WXL_TRUE;
+    }
+    wxl_bool WXL_CALL FakeFileBone(const void* file, uint32_t index, int16_t* parent, wxl_vec3* pivot)
+    {
+        if (!file || index >= 3) return WXL_FALSE;
+        std::memcpy(parent, g_bodyBones.bytes[index] + 0x08, sizeof *parent);
+        std::memcpy(pivot, g_bodyBones.bytes[index] + 0x4C, sizeof *pivot);
         return WXL_TRUE;
     }
 
@@ -1485,6 +2336,384 @@ namespace
         return g_refuseActions ? WXL_FALSE : WXL_TRUE;
     }
 
+    wxl_bool WXL_CALL FakeActFace(const void* player, float facing)
+    {
+        Did("face", Obj(player)->guid, static_cast<uint64_t>(facing * 100.0f + 0.5f));
+        return g_refuseActions ? WXL_FALSE : WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeOutdoors(const void* o) { return Obj(o)->clientFlags & 0x1u ? WXL_FALSE : WXL_TRUE; }
+
+    /// The world camera as the fake client keeps it, and what was written to it.
+    struct FakeCamera
+    {
+        wxl_core_camera view{};
+        uint32_t        writes = 0;
+    };
+    FakeCamera  g_camera;
+    FakeCamera* g_worldCamera = nullptr; ///< null out of the world
+
+    // The game's input control as the mouse-look rows read it, and what they were asked.
+    struct FakeInputControl
+    {
+        uint32_t pending = 0;
+    };
+    FakeInputControl      g_inputControl;
+    std::vector<uint32_t> g_defaultActions;
+    int                   g_lookStops = 0;
+
+    uint32_t WXL_CALL FakePendingAction(const void* c) { return static_cast<const FakeInputControl*>(c)->pending; }
+    void WXL_CALL FakeClearPending(void* c) { static_cast<FakeInputControl*>(c)->pending = 0; }
+    wxl_bool WXL_CALL FakeDefaultAction(uint32_t button)
+    {
+        g_defaultActions.push_back(button);
+        return WXL_TRUE;
+    }
+    void WXL_CALL FakeLookStop() { ++g_lookStops; }
+
+    // What the world frame's default action would act on, and whether a spell waits for its target.
+    struct FakeClickHit
+    {
+        uint32_t kind = 0;
+        uint64_t guid = 0;
+        wxl_vec3 point{};
+    };
+    FakeClickHit g_clickHit;
+    wxl_bool     g_spellTargeting = WXL_FALSE;
+    uint32_t WXL_CALL FakeClickHitRead(const void* frame, uint64_t* guid, wxl_vec3* point)
+    {
+        if (guid) *guid = frame ? g_clickHit.guid : 0;
+        if (point) *point = frame ? g_clickHit.point : wxl_vec3{};
+        return frame ? g_clickHit.kind : 0;
+    }
+    wxl_bool WXL_CALL FakeSpellTargeting() { return g_spellTargeting; }
+
+    // What the player can do with a unit or a game object: hostile (reaction below 3) is
+    // attackable, friendly or neutral talks; a game object's client flag 0x2 makes it usable.
+    wxl_bool WXL_CALL FakeCanAttack(const void*, const void* t) { return Obj(t)->reaction < 3 ? WXL_TRUE : WXL_FALSE; }
+    wxl_bool WXL_CALL FakeCanInteract(const void*, const void* t) { return Obj(t)->reaction >= 3 ? WXL_TRUE : WXL_FALSE; }
+    wxl_bool WXL_CALL FakeCanUse(const void* o) { return Obj(o)->clientFlags & 0x2u ? WXL_TRUE : WXL_FALSE; }
+
+    // A model's head bone as the pose rows set it.
+    struct FakeHeadBone
+    {
+        uint32_t flags = 0;
+        float    matrix[16]{};
+        int      writes = 0;
+    };
+    FakeHeadBone g_headBone;
+    void WXL_CALL FakeBoneFlags(void*, uint32_t bone, uint32_t flags, uint32_t mask)
+    {
+        if (bone == 6) g_headBone.flags = (g_headBone.flags & ~mask) | (flags & mask);
+    }
+    void WXL_CALL FakeBoneTransform(void*, uint32_t bone, const float* m)
+    {
+        if (bone != 6) return;
+        std::memcpy(g_headBone.matrix, m, sizeof g_headBone.matrix);
+        ++g_headBone.writes;
+    }
+
+    // The circles' texture static and the textures mods give (wxl.selectioncircle).
+    struct FakeCircleTexture
+    {
+        std::string path;
+    };
+    FakeCircleTexture             g_gameCircleTexture{"Textures\\UnitSelectTexture.blp"};
+    void*                   g_circleTexture = &g_gameCircleTexture;
+    std::deque<FakeCircleTexture> g_openedTextures;
+    int                     g_texturesClosed = 0;
+    void* WXL_CALL FakeSwapCircleTexture(void* texture)
+    {
+        void* held      = g_circleTexture;
+        g_circleTexture = texture;
+        return held;
+    }
+    void* WXL_CALL FakeTextureOpen(const char* path)
+    {
+        if (!path || std::strstr(path, "Missing")) return nullptr;
+        g_openedTextures.push_back(FakeCircleTexture{path});
+        return &g_openedTextures.back();
+    }
+    void WXL_CALL FakeTextureClose(void*) { ++g_texturesClosed; }
+
+    // The device's side of a texture (wxl.draw): a CGxTex whose Direct3D 9 texture is a made-up
+    // pointer, once the file has loaded (a path naming "Loading" never does).
+    wxl::engine::CGxTex g_fakeGxTex{};
+    char                g_fakeD3dTexture[16]{};
+    int                 g_texturesReadied = 0;
+    void* WXL_CALL FakeGxTextureReady(void* texture)
+    {
+        const auto* t = static_cast<const FakeCircleTexture*>(texture);
+        if (!t || t->path.find("Loading") != std::string::npos) return nullptr;
+        ++g_texturesReadied;
+        g_fakeGxTex.m_apiSpecificData = g_fakeD3dTexture;
+        return &g_fakeGxTex;
+    }
+
+    void* WXL_CALL FakeCameraWorld() { return g_worldCamera; }
+
+    wxl_bool WXL_CALL FakeCameraRead(const void* camera, wxl_core_camera* out)
+    {
+        if (!camera || !out) return WXL_FALSE;
+        *out = static_cast<const FakeCamera*>(camera)->view;
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeCameraWrite(void* camera, const wxl_core_camera* view)
+    {
+        FakeCamera& fake   = *static_cast<FakeCamera*>(camera);
+        fake.view.position = view->position;
+        fake.view.forward  = view->forward;
+        // The rows as the bindings build them: SetFacing's, turned by the roll.
+        wxl_vec3 rows[3];
+        if (wxl::core::camera_facing::Facing(view->forward, view->roll, rows))
+        {
+            fake.view.forward = rows[0];
+            fake.view.left    = rows[1];
+            fake.view.up      = rows[2];
+        }
+        // FOV() is m_fov plus the effects' offset, which the fake keeps as the difference.
+        fake.view.fov      = view->fov_base + (fake.view.fov - fake.view.fov_base);
+        fake.view.fov_base = view->fov_base;
+        ++fake.writes;
+    }
+
+    uint32_t g_traceFlags = 0;
+
+    wxl_bool WXL_CALL FakeTrace(wxl_vec3 start, wxl_vec3 finish, uint32_t flags, wxl_vec3* hit)
+    {
+        g_traceFlags = flags;
+        // A roof over the terrain, for an upright ray across it.
+        if (g_roofZ != 0.0f && start.x == finish.x && start.y == finish.y && (start.z - g_roofZ) * (finish.z - g_roofZ) <= 0.0f)
+        {
+            *hit = wxl_vec3{start.x, start.y, g_roofZ};
+            return WXL_TRUE;
+        }
+        // The ground at z = 0, for a ray straight down.
+        if (start.x == finish.x && start.y == finish.y && start.z >= 0.0f && finish.z <= 0.0f)
+        {
+            *hit = wxl_vec3{start.x, start.y, 0.0f};
+            return WXL_TRUE;
+        }
+        // A wall at x = 10.
+        if ((start.x < 10.0f) == (finish.x < 10.0f)) return WXL_FALSE;
+        const float t = (10.0f - start.x) / (finish.x - start.x);
+        *hit = wxl_vec3{10.0f, start.y + (finish.y - start.y) * t, start.z + (finish.z - start.z) * t};
+        return WXL_TRUE;
+    }
+
+    uint32_t g_cursorHides = 0, g_cursorRestores = 0;
+    void WXL_CALL FakeCursorSetVisible(wxl_bool visible) { if (!visible) ++g_cursorHides; }
+    void WXL_CALL FakeCursorRestore() { ++g_cursorRestores; }
+    wxl_bool WXL_CALL FakeCursorVisible() { return WXL_TRUE; }
+    wxl_bool WXL_CALL FakeOverWorld() { return WXL_TRUE; }
+
+    // --- A split tile and its monolithic twin, as the client reads them --------------------------
+    // The client's own reading (CMapArea::ProcessIffChunks, CMapChunk::ProcessIffChunks, Create's
+    // counts, CreateRefs) written out over fake structures, so the seams of a split tile can be held
+    // to what the client sets for the same tile in one file.
+
+    struct SplitFakeArea : FakeTile
+    {
+        uint8_t*                 header = nullptr;
+        uint8_t*                 chunkInfo = nullptr;
+        uint8_t*                 doodadDef = nullptr;
+        uint8_t*                 mapObjDef = nullptr;
+        int32_t                  doodadCount = 0, mapObjCount = 0;
+        char*                    m2Names = nullptr;
+        char*                    wmoNames = nullptr;
+        uint32_t*                modelOffsets = nullptr;
+        uint32_t*                wmoOffsets = nullptr;
+        int16_t*                 flying = nullptr;
+        int32_t*                 textureFlags = nullptr;
+        std::vector<std::string> textures;
+    };
+
+    struct SplitFakeChunk
+    {
+        SplitFakeArea*           area = nullptr;
+        int32_t                  ix = 0, iy = 0;
+        uint8_t*                 begin = nullptr;
+        uint8_t*                 header = nullptr;
+        float*                   height = nullptr;
+        uint8_t*                 normals = nullptr;
+        uint8_t*                 shadow = nullptr;
+        uint8_t*                 layers = nullptr;
+        uint8_t*                 alpha = nullptr;
+        uint8_t*                 mcrf = nullptr;
+        std::vector<std::string> placed; ///< "wmo:<name>:<id>", "m2:<name>:<id>" in the order made
+    };
+
+    uint32_t SplitU32(const uint8_t* at)
+    {
+        uint32_t v;
+        std::memcpy(&v, at, sizeof v);
+        return v;
+    }
+
+    /// CMapArea::LoadTextures: one texture a name.
+    void SplitLoadTextures(SplitFakeArea& a, const char* names, uint32_t size)
+    {
+        for (uint32_t at = 0; at < size;)
+        {
+            a.textures.emplace_back(names + at);
+            at += static_cast<uint32_t>(std::strlen(names + at)) + 1;
+        }
+    }
+
+    /// CMapArea::ProcessIffChunks, as the fork has it.
+    void SplitStockArea(SplitFakeArea& a)
+    {
+        uint8_t* buffer = reinterpret_cast<uint8_t*>(&a.bytes[0]);
+        uint8_t* header = buffer + SplitU32(buffer + 4) + 16;
+        auto     data   = [&](uint32_t slot) { return header + SplitU32(header + slot) + 8; };
+        auto     size   = [&](uint32_t slot) { return SplitU32(header + SplitU32(header + slot) + 4); };
+        a.header       = header;
+        a.chunkInfo    = data(0x04);
+        a.doodadDef    = data(0x1C);
+        a.mapObjDef    = data(0x20);
+        a.m2Names      = reinterpret_cast<char*>(data(0x0C));
+        a.wmoNames     = reinterpret_cast<char*>(data(0x14));
+        a.modelOffsets = reinterpret_cast<uint32_t*>(data(0x10));
+        a.wmoOffsets   = reinterpret_cast<uint32_t*>(data(0x18));
+        if (SplitU32(header) & 1) a.flying = reinterpret_cast<int16_t*>(data(0x24));
+        if (SplitU32(header + 0x2C)) a.textureFlags = reinterpret_cast<int32_t*>(data(0x2C));
+        SplitLoadTextures(a, reinterpret_cast<char*>(data(0x08)), size(0x08));
+        a.doodadCount = static_cast<int32_t>(size(0x1C) / 36);
+        a.mapObjCount = static_cast<int32_t>(size(0x20) / 64);
+    }
+
+    void SplitCreateRefs(SplitFakeChunk& c, SplitFakeArea& a, uint32_t* refs, uint32_t doodads, uint32_t mapObjs);
+
+    /// PrepareChunk -> CMapChunk::Create: its sub-chunks walked, then its counts and references.
+    void SplitStockChunk(SplitFakeArea& a, SplitFakeChunk& c, int32_t x, int32_t y, bool seams)
+    {
+        c.area  = &a;
+        c.ix    = x;
+        c.iy    = y;
+        c.begin = reinterpret_cast<uint8_t*>(&a.bytes[0]) + SplitU32(a.chunkInfo + 16 * (x + 16 * y));
+        c.header = c.begin + 8;
+        int32_t  remaining = static_cast<int32_t>(SplitU32(c.begin + 4)) - 128;
+        uint8_t* chunk     = c.header + 128;
+        while (remaining > 0)
+        {
+            uint8_t* d = chunk + 8;
+            remaining -= 8;
+            switch (SplitU32(chunk))
+            {
+            case 0x4D434E52: c.normals = d; break;
+            case 0x4D435348: c.shadow = d; break;
+            case 0x4D435654: c.height = reinterpret_cast<float*>(d); break;
+            case 0x4D435246: c.mcrf = d; break;
+            case 0x4D434C59: c.layers = d; break;
+            case 0x4D43414C: c.alpha = d; break;
+            default: break;
+            }
+            remaining -= static_cast<int32_t>(SplitU32(chunk + 4));
+            chunk = d + SplitU32(chunk + 4);
+        }
+        if (seams) wxl::seam::MapChunk::ProcessIffChunks::After(&c, true);
+        SplitCreateRefs(c, a, reinterpret_cast<uint32_t*>(c.mcrf), SplitU32(c.header + 0x10), SplitU32(c.header + 0x38));
+    }
+
+    /// CMapChunk::CreateRefs: map objects, then doodads, from one list; the fork's gate first.
+    void SplitCreateRefs(SplitFakeChunk& c, SplitFakeArea& a, uint32_t* refs, uint32_t doodads, uint32_t mapObjs)
+    {
+        void* self = &c;
+        void* area = &a;
+        if (wxl::seam::MapChunk::CreateRefs::Gate(&self, &area, &refs, &doodads, &mapObjs)) return;
+        for (uint32_t i = 0; i < mapObjs; ++i)
+        {
+            const uint8_t* def = a.mapObjDef + 64 * refs[doodads + i];
+            c.placed.push_back("wmo:" + std::string(a.wmoNames + a.wmoOffsets[SplitU32(def)]) + ":" + std::to_string(SplitU32(def + 4)));
+        }
+        for (uint32_t i = 0; i < doodads; ++i)
+        {
+            const uint8_t* def = a.doodadDef + 36 * refs[i];
+            c.placed.push_back("m2:" + std::string(a.m2Names + a.modelOffsets[SplitU32(def)]) + ":" + std::to_string(SplitU32(def + 4)));
+        }
+    }
+
+    wxl_bool WXL_CALL FakeAreaSplitSet(void* area, const wxl_core_area_split* s)
+    {
+        SplitFakeArea& a = *static_cast<SplitFakeArea*>(area);
+        a.chunkInfo    = static_cast<uint8_t*>(s->chunk_info);
+        a.doodadDef    = static_cast<uint8_t*>(s->doodad_defs);
+        a.mapObjDef    = static_cast<uint8_t*>(s->map_obj_defs);
+        a.doodadCount  = static_cast<int32_t>(s->doodad_count);
+        a.mapObjCount  = static_cast<int32_t>(s->map_obj_count);
+        a.m2Names      = s->model_names;
+        a.wmoNames     = s->map_obj_names;
+        a.modelOffsets = s->model_offsets;
+        a.wmoOffsets   = s->map_obj_offsets;
+        a.textureFlags = s->texture_flags;
+        if (s->texture_names && s->texture_names_size) SplitLoadTextures(a, s->texture_names, s->texture_names_size);
+        return WXL_TRUE;
+    }
+
+    /// CMapLowDetail as the WDL rows fill it.
+    struct FakeLowDetail
+    {
+        std::vector<char>                      data;
+        uint32_t                               areaOffsets = 0;
+        std::map<uint32_t, wxl_core_area_low>  areas;
+    };
+
+    void* WXL_CALL FakeLowDetailSet(void* detail, const void* bytes, uint32_t size, uint32_t areaOffsets)
+    {
+        FakeLowDetail& d = *static_cast<FakeLowDetail*>(detail);
+        d.data.assign(static_cast<const char*>(bytes), static_cast<const char*>(bytes) + size);
+        d.areaOffsets = areaOffsets;
+        return d.data.data();
+    }
+
+    wxl_bool WXL_CALL FakeAreaLowAdd(void* detail, const wxl_core_area_low* area)
+    {
+        static_cast<FakeLowDetail*>(detail)->areas[area->index] = *area;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeAreaPlacements(const void* area, wxl_core_area_split* out)
+    {
+        const SplitFakeArea& a = *static_cast<const SplitFakeArea*>(area);
+        *out                 = wxl_core_area_split{};
+        out->doodad_defs     = a.doodadDef;
+        out->map_obj_defs    = a.mapObjDef;
+        out->doodad_count    = static_cast<uint32_t>(a.doodadCount);
+        out->map_obj_count   = static_cast<uint32_t>(a.mapObjCount);
+        out->model_names     = a.m2Names;
+        out->map_obj_names   = a.wmoNames;
+        out->model_offsets   = a.modelOffsets;
+        out->map_obj_offsets = a.wmoOffsets;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeChunkParts(const void* chunk, wxl_core_map_chunk* out)
+    {
+        const SplitFakeChunk& c = *static_cast<const SplitFakeChunk*>(chunk);
+        out->begin   = c.begin;
+        out->header  = c.header;
+        out->index_x = c.ix;
+        out->index_y = c.iy;
+        return WXL_TRUE;
+    }
+
+    wxl_bool WXL_CALL FakeChunkSplitSet(void* chunk, const wxl_core_chunk_split* s)
+    {
+        SplitFakeChunk& c = *static_cast<SplitFakeChunk*>(chunk);
+        c.layers = static_cast<uint8_t*>(s->layers);
+        c.alpha  = static_cast<uint8_t*>(s->alpha);
+        c.shadow = static_cast<uint8_t*>(s->shadow);
+        c.mcrf   = static_cast<uint8_t*>(s->refs);
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL FakeChunkCreateRefs(void* chunk, void* area, const uint32_t* refs, uint32_t doodads, uint32_t mapObjs)
+    {
+        SplitCreateRefs(*static_cast<SplitFakeChunk*>(chunk), *static_cast<SplitFakeArea*>(area), const_cast<uint32_t*>(refs), doodads,
+                        mapObjs);
+    }
+
     wxl_core_init FakeInit()
     {
         wxl_core_init init{};
@@ -1527,6 +2756,8 @@ namespace
         init.script_run             = &FakeRun;
         init.script_create_events   = &FakeCreateEvents;
         init.script_signal_event    = &FakeSignalEvent;
+        init.script_mark            = &FakeMark;
+        init.script_unwind          = &FakeUnwind;
         init.message_data           = &FakeMessageData;
         init.message_size           = &FakeMessageSize;
         init.message_read           = &FakeMessageRead;
@@ -1546,6 +2777,10 @@ namespace
         init.gx_window_visible      = &FakeGxWindowVisible;
         init.gx_window_size         = &FakeGxWindowSize;
         init.gx_model_draw          = &FakeGxModelDraw;
+        init.gx_device_api          = &FakeGxDeviceApi;
+        init.gx_invalidate_state    = &FakeGxInvalidate;
+        init.gx_world_view          = &FakeGxWorldView;
+        init.gx_texture_ready       = &FakeGxTextureReady;
         init.component_wearer       = &FakeComponentWearer;
         init.m2_object_model        = &FakeObjectModel;
         init.m2_item_display        = &FakeItemDisplay;
@@ -1564,8 +2799,24 @@ namespace
         init.m2_model_file          = &FakeModelFile;
         init.m2_attachment_point    = &FakeAttachmentPoint;
         init.m2_skeleton            = &FakeSkeleton;
+        init.m2_is_animate_thread   = &FakeIsAnimateThread;
+        init.m2_animate_list        = &FakeAnimateList;
+        init.m2_swap_animate_list   = &FakeSwapAnimateList;
+        init.m2_animate_model       = &FakeAnimateModel;
         init.m2_file_info           = &FakeM2FileInfo;
         init.m2_file_animate_bones  = &FakeM2FileAnimateBones;
+        init.m2_create_world_model  = &FakeCreateWorldModel;
+        init.m2_place_world         = &FakePlaceWorld;
+        init.m2_unplace_world       = &FakeUnplaceWorld;
+        init.m2_set_transform       = &FakeSetTransform;
+        init.m2_play_animation      = &FakePlayAnimation;
+        init.m2_loaded              = &FakeM2Loaded;
+        init.m2_animation_length    = &FakeAnimationLength;
+        init.m2_set_alpha           = &FakeSetAlpha;
+        init.m2_set_emitting        = &FakeSetEmitting;
+        init.m2_attachment_world    = &FakeAttachmentWorld;
+        init.m2_bones               = &FakeM2Bones;
+        init.m2_file_bone           = &FakeFileBone;
         init.pending_cast_caster    = &FakePendingCaster;
         init.pending_cast_spell_id  = &FakePendingSpellId;
         init.pending_cast_count     = &FakePendingCount;
@@ -1612,6 +2863,30 @@ namespace
         init.action_use_item        = &FakeActUse;
         init.action_follow          = &FakeActFollow;
         init.action_move_to         = &FakeActMove;
+        init.action_face            = &FakeActFace;
+        init.unit_is_outdoors       = &FakeOutdoors;
+        init.camera_world           = &FakeCameraWorld;
+        init.input_pending_action   = &FakePendingAction;
+        init.input_clear_pending_action = &FakeClearPending;
+        init.input_default_action   = &FakeDefaultAction;
+        init.input_mouse_look_stop  = &FakeLookStop;
+        init.input_click_hit        = &FakeClickHitRead;
+        init.input_spell_targeting  = &FakeSpellTargeting;
+        init.unit_can_attack        = &FakeCanAttack;
+        init.unit_can_interact      = &FakeCanInteract;
+        init.gameobject_can_use     = &FakeCanUse;
+        init.model_bone_flags       = &FakeBoneFlags;
+        init.model_bone_transform   = &FakeBoneTransform;
+        init.circle_swap_texture    = &FakeSwapCircleTexture;
+        init.texture_open           = &FakeTextureOpen;
+        init.texture_close          = &FakeTextureClose;
+        init.camera_read            = &FakeCameraRead;
+        init.camera_write           = &FakeCameraWrite;
+        init.world_trace            = &FakeTrace;
+        init.input_cursor_visible   = &FakeCursorVisible;
+        init.input_cursor_set_visible = &FakeCursorSetVisible;
+        init.input_cursor_restore   = &FakeCursorRestore;
+        init.input_pointer_over_world = &FakeOverWorld;
         init.terrain_click_guid     = &FakeTerrainGuid;
         init.terrain_click_x        = &FakeTerrainX;
         init.terrain_click_y        = &FakeTerrainY;
@@ -1622,6 +2897,14 @@ namespace
         init.cvar_name              = &FakeCVarName;
         init.cvar_value             = &FakeCVarValue;
         init.cvar_flags             = &FakeCVarFlags;
+        init.cvar_default           = &FakeCVarDefault;
+        init.cvar_latched           = &FakeCVarLatched;
+        init.cvar_lookup            = &FakeCVarLookup;
+        init.cvar_register          = &FakeCVarRegister;
+        init.cvar_set               = &FakeCVarSet;
+        init.cvar_write_flags       = &FakeCVarWriteFlags;
+        init.interface_check_signature  = &FakeCheckSignature;
+        init.interface_signature_digest = &FakeSignatureDigest;
         init.glue_current_screen    = &FakeGlueScreen;
         init.login_server_type      = &FakeLoginServerType;
         init.chat_pending_last      = &FakePendingLast;
@@ -1636,6 +2919,10 @@ namespace
         init.script_heap            = &FakeScriptHeap;
         init.archive_tables         = &FakeArchiveTables;
         init.archive_of             = &FakeArchiveOf;
+        init.archive_record_of      = &FakeArchiveRecordOf;
+        init.m2_cache_evict         = &FakeCacheEvict;
+        init.unit_update_display    = &FakeUpdateDisplay;
+        init.texture_reload         = &FakeTextureReload;
         init.client_dbs             = &FakeClientDbs;
         init.model_path             = &FakeModelPath;
         init.model_bytes            = &FakeModelBytes;
@@ -1662,6 +2949,45 @@ namespace
         init.group_invite_answer    = &FakeGroupAnswer;
         init.resurrect_answer       = &FakeResurrectAnswer;
         init.duel_answer            = &FakeDuelAnswer;
+        init.terrain_present        = &FakeTerrainPresent;
+        init.terrain_chunk          = &FakeTerrainChunk;
+        init.terrain_chunk_view     = &FakeTerrainView;
+        init.terrain_chunk_place    = &FakeTerrainPlace;
+        init.terrain_render_chunk   = &FakeRenderChunkRead;
+        init.terrain_area_file      = &FakeAreaFile;
+        init.terrain_vertex_constants = &FakeTerrainConsts;
+        init.gx_vertex_constants_set = &FakeVertexConstantsSet;
+        init.gx_xform_get           = &FakeXformGet;
+        init.gx_xform_set           = &FakeXformSet;
+        init.gx_pixel_constants_set = &FakePixelConstantsSet;
+        init.gx_texture_stage       = &FakeTextureStage;
+        init.gx_texture_stage_set   = &FakeTextureStageSet;
+        init.gx_texture_wrap        = &FakeTextureWrap;
+        init.gx_render_state        = &FakeRenderState;
+        init.gx_render_state_set    = &FakeRenderStateSet;
+        init.gx_draw                = &FakeGxDraw;
+        init.map_wdt                = &FakeMapWdt;
+        init.map_validate_shaders   = &FakeValidateShaders;
+        init.gx_shader_record       = &FakeShaderRecord;
+        init.gx_shader_code_set     = &FakeShaderCodeSet;
+        init.map_area_chunk         = &FakeMapAreaChunk;
+        init.map_area_split_set     = &FakeAreaSplitSet;
+        init.map_area_placements    = &FakeAreaPlacements;
+        init.map_low_detail_set     = &FakeLowDetailSet;
+        init.map_area_low_add       = &FakeAreaLowAdd;
+        init.map_chunk_parts        = &FakeChunkParts;
+        init.map_chunk_split_set    = &FakeChunkSplitSet;
+        init.map_chunk_create_refs  = &FakeChunkCreateRefs;
+        init.terrain_chunk_rebuild  = &FakeTerrainRebuild;
+        init.terrain_forget_collision = &FakeForgetCollision;
+        init.unit_fall_local        = &FakeFallLocal;
+        init.unit_play_animation    = &FakePlayAnimation;
+        init.unit_update_animation  = &FakeUpdateAnimation;
+        init.unit_shown_animation   = &FakeShownAnimation;
+        init.unit_animation_speed   = &FakeAnimationSpeed;
+        init.unit_animation_length  = &FakeAnimationLength;
+        init.unit_lift_local        = &FakeLiftLocal;
+        init.net_send               = &FakeNetSend;
         return init;
     }
 }
@@ -2438,6 +3764,25 @@ namespace
         Check(api->unit_reaction_to(unit, player, &value) == WXL_OK && value == WXL_REACTION_HOSTILE &&
                   api->unit_reaction_to(unit, item, &value) == WXL_E_INVALID,
               "unit_reaction_to another unit, refused for an item");
+        Check(api->unit_can_attack(unit, &yes) == WXL_OK && yes == WXL_TRUE &&
+                  api->unit_can_attack(item, &yes) == WXL_E_INVALID,
+              "unit_can_attack asks the client's CanAttack from the active player, refused for an item");
+        yes = WXL_TRUE;
+        Check(api->unit_can_interact(unit, &yes) == WXL_OK && yes == WXL_FALSE,
+              "unit_can_interact: a unit that offers nothing (no NPC flags) cannot be talked to");
+        {
+            FakeObject herb;
+            herb.guid        = 0xF110000000000456ull;
+            herb.typeId      = WXL_OBJECT_GAMEOBJECT;
+            herb.clientFlags = 0x2;
+            wxl::seam::ObjectMgr::InitObject::After(&herb, nullptr, 100u);
+            const wxl_handle node = wxl::core::objects::HandleOf(&herb);
+            yes = WXL_FALSE;
+            Check(api->gameobject_can_use(node, &yes) == WXL_OK && yes == WXL_TRUE &&
+                      api->gameobject_can_use(unit, &yes) == WXL_E_INVALID,
+                  "gameobject_can_use asks the client's own test, refused for a unit");
+            wxl::seam::ObjectMgr::ObjDelete::Before(&herb);
+        }
         Check(api->unit_creature_type(unit, &value) == WXL_OK && value == WXL_CREATURE_BEAST &&
                   api->unit_creature_family(unit, &value) == WXL_OK && value == 1 &&
                   api->unit_classification(unit, &value) == WXL_OK && value == WXL_CLASSIFICATION_RARE_ELITE,
@@ -2527,16 +3872,20 @@ namespace
         Check(act.target(unit) == WXL_OK && act.clear_target() == WXL_OK && act.interact(unit) == WXL_OK &&
                   act.cast_spell(133, unit) == WXL_OK && act.cast_spell(133, WXL_HANDLE_NONE) == WXL_OK &&
                   act.stop_casting() == WXL_OK && act.use_item(item, unit) == WXL_OK && act.follow(unit) == WXL_OK &&
-                  act.move_to(wxl_vec3{12.0f, 0.0f, 0.0f}) == WXL_OK,
+                  act.move_to(wxl_vec3{12.0f, 0.0f, 0.0f}) == WXL_OK && act.face(1.0) == WXL_OK &&
+                  act.face(-1.0) == WXL_OK,
               "every action reaches the client");
+        // Facings as hundredths of a radian: 1, and -1 wrapped into [0, 2 pi).
         const std::vector<std::string> expected = {"target 789 0", "target 0 0",    "interact 789 0",
                                                    "cast 85 789",  "cast 85 0",     "stop 0 0",
-                                                   "use 123 789",  "follow 42 789", "move 42 c"};
+                                                   "use 123 789",  "follow 42 789", "move 42 c",
+                                                   "face 42 64",   "face 42 210"};
         Check(g_actions == expected, "with the guids and the spell, none for the current target");
         Check(act.assist(unit) == WXL_E_FAILED, "assisting a unit that targets nothing fails");
         Check(act.use_item(unit, WXL_HANDLE_NONE) == WXL_E_INVALID && act.follow(item) == WXL_E_INVALID,
               "an object of the wrong kind is invalid");
         Check(act.cast_spell(0, WXL_HANDLE_NONE) == WXL_E_INVALID, "a spell id of 0 is invalid");
+        Check(act.face(std::numeric_limits<double>::quiet_NaN()) == WXL_E_INVALID, "a facing that is no number is invalid");
         Check(act.target(0xDEAD) == WXL_E_NOT_FOUND, "a stale handle is gone");
         g_refuseActions = true;
         Check(act.interact(unit) == WXL_E_FAILED, "what the client refuses answers failed");
@@ -2953,6 +4302,1537 @@ namespace
         wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
     }
 
+    /// wxl.terrain over the fake ground: reads, edits with their copies across edges, normals,
+    /// owners and layers, the drawing's rebuilds inside and outside the world pass, a chunk read
+    /// again from the disk, the fall of a player standing still, refusals, the map unloading.
+    /// wxl.terrain's layers: a provider's answers kept per render chunk and layer, then drawn through
+    /// each path's own state (the vertex program's rows, the texture stages' matrices) for that draw
+    /// only; a chunk whose layers are all at 1, or a draw of anything else, untouched.
+    void CheckTerrainLayers()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        static std::vector<wxl_terrain_layer> told;
+        told.clear();
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = [](void*, const wxl_terrain_layer* layer, wxl_terrain_layer_look* look) {
+            told.push_back(*layer);
+            if (layer->texture == 7) look->texture_scale = 4.0f;  // layer 1 of the chunk
+            if (layer->texture == 9) look->texture_scale = std::nanf("");
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "terrain layers: a mod sets its layer provider");
+        wxl_terrain_layer_provider none{};
+        none.struct_size = sizeof none;
+        Check(api.set_layer_provider(&none) == WXL_E_INVALID, "terrain layers: a provider without its function is refused");
+
+        // The client's constants: c13 + k offsets (animated layer 1), c18 + k scales, -0.24.
+        for (float& f : g_terrainConsts) f = 0.0f;
+        for (int k = 0; k < 4; ++k)
+        {
+            g_terrainConsts[(18 + k) * 4 + 0] = g_terrainConsts[(18 + k) * 4 + 1] = -0.24f;
+            g_terrainConsts[(13 + k) * 4 + 0] = 0.5f;
+            g_terrainConsts[(13 + k) * 4 + 1] = -0.25f;
+        }
+        FakeRenderChunk chunk;
+        char            area = 0;
+        const uint32_t  mcly[3][4] = {{3, 0x0, 0, 0}, {7, 0x40, 0, 0}, {5, 0x0, 0, 0}};
+        for (int i = 0; i < 3; ++i)
+        {
+            chunk.layers         = static_cast<uint32_t>(i + 1);
+            chunk.textures[i]    = mcly[i][0];
+            chunk.flags[i]       = mcly[i][1];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[i], 0);
+        }
+        Check(told.size() == 3 && told[1].texture == 7 && told[1].layer == 1 && told[1].flags == 0x40 && told[1].tile_x == 32 &&
+                  told[1].file == g_areaFile.data() && told[1].file_size == 64,
+              "terrain layers: the provider is told of each layer as it is made, with its ADT's bytes");
+        Check(layers::Count().chunks_kept == 1 && layers::Count().layers_scaled == 1, "terrain layers: the chunk with a scaled layer is kept");
+
+        auto sent = [&](uint32_t row) -> const std::vector<float>* {
+            for (const auto& r : g_rowsSent)
+                if (r.first == row) return &r.second;
+            return nullptr;
+        };
+        // Single pass, vertex program: c19 and c14 (layer 1) divided by 4, for this draw only.
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const auto* c19 = sent(19);
+        const auto* c14 = sent(14);
+        Check(g_rowsSent.size() == 2 && c19 && std::fabs((*c19)[0] + 0.06f) < 1e-6f && std::fabs((*c19)[1] + 0.06f) < 1e-6f && c14 &&
+                  std::fabs((*c14)[0] - 0.125f) < 1e-6f && (*c14)[2] == 0.0f,
+              "terrain layers: single pass: layer 1's scale (c19) and its animation offset (c14) divided by its texture scale, the others left");
+        g_rowsSent.clear();
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        Check(g_rowsSent.size() == 2 && sent(19) && (*sent(19))[0] == -0.24f && sent(14) && (*sent(14))[0] == 0.5f,
+              "terrain layers: after the draw, the client's own rows go back");
+        g_rowsSent.clear();
+        char other = 0;
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &other, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &other, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        wxl::seam::Gx::D3d9ExDraw::Before(nullptr, &chunk.batch, 1);
+        Check(g_rowsSent.empty(), "terrain layers: a draw of anything else, or after the chunk's function, untouched");
+
+        // A layer a pass, vertex program: the second draw (layer 1) reads c18 and c13.
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::Before(&chunk);
+        int scaledDraws = 0;
+        for (int d = 0; d < 4; ++d)
+        {
+            g_rowsSent.clear();
+            wxl::seam::Gx::D3d9ExDraw::Before(nullptr, &chunk.batch, 1);
+            if (!g_rowsSent.empty())
+            {
+                ++scaledDraws;
+                Check(d == 1 && sent(18) && std::fabs((*sent(18))[0] + 0.06f) < 1e-6f && sent(13) && std::fabs((*sent(13))[0] - 0.125f) < 1e-6f,
+                      "terrain layers: a layer a pass: layer 1's draw reads c18 and c13 divided by its scale");
+            }
+            wxl::seam::Gx::D3d9ExDraw::After(nullptr, &chunk.batch, 1);
+        }
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShaderBigAlpha::After(&chunk);
+        Check(scaledDraws == 1, "terrain layers: only the scaled layer's draw is changed, the shadow's pass past the layers not");
+
+        // Fixed function, single pass: stage 1's matrix, its u and v columns (translation included).
+        for (int x = 0; x < 11; ++x)
+            for (int i = 0; i < 16; ++i) g_stage[x][i] = static_cast<float>(i + 1);
+        g_stagesSet.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        Check(g_stagesSet.size() == 1 && g_stagesSet[0].first == 1 && g_stagesSet[0].second[0] == 0.25f && g_stagesSet[0].second[1] == 0.5f &&
+                  g_stagesSet[0].second[2] == 3.0f && g_stagesSet[0].second[12] == 13.0f / 4.0f && g_stagesSet[0].second[13] == 14.0f / 4.0f,
+              "terrain layers: single pass, fixed function: stage 1's matrix makes u and v four times smaller, its move too");
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        Check(g_stagesSet.size() == 2 && g_stage[1][0] == 1.0f && g_stage[1][13] == 14.0f, "terrain layers: and gets its matrix back after the draw");
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+
+        // Fixed function, a layer a pass: stage 0's matrix on layer 1's draw.
+        for (auto path : {0, 1, 2, 3})
+        {
+            g_stagesSet.clear();
+            switch (path)
+            {
+            case 0: wxl::seam::MapRenderChunk::RenderMultiPassPixelShader::Before(&chunk); break;
+            case 1: wxl::seam::MapRenderChunk::RenderMultiPassPixelShaderBigAlpha::Before(&chunk); break;
+            case 2: wxl::seam::MapRenderChunk::RenderMultiPassAdditive::Before(&chunk); break;
+            default: wxl::seam::MapRenderChunk::RenderMultiPassAlpha::Before(&chunk); break;
+            }
+            for (int d = 0; d < 3; ++d)
+            {
+                wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+                wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+            }
+            wxl::seam::MapRenderChunk::RenderMultiPassAlpha::After(&chunk);
+            Check(g_stagesSet.size() == 2 && g_stagesSet[0].first == 0 && g_stagesSet[0].second[0] == 0.25f && g_stage[0][0] == 1.0f,
+                  "terrain layers: a layer a pass, fixed function: stage 0 on layer 1's draw, given back");
+        }
+
+        // The Vulkan devices' draw_begin and draw_end: the same.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        const size_t begun = g_rowsSent.size();
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(backend->struct_size >= sizeof(wxl_gx_vk_backend) && begun == 2 && g_rowsSent.size() == 4,
+              "terrain layers: the Vulkan device's draw_begin and draw_end scale and give back the same rows");
+
+        // Scale 0 everywhere: a chunk whose layers are all at 1 is not kept, and nothing is sent.
+        FakeRenderChunk plain;
+        const uint32_t  stock[2][4] = {{3, 0, 0, 0}, {5, 0x40, 0, 0}};
+        for (int i = 0; i < 2; ++i)
+        {
+            plain.layers      = static_cast<uint32_t>(i + 1);
+            plain.textures[i] = stock[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&plain, &area, stock[i], 0);
+        }
+        g_rowsSent.clear();
+        g_stagesSet.clear();
+        for (int path = 0; path < 2; ++path)
+        {
+            if (path == 0) wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+            else wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&plain);
+            wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+            wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+            wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&plain);
+        }
+        Check(g_rowsSent.empty() && g_stagesSet.empty() && layers::Count().chunks_kept == 1,
+              "terrain layers: a chunk of stock layers (scale 1) is drawn exactly as the client draws it");
+
+        // An answer out of range is the client's own; the chunk made again forgets its old layers.
+        chunk.layers      = 1;
+        chunk.textures[0] = 9;
+        const uint32_t bad[4] = {9, 0, 0, 0};
+        wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, bad, 0);
+        Check(layers::Count().chunks_kept == 0, "terrain layers: a NaN answer is 1, and a chunk made again keeps nothing of before");
+
+        // The mod goes, its provider with it: layers are no longer asked.
+        const size_t asked = told.size();
+        wxl::core::services::terrain_layers::ForgetMod(0);
+        chunk.layers = 1;
+        wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[1], 0);
+        Check(told.size() == asked, "terrain layers: a mod's provider goes with it");
+        wxl::core::services::terrain_layers::Clear();
+    }
+
+    // abi 0.1.43: a layer's extra texture and numbers on the single-pass paths.
+    void CheckTerrainLayerExtras()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.flags       = WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW;
+        provider.fn          = [](void*, const wxl_terrain_layer* layer, wxl_terrain_layer_look* look) {
+            if (look->struct_size < sizeof *look) return;
+            if (layer->texture == 7) look->extra_texture = "Tileset\\Rock_h.blp";
+            if (layer->texture == 5) look->extra_texture = "Tileset\\Loading_h.blp";
+            if (layer->texture == 7 || layer->texture == 5)
+            {
+                look->params[0] = 6.0f;
+                look->params[1] = 1.0f;
+                look->params[2] = 1.0f;
+            }
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "terrain extras: a provider with its flags is set");
+        const int closedBefore = g_texturesClosed;
+        FakeRenderChunk chunk;
+        char            area = 0;
+        const uint32_t  mcly[3][4] = {{3, 0, 0, 0}, {7, 0, 0, 0}, {5, 0, 0, 0}};
+        for (int i = 0; i < 3; ++i)
+        {
+            chunk.layers      = static_cast<uint32_t>(i + 1);
+            chunk.textures[i] = mcly[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&chunk, &area, mcly[i], 0);
+        }
+        Check(layers::Count().chunks_kept == 1 && layers::Count().layers_extra == 2, "terrain extras: the chunk with extra textures is kept");
+
+        static char before = 0;
+        g_stageTexture[13] = &before;
+        g_pixelRowsSent.clear();
+        g_texturesWrapped = 0;
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const bool bound = g_stageTexture[13] == &g_fakeGxTex && !g_stageTexture[14] && g_texturesWrapped == 1;
+        const bool rows  = g_pixelRowsSent.size() == 1 && g_pixelRowsSent[0].first == WXL_TERRAIN_LAYER_PARAM_ROW &&
+                          g_pixelRowsSent[0].second.size() == 17 * 4 && g_pixelRowsSent[0].second[4] == 6.0f && g_pixelRowsSent[0].second[6] == 1.0f &&
+                          g_pixelRowsSent[0].second[0] == 0.0f && g_pixelRowsSent[0].second[8] == 0.0f && g_pixelRowsSent[0].second[10] == 0.0f;
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(bound, "terrain extras: layer 1's texture on sampler 13, wrapped; layer 2's still loading, not bound");
+        Check(rows, "terrain extras: the numbers in c32 + k, layer 1's (6, 1, 1), zeros for layer 2 whose texture is not loaded yet");
+        bool zeros = g_pixelRowsSent.size() == 2;
+        for (float f : g_pixelRowsSent.back().second) zeros = zeros && f == 0.0f;
+        Check(g_stageTexture[13] == &before && zeros, "terrain extras: after the draw, the sampler's texture back and the numbers zero");
+
+        // The Vulkan device: the same, through draw_begin and draw_end.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        const bool vk = g_stageTexture[13] == &g_fakeGxTex && g_pixelRowsSent.size() == 1;
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+        Check(vk && g_stageTexture[13] == &before, "terrain extras: the Vulkan device's draw_begin binds, draw_end gives back");
+
+        // A chunk of the client's own looks: its numbers written as zeros on the single-pass paths only.
+        FakeRenderChunk plain;
+        const uint32_t  stock[2][4] = {{3, 0, 0, 0}, {4, 0, 0, 0}};
+        for (int i = 0; i < 2; ++i)
+        {
+            plain.layers      = static_cast<uint32_t>(i + 1);
+            plain.textures[i] = stock[i][0];
+            wxl::seam::MapRenderChunk::CreateLayer::After(&plain, &area, stock[i], 0);
+        }
+        g_pixelRowsSent.clear();
+        g_rowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&plain);
+        bool plainZeros = g_pixelRowsSent.size() == 2;
+        for (const auto& r : g_pixelRowsSent)
+            for (size_t i = 0; i < 9 * 4 && i < r.second.size(); ++i) plainZeros = plainZeros && r.second[i] == 0.0f; // numbers and pass row
+        Check(plainZeros && g_rowsSent.empty() && g_stageTexture[12] == nullptr,
+              "terrain extras: a stock chunk gets zeros (WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW), nothing else");
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderMultiPassVertexPixelShader::After(&plain);
+        Check(g_pixelRowsSent.empty(), "terrain extras: a layer-a-pass path is left as the client draws it");
+
+        // Without the flag (a provider of abi 0.1.42's size), a stock chunk is not touched at all.
+        wxl_terrain_layer_provider older{};
+        older.struct_size = offsetof(wxl_terrain_layer_provider, flags);
+        older.fn          = provider.fn;
+        Check(api.set_layer_provider(&older) == WXL_OK, "terrain extras: a provider of abi 0.1.42 is still taken");
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&plain);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &plain.batch, 1);
+        wxl::seam::Gx::D3dDraw::After(nullptr, &plain.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&plain);
+        Check(g_pixelRowsSent.empty(), "terrain extras: and without the flag a stock chunk is drawn as the client draws it");
+
+        layers::MapUnloading();
+        Check(g_texturesClosed - closedBefore == 2 && layers::Count().chunks_kept == 0, "terrain extras: the map goes, its extra textures closed");
+        g_stageTexture[13] = nullptr;
+        layers::Clear();
+    }
+
+    // abi 0.1.44: a chunk's layers past its four, drawn a second time over the first.
+    void CheckTerrainExtraLayers()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        static int  asked = 0;
+        static bool differ = false, bare = false;
+        wxl_terrain_layer_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.flags       = WXL_TERRAIN_LAYER_PARAMS_EVERY_DRAW;
+        provider.fn          = [](void*, const wxl_terrain_layer*, wxl_terrain_layer_look*) {};
+        provider.chunk_fn    = [](void*, const wxl_terrain_chunk* chunk, wxl_terrain_extra_layers* out) {
+            ++asked;
+            if (chunk->layers != 4 || (bare && asked % 2 == 0)) return;
+            out->count                   = 2;
+            out->layer[0].texture        = differ && asked % 2 == 0 ? "Tileset\\Rock.blp" : "Tileset\\Moss.blp";
+            out->layer[0].texture_scale  = 2.0f;
+            out->layer[0].extra_texture  = "Tileset\\Moss_h.blp";
+            out->layer[0].params[0]      = 5.0f;
+            out->layer[0].params[1]      = 1.0f;
+            out->layer[0].params[2]      = 1.0f;
+            out->layer[1].texture        = "Tileset\\Sand.blp";
+            out->layer[1].texture_scale  = 1.0f;
+            out->alpha[0]                = 200;
+            out->alpha[1]                = 100;
+        };
+        Check(api.set_layer_provider(&provider) == WXL_OK, "extra layers: a provider with a chunk function is set");
+        static char     mapChunk = 0, neighbour = 0, area = 0;
+        FakeRenderChunk chunk;
+        chunk.map_chunk = &mapChunk;
+        const auto make = [&](FakeRenderChunk& c) {
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                const uint32_t mcly[4] = {20 + i, 0, 0, 0};
+                c.layers      = i + 1;
+                c.textures[i] = 20 + i;
+                wxl::seam::MapRenderChunk::CreateLayer::After(&c, &area, mcly, 0);
+            }
+        };
+        const size_t opened = g_openedTextures.size();
+        make(chunk);
+        bool served = false;
+        for (size_t i = opened; i < g_openedTextures.size(); ++i)
+            served = served || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_64x64_", 0) == 0;
+        Check(asked == 1 && layers::Count().chunks_extra == 1 && served,
+              "extra layers: asked once the chunk's fourth layer is made; their alpha maps served as a 64 x 64 texture and opened");
+
+        for (int& v : g_renderState) v = 0;
+        g_renderState[15] = 1; // depth written
+        static char stock0 = 0;
+        for (void*& t : g_stageTexture) t = nullptr;
+        g_stageTexture[0] = &stock0;
+        for (float& f : g_terrainConsts) f = 0.0f;
+        for (int k = 0; k < 5; ++k) g_terrainConsts[(18 + k) * 4 + 0] = g_terrainConsts[(18 + k) * 4 + 1] = -0.24f;
+        g_pixelRowsSent.clear();
+        g_rowsSent.clear();
+        g_draws.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const std::vector<float> first = g_pixelRowsSent.empty() ? std::vector<float>() : g_pixelRowsSent.back().second;
+        const bool firstBound = g_stageTexture[9] == &g_fakeGxTex && g_stageTexture[10] == &g_fakeGxTex && !g_stageTexture[11];
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(first.size() == 17 * 4 && first[4 * 4] == 5.0f && first[4 * 4 + 2] == 1.0f && first[8 * 4] == 0.0f && first[8 * 4 + 1] == 1.0f &&
+                  firstBound,
+              "extra layers: the first draw has layer 4's numbers in c36, the pass row (0, 1), their alpha maps on 9, layer 4's height on 10");
+        // u = alpha u * x + z: layer 4 at scale 2 is half the alpha maps' ratio of layer 0's.
+        Check(first.size() == 17 * 4 && first[(9 + 4) * 4] * 2.0f == first[9 * 4] && first[9 * 4] != 0.0f,
+              "extra layers: each layer's coordinates from the alpha maps' (c41 + k), at its own scale");
+        const FakeDraw* second = g_draws.size() == 1 ? &g_draws[0] : nullptr;
+        bool scaled = false, still = false;
+        if (second)
+            for (const auto& r : second->vertexRows)
+            {
+                if (r.first == 18 && r.second.size() == 16 && r.second[0] == -0.12f && r.second[4] == -0.24f) scaled = true;
+                if (r.first == 13 && r.second.size() == 16 && r.second[0] == 0.0f) still = true;
+            }
+        Check(second && second->batch == &chunk.batch && second->blending == 2 && second->depthWrite == 0 && second->stage[0] == &g_fakeGxTex &&
+                  second->stage[1] == &g_fakeGxTex && second->pixelRows.size() == 4 && second->pixelRows[0] == 1.0f,
+              "extra layers: one second draw, alpha-blended without depth writes, layers 4 and 5 on stages 0 and 1, pass row (1, 1)");
+        Check(scaled && still, "extra layers: its coordinates 0 and 1 at layers 4 and 5's scales (c18, c19), drawn still (c13 zero)");
+        bool zeros = !g_pixelRowsSent.empty() && g_pixelRowsSent.back().second.size() == 17 * 4;
+        for (float f : g_pixelRowsSent.back().second) zeros = zeros && f == 0.0f;
+        Check(g_renderState[6] == 0 && g_renderState[15] == 1 && g_stageTexture[0] == &stock0 && !g_stageTexture[9] && zeros,
+              "extra layers: after the draws, the states, the stages and the rows are the client's again");
+
+        // The Vulkan devices: draw_end draws the second the same way.
+        const wxl_gx_vk_backend* backend = WarcraftXLGxVulkan();
+        g_draws.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::Before(&chunk);
+        backend->draw_begin(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        backend->draw_end(nullptr, reinterpret_cast<const wxl_gx_batch*>(&chunk.batch), 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassVertexPixelShader::After(&chunk);
+        Check(g_draws.size() == 1 && g_draws[0].blending == 2 && g_renderState[6] == 0, "extra layers: the Vulkan device's draw_end draws the second, once");
+
+        // The fixed-function single pass draws the four: no second draw, the pass row (0, 0).
+        g_draws.clear();
+        g_pixelRowsSent.clear();
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::Before(&chunk);
+        wxl::seam::Gx::D3dDraw::Before(nullptr, &chunk.batch, 1);
+        const std::vector<float> fixed = g_pixelRowsSent.empty() ? std::vector<float>() : g_pixelRowsSent.back().second;
+        wxl::seam::Gx::D3dDraw::After(nullptr, &chunk.batch, 1);
+        wxl::seam::MapRenderChunk::RenderSinglePassPixelShader::After(&chunk);
+        Check(g_draws.empty() && fixed.size() == 17 * 4 && fixed[8 * 4 + 1] == 0.0f, "extra layers: the fixed-function single pass draws the client's four");
+
+        // Drawn with its neighbour: the halves' layers put together by texture, their maps side by side.
+        FakeRenderChunk paired;
+        paired.map_chunk  = &mapChunk;
+        paired.map_chunk2 = &neighbour;
+        paired.pair       = 2;
+        const size_t before = g_openedTextures.size();
+        make(paired);
+        bool wide = false;
+        for (size_t i = before; i < g_openedTextures.size(); ++i)
+            wide = wide || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_128x64_", 0) == 0;
+        differ = true;
+        FakeRenderChunk other = paired;
+        make(other);
+        Check(wide && layers::Count().chunks_extra == 3 && layers::Count().chunks_trimmed == 0,
+              "extra layers: a chunk drawn beside its neighbour gets 128 x 64 maps, its layers too when its neighbour answers others (3 together)");
+        differ = false;
+        bare   = true;
+        FakeRenderChunk half = paired;
+        half.pair            = 1;
+        const size_t tall    = g_openedTextures.size();
+        make(half);
+        bool high = false;
+        for (size_t i = tall; i < g_openedTextures.size(); ++i)
+            high = high || g_openedTextures[i].path.rfind("Interface\\WXL\\Data\\terrain_64x128_", 0) == 0;
+        Check(high && layers::Count().chunks_extra == 4 && layers::Count().chunks_half == 1,
+              "extra layers: a chunk below its neighbour, only one half with layers past four: 64 x 128 maps, the other half's zero");
+        bare = false;
+
+        const int closed = g_texturesClosed;
+        layers::MapUnloading();
+        Check(g_texturesClosed - closed >= 5 && layers::Count().chunks_kept == 0, "extra layers: the map goes, their textures and maps closed");
+
+        // The map's WDT: height texturing without big alpha read as retail reads it.
+        g_wdtFlags = 0x80;
+        g_shadersValidated = 0;
+        Check(layers::WdtLoaded() == 0x84 && g_wdtFlags == 0x84 && g_shadersValidated == 1 && layers::Wdt().empty(),
+              "the map's WDT: 0x80 without 0x4 is given 0x4 and the programs checked again; a WDT not found is no bytes");
+        g_wdtFlags = 0x4;
+        Check(layers::WdtLoaded() == 0x4 && g_shadersValidated == 1, "the map's WDT: other flags are left as the client read them");
+        layers::Clear();
+    }
+
+    // A tile whose chunks name more layers than the client holds: cut to 4 before its chunks are walked.
+    // --- Tiles split by file name, loaded natively (abi 0.1.45) ----------------------------------
+
+    /// Bytes of an IFF file: chunks appended one after another.
+    struct SplitIff
+    {
+        std::string bytes;
+        void Raw(const void* p, size_t n) { bytes.append(static_cast<const char*>(p), n); }
+        void U32(uint32_t v) { Raw(&v, 4); }
+        /// A chunk: its id as the file stores it (reversed), its size, its bytes; answers its offset.
+        size_t Chunk(const char (&id)[5], const std::string& data)
+        {
+            const size_t at = bytes.size();
+            const char   rev[4] = {id[3], id[2], id[1], id[0]};
+            Raw(rev, 4);
+            U32(static_cast<uint32_t>(data.size()));
+            bytes += data;
+            return at;
+        }
+    };
+
+    std::string SplitWords(std::initializer_list<uint32_t> words)
+    {
+        std::string out;
+        for (uint32_t w : words) out.append(reinterpret_cast<const char*>(&w), 4);
+        return out;
+    }
+
+    /// The test tile: what one chunk holds, whichever way it is written.
+    struct SplitChunkData
+    {
+        std::string header; ///< 128 bytes, monolithic counts
+        std::string mcvt, mcnr, mcly, mcal, mcsh;
+        std::vector<uint32_t> doodads, mapObjs;
+        uint16_t holes = 0;
+    };
+
+    struct SplitTwin
+    {
+        SplitIff mono, root, tex0, obj0;
+    };
+
+    /// One tile, written once in one file (3.3.5a) and once split by name (retail); @p byId: the
+    /// split one names its textures and models by FileDataID (8.1 and later): MDID 1001 to 1005,
+    /// models 2001 and 2002, the map object 3001.
+    SplitTwin MakeSplitTwin(bool byId = false)
+    {
+        const std::string mtex("t\\a.blp\0t\\b.blp\0t\\c.blp\0t\\d.blp\0t\\e.blp\0", 40);
+        const std::string mtxf = SplitWords({0, 1, 0x10, 0, 0x20});
+        const std::string mmdx("m\\a.m2\0m\\bb.m2\0", 15), mmid = SplitWords({0, 7});
+        const std::string mwmo("w\\a.wmo\0", 8), mwid = SplitWords({0});
+        std::string mddf, modf;
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            std::string def(36, '\0');
+            const uint32_t name = i % 2, id = 100 + i;
+            std::memcpy(&def[0], &name, 4);
+            std::memcpy(&def[4], &id, 4);
+            def[8] = static_cast<char>(i);
+            mddf += def;
+        }
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            std::string def(64, '\0');
+            const uint32_t id = 200 + i;
+            std::memcpy(&def[4], &id, 4);
+            def[12] = static_cast<char>(i + 1);
+            modf += def;
+        }
+        const std::string mfbo(36, '\x05');
+
+        SplitChunkData chunks[256];
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            SplitChunkData& c = chunks[i];
+            const uint32_t  layers = i == 7 ? 6u : i % 5;
+            for (uint32_t k = 0; k < layers; ++k)
+            {
+                const uint32_t entry[4] = {(i + k) % 5, k ? 0x100u : 0u, k ? (k - 1) * 2048u : 0u, 0u};
+                c.mcly.append(reinterpret_cast<const char*>(entry), 16);
+            }
+            for (uint32_t k = 1; k < layers; ++k)
+                for (uint32_t t = 0; t < 2048; ++t) c.mcal.push_back(static_cast<char>(i * 7 + k * 31 + t));
+            if (i % 3 == 0)
+                for (uint32_t t = 0; t < 512; ++t) c.mcsh.push_back(static_cast<char>(i + t * 3));
+            for (uint32_t v = 0; v < 145; ++v)
+            {
+                const float h = static_cast<float>(i) + 0.5f * static_cast<float>(v);
+                c.mcvt.append(reinterpret_cast<const char*>(&h), 4);
+            }
+            for (uint32_t n = 0; n < 448; ++n) c.mcnr.push_back(static_cast<char>(i ^ n));
+            for (uint32_t d = 0; d < i % 4; ++d) c.doodads.push_back((i + d) % 3);
+            if (i % 2) c.mapObjs.push_back(i % 4 == 1 ? 0u : 1u);
+            c.holes = i % 5 == 0 ? static_cast<uint16_t>(i * 37u) : 0;
+            c.header.assign(128, '\0');
+            const uint32_t flags = (c.mcsh.empty() ? 0u : 1u), ix = i % 16, iy = i / 16, area = 1000 + i;
+            std::memcpy(&c.header[0x00], &flags, 4);
+            std::memcpy(&c.header[0x04], &ix, 4);
+            std::memcpy(&c.header[0x08], &iy, 4);
+            std::memcpy(&c.header[0x34], &area, 4);
+            const float z = 10.0f * static_cast<float>(i);
+            std::memcpy(&c.header[0x70], &z, 4);
+        }
+
+        SplitTwin twin;
+        // Monolithic: MVER, MHDR, MCIN, MTEX, MMDX, MMID, MWMO, MWID, MDDF, MODF, MFBO, MTXF, 256 MCNK.
+        SplitIff& m = twin.mono;
+        m.Chunk("MVER", SplitWords({18}));
+        const size_t mhdr = m.Chunk("MHDR", std::string(64, '\0'));
+        const size_t base = mhdr + 8;
+        const size_t mcin = m.Chunk("MCIN", std::string(4096, '\0'));
+        uint32_t     slots[12] = {1, static_cast<uint32_t>(mcin - base)};
+        slots[2]  = static_cast<uint32_t>(m.Chunk("MTEX", mtex) - base);
+        slots[3]  = static_cast<uint32_t>(m.Chunk("MMDX", mmdx) - base);
+        slots[4]  = static_cast<uint32_t>(m.Chunk("MMID", mmid) - base);
+        slots[5]  = static_cast<uint32_t>(m.Chunk("MWMO", mwmo) - base);
+        slots[6]  = static_cast<uint32_t>(m.Chunk("MWID", mwid) - base);
+        slots[7]  = static_cast<uint32_t>(m.Chunk("MDDF", mddf) - base);
+        slots[8]  = static_cast<uint32_t>(m.Chunk("MODF", modf) - base);
+        slots[9]  = static_cast<uint32_t>(m.Chunk("MFBO", mfbo) - base);
+        slots[11] = static_cast<uint32_t>(m.Chunk("MTXF", mtxf) - base);
+        std::memcpy(&m.bytes[base], slots, sizeof slots);
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            const SplitChunkData& c = chunks[i];
+            std::string header = c.header;
+            const uint32_t layers = static_cast<uint32_t>(std::min<size_t>(c.mcly.size() / 16, 4));
+            const uint32_t doodads = static_cast<uint32_t>(c.doodads.size()), mapObjs = static_cast<uint32_t>(c.mapObjs.size());
+            const uint32_t sizeAlpha = c.mcal.empty() ? 0u : static_cast<uint32_t>(c.mcal.size() + 8);
+            std::memcpy(&header[0x0C], &layers, 4);
+            std::memcpy(&header[0x10], &doodads, 4);
+            std::memcpy(&header[0x28], &sizeAlpha, 4);
+            std::memcpy(&header[0x38], &mapObjs, 4);
+            std::memcpy(&header[0x3C], &c.holes, 2);
+            SplitIff body;
+            body.bytes = header;
+            body.Chunk("MCVT", c.mcvt);
+            body.Chunk("MCNR", c.mcnr);
+            body.Chunk("MCLY", c.mcly);
+            std::string mcrf;
+            for (uint32_t d : c.doodads) mcrf += SplitWords({d});
+            for (uint32_t w : c.mapObjs) mcrf += SplitWords({w});
+            body.Chunk("MCRF", mcrf);
+            if (!c.mcsh.empty()) body.Chunk("MCSH", c.mcsh);
+            if (!c.mcal.empty()) body.Chunk("MCAL", c.mcal);
+            const size_t at = m.Chunk("MCNK", body.bytes);
+            const uint32_t info[2] = {static_cast<uint32_t>(at), static_cast<uint32_t>(body.bytes.size() + 8)};
+            std::memcpy(&m.bytes[mcin + 8 + 16 * i], info, 8);
+        }
+
+        // Split: the root keeps heights, normals and MFBO; the holes in 64 bits.
+        SplitIff& r = twin.root;
+        r.Chunk("MVER", SplitWords({18}));
+        const size_t rh = r.Chunk("MHDR", std::string(64, '\0'));
+        uint32_t     rslots[12] = {1};
+        rslots[9] = static_cast<uint32_t>(r.Chunk("MFBO", mfbo) - (rh + 8));
+        std::memcpy(&r.bytes[rh + 8], rslots, sizeof rslots);
+        SplitIff& t = twin.tex0;
+        t.Chunk("MVER", SplitWords({18}));
+        if (byId) t.Chunk("MDID", SplitWords({1001, 1002, 1003, 1004, 1005}));
+        else t.Chunk("MTEX", mtex);
+        t.Chunk("MTXF", mtxf);
+        SplitIff& o = twin.obj0;
+        o.Chunk("MVER", SplitWords({18}));
+        if (byId)
+        {
+            std::string ddf = mddf, odf = modf;
+            for (uint32_t i = 0; i < 3; ++i)
+            {
+                const uint32_t id = 2001 + i % 2;
+                const uint16_t flag = 0x40;
+                std::memcpy(&ddf[36 * i], &id, 4);
+                std::memcpy(&ddf[36 * i + 34], &flag, 2);
+            }
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                const uint32_t id = 3001;
+                const uint16_t flag = 0x8;
+                std::memcpy(&odf[64 * i], &id, 4);
+                std::memcpy(&odf[64 * i + 56], &flag, 2);
+            }
+            o.Chunk("MDDF", ddf);
+            o.Chunk("MODF", odf);
+        }
+        else
+        {
+            o.Chunk("MMDX", mmdx);
+            o.Chunk("MMID", mmid);
+            o.Chunk("MWMO", mwmo);
+            o.Chunk("MWID", mwid);
+            o.Chunk("MDDF", mddf);
+            o.Chunk("MODF", modf);
+        }
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            const SplitChunkData& c = chunks[i];
+            std::string header = c.header;
+            if (c.holes)
+            {
+                // Each of the 16 holes as the four of the 64 it covers.
+                uint8_t high[8] = {};
+                for (uint32_t row = 0; row < 4; ++row)
+                    for (uint32_t col = 0; col < 4; ++col)
+                        if (c.holes & (1u << (4 * row + col)))
+                        {
+                            high[2 * row] |= static_cast<uint8_t>(3u << (2 * col));
+                            high[2 * row + 1] |= static_cast<uint8_t>(3u << (2 * col));
+                        }
+                const uint32_t flags = SplitU32(reinterpret_cast<const uint8_t*>(header.data())) | 0x10000u;
+                std::memcpy(&header[0x00], &flags, 4);
+                std::memcpy(&header[0x14], high, 8);
+            }
+            SplitIff body;
+            body.bytes = header;
+            body.Chunk("MCVT", c.mcvt);
+            body.Chunk("MCNR", c.mcnr);
+            r.Chunk("MCNK", body.bytes);
+            SplitIff tb;
+            tb.Chunk("MCLY", c.mcly);
+            if (!c.mcsh.empty()) tb.Chunk("MCSH", c.mcsh);
+            if (!c.mcal.empty()) tb.Chunk("MCAL", c.mcal);
+            t.Chunk("MCNK", tb.bytes);
+            SplitIff ob;
+            std::string mcrd, mcrw;
+            for (uint32_t d : c.doodads) mcrd += SplitWords({d});
+            for (uint32_t w : c.mapObjs) mcrw += SplitWords({w});
+            if (!mcrd.empty()) ob.Chunk("MCRD", mcrd);
+            if (!mcrw.empty()) ob.Chunk("MCRW", mcrw);
+            o.Chunk("MCNK", ob.bytes);
+        }
+        return twin;
+    }
+
+    /// The split files the test's provider answers.
+    const SplitTwin* g_splitFiles = nullptr;
+    uint32_t         g_splitAsked = 0;
+    std::string      g_splitPath;
+
+    /// The listfile the test's provider knows: the by-FileDataID twin's ids, and not 1005.
+    wxl_bool WXL_CALL SplitName(void*, uint32_t id, char* out, uint32_t capacity)
+    {
+        const char* name = nullptr;
+        switch (id)
+        {
+        case 1001: name = "t\\a.blp"; break;
+        case 1002: name = "t\\b.blp"; break;
+        case 1003: name = "t\\c.blp"; break;
+        case 1004: name = "t\\d.blp"; break;
+        case 2001: name = "m\\a.m2"; break;
+        case 2002: name = "m\\bb.m2"; break;
+        case 3001: name = "w\\a.wmo"; break;
+        default: return WXL_FALSE;
+        }
+        std::snprintf(out, capacity, "%s", name);
+        return WXL_TRUE;
+    }
+
+    void WXL_CALL SplitProvide(void*, const wxl_terrain_tile* tile, wxl_terrain_tile_files* out)
+    {
+        ++g_splitAsked;
+        g_splitPath.assign(tile->path.data, tile->path.size);
+        if (!g_splitFiles) return;
+        out->data[WXL_TERRAIN_TILE_TEX0] = g_splitFiles->tex0.bytes.data();
+        out->size[WXL_TERRAIN_TILE_TEX0] = static_cast<uint32_t>(g_splitFiles->tex0.bytes.size());
+        out->data[WXL_TERRAIN_TILE_OBJ0] = g_splitFiles->obj0.bytes.data();
+        out->size[WXL_TERRAIN_TILE_OBJ0] = static_cast<uint32_t>(g_splitFiles->obj0.bytes.size());
+    }
+
+    /// The tile read as the client reads it, with the seams called where the fork calls them.
+    void SplitLoad(SplitFakeArea& a, std::vector<SplitFakeChunk>& chunks, bool seams)
+    {
+        if (seams) wxl::seam::MapArea::ProcessIffChunks::Before(&a);
+        SplitStockArea(a);
+        if (seams) wxl::seam::MapArea::ProcessIffChunks::After(&a);
+        chunks.assign(256, SplitFakeChunk{});
+        for (int32_t i = 0; i < 256; ++i) SplitStockChunk(a, chunks[static_cast<size_t>(i)], i % 16, i / 16, seams);
+    }
+
+    std::string SplitSpan(const void* p, size_t n) { return p ? std::string(static_cast<const char*>(p), n) : std::string(); }
+
+    void CheckSplitTiles()
+    {
+        namespace tiles = wxl::core::services::terrain_tiles;
+        const SplitTwin twin = MakeSplitTwin();
+        // The tile's map object is in the client's files (a missing one is left out: it would end the client).
+        wxl::core::services::model_gate::Clear();
+        g_files.push_back(FakeFile{"w\\a.wmo", std::string("REVM\4\0\0\0\x11\0\0\0", 12)});
+
+        // The monolithic tile, with and without the seams: the seams leave it alone.
+        SplitFakeArea mono;
+        mono.x = 30, mono.y = 40;
+        mono.file  = "World\\Maps\\T\\T_30_40.adt";
+        mono.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> monoChunks;
+        SplitLoad(mono, monoChunks, false);
+        SplitFakeArea seen = mono;
+        seen.bytes         = twin.mono.bytes;
+        seen.textures.clear();
+        std::vector<SplitFakeChunk> seenChunks;
+        wxl_terrain_tile_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = &SplitProvide;
+        Check(tiles::SetProvider(0, &provider) == WXL_OK, "a tile provider is taken");
+        g_splitFiles = &twin;
+        g_splitAsked = 0;
+        SplitLoad(seen, seenChunks, true);
+        bool same = g_splitAsked == 0 && tiles::Held() == 0 && seen.textures == mono.textures && seen.doodadCount == mono.doodadCount;
+        for (size_t i = 0; i < 256; ++i)
+            same = same && seenChunks[i].placed == monoChunks[i].placed && SplitU32(seenChunks[i].header + 0x0C) == SplitU32(monoChunks[i].header + 0x0C);
+        Check(same, "a tile with MCIN: no provider asked, nothing held, read as the client reads it");
+
+        // The split tile.
+        SplitFakeArea split;
+        split.x = 30, split.y = 40;
+        split.file  = "World\\Maps\\T\\T_30_40.adt";
+        split.bytes = twin.root.bytes;
+        std::vector<SplitFakeChunk> splitChunks;
+        SplitLoad(split, splitChunks, true);
+        Check(g_splitAsked == 1 && g_splitPath == "World\\Maps\\T\\T_30_40.adt" && tiles::Held() == 1,
+              "a root without MCIN: the provider is asked once, by the tile's name, and the tile held");
+
+        const std::string placeholder = wxl::core::services::split_tile::kPlaceholderTexture;
+        Check(split.textures.size() == 6 && std::equal(mono.textures.begin(), mono.textures.end(), split.textures.begin()) &&
+                  split.textures[5] == placeholder,
+              "its textures are _tex0's MTEX, loaded by LoadTextures in order, then the placeholder its chunks without layers need");
+        bool flags = split.textureFlags && mono.textureFlags;
+        for (size_t k = 0; flags && k < 5; ++k) flags = split.textureFlags[k] == mono.textureFlags[k];
+        Check(flags, "its texture flags are _tex0's MTXF");
+        Check(split.doodadCount == mono.doodadCount && split.mapObjCount == mono.mapObjCount &&
+                  SplitSpan(split.doodadDef, 36 * 3) == SplitSpan(mono.doodadDef, 36 * 3) &&
+                  SplitSpan(split.mapObjDef, 64 * 2) == SplitSpan(mono.mapObjDef, 64 * 2),
+              "its placements are _obj0's MDDF and MODF, with their counts");
+        bool names = true;
+        for (int32_t d = 0; d < 3; ++d)
+        {
+            const uint32_t id = SplitU32(split.doodadDef + 36 * d);
+            names = names && std::string(split.m2Names + split.modelOffsets[id]) == std::string(mono.m2Names + mono.modelOffsets[id]);
+        }
+        names = names && std::string(split.wmoNames + split.wmoOffsets[0]) == std::string(mono.wmoNames + mono.wmoOffsets[0]);
+        Check(names, "each placement's model name through MMID and MWID, as in one file");
+        Check(split.flying && mono.flying && SplitSpan(split.flying, 36) == SplitSpan(mono.flying, 36), "MFBO the client's own, from the root");
+        Check(SplitU32(split.chunkInfo + 8) == 0, "the chunk index is the root's MCNKs, flags left to the client");
+
+        bool heights = true, layers = true, alpha = true, shadow = true, holes = true, placed = true, counts = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            const SplitFakeChunk& s = splitChunks[i];
+            const SplitFakeChunk& o = monoChunks[i];
+            heights = heights && SplitSpan(s.height, 145 * 4) == SplitSpan(o.height, 145 * 4) && SplitSpan(s.normals, 448) == SplitSpan(o.normals, 448) &&
+                      SplitU32(s.header + 0x34) == SplitU32(o.header + 0x34);
+            const uint32_t n = SplitU32(s.header + 0x0C);
+            const uint32_t on = SplitU32(o.header + 0x0C);
+            // A chunk without layers gets one of the placeholder (texture 5); every chunk has four readable entries.
+            if (on)
+                layers = layers && n == on && SplitSpan(s.layers, 16 * n) == SplitSpan(o.layers, 16 * n);
+            else
+                layers = layers && n == 1 && s.layers && SplitU32(s.layers) == 5 && SplitU32(s.layers + 4) == 0 && SplitU32(s.layers + 48) == 5 &&
+                         SplitU32(s.layers + 60) == 0;
+            const uint32_t sizeAlpha = SplitU32(s.header + 0x28);
+            alpha = alpha && sizeAlpha == SplitU32(o.header + 0x28) && SplitSpan(s.alpha, sizeAlpha ? sizeAlpha - 8 : 0) == SplitSpan(o.alpha, sizeAlpha ? sizeAlpha - 8 : 0);
+            shadow = shadow && (SplitU32(s.header) & 1) == (SplitU32(o.header) & 1) && SplitSpan(s.shadow, s.shadow ? 512 : 0) == SplitSpan(o.shadow, o.shadow ? 512 : 0);
+            uint16_t hs, ho;
+            std::memcpy(&hs, s.header + 0x3C, 2);
+            std::memcpy(&ho, o.header + 0x3C, 2);
+            holes  = holes && hs == ho;
+            placed = placed && s.placed == o.placed;
+            counts = counts && SplitU32(s.header + 0x10) == SplitU32(o.header + 0x10) && SplitU32(s.header + 0x38) == SplitU32(o.header + 0x38);
+        }
+        Check(heights, "every chunk's heights, normals and header are the root's own");
+        Check(layers, "every chunk's layers are its _tex0 MCLY, its count the client's (at most 4: a chunk naming 6 keeps its first 4); one "
+                      "without gets the placeholder, four entries the ground query can read");
+        Check(alpha, "its alpha maps are its _tex0 MCAL, sizeAlpha as one file says it");
+        Check(shadow, "its shadow its _tex0 MCSH, under the root's flag");
+        Check(holes && (SplitU32(splitChunks[5].header) & 0x10000) && splitChunks[5].header[0x3C], "64 holes folded into the client's 16 (the 2 x 2 under each)");
+        Check(placed, "map objects then doodads made in the order one file makes them, from MCRW and MCRD");
+        Check(counts, "the header's reference counts are MCRD's and MCRW's");
+
+        // References the client cannot follow are left out; holes are not lost.
+        SplitTwin odd = twin;
+        {
+            // Chunk 1's first doodad reference names a placement that does not exist; doodad 2 by FileDataID.
+            const uint32_t bad = 9;
+            size_t at = odd.obj0.bytes.find("DRCM");
+            std::memcpy(&odd.obj0.bytes[at + 8], &bad, 4);
+            at = odd.obj0.bytes.find("FDDM");
+            const uint16_t byId = 0x40;
+            std::memcpy(&odd.obj0.bytes[at + 8 + 36 * 2 + 34], &byId, 2);
+        }
+        g_splitFiles = &odd;
+        SplitFakeArea oddArea;
+        oddArea.x = 31, oddArea.y = 40;
+        oddArea.file  = "World\\Maps\\T\\T_31_40.adt";
+        oddArea.bytes = twin.root.bytes;
+        uint8_t partial[8] = {0, 0, 0, 0, 0, 0, 0, 0x80}; // one hole of 64, at the bottom right
+        const size_t mcnk0 = oddArea.bytes.find("KNCM");
+        std::memcpy(&oddArea.bytes[mcnk0 + 8 + 0x14], partial, 8);
+        const uint32_t hiFlag = 0x10000u;
+        std::memcpy(&oddArea.bytes[mcnk0 + 8], &hiFlag, 4);
+        const uint64_t leftBefore = tiles::Count().refsLeftOut;
+        std::vector<SplitFakeChunk> oddChunks;
+        SplitLoad(oddArea, oddChunks, true);
+        size_t made = 0, expected = 0;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            made += oddChunks[i].placed.size();
+            expected += monoChunks[i].placed.size();
+        }
+        uint16_t folded;
+        std::memcpy(&folded, oddChunks[0].header + 0x3C, 2);
+        Check(tiles::Count().refsLeftOut > leftBefore && made < expected && made > 0,
+              "a reference to no placement, or to one named by FileDataID, is left out and the rest made");
+        Check(folded == 0x8000, "a single hole of the 64 makes its quarter of the 16 a hole");
+
+        // No provider: the ground loads, untextured, without placements.
+        tiles::SetProvider(0, nullptr);
+        SplitFakeArea bare;
+        bare.x = 32, bare.y = 40;
+        bare.file  = "World\\Maps\\T\\T_32_40.adt";
+        bare.bytes = twin.root.bytes;
+        std::vector<SplitFakeChunk> bareChunks;
+        SplitLoad(bare, bareChunks, true);
+        bool empty = bare.textures.size() == 1 && bare.textures[0] == placeholder && bare.doodadCount == 0 && bare.mapObjCount == 0;
+        for (size_t i = 0; i < 256; ++i)
+            empty = empty && SplitU32(bareChunks[i].header + 0x0C) == 1 && bareChunks[i].layers && SplitU32(bareChunks[i].layers) == 0 &&
+                    bareChunks[i].placed.empty() &&
+                    SplitSpan(bareChunks[i].height, 145 * 4) == SplitSpan(monoChunks[i].height, 145 * 4);
+        Check(empty, "without a provider a split tile loads its ground, one layer of the placeholder, no placements");
+
+        // The client frees the tiles: what was kept goes.
+        wxl::seam::Map::FreeArea::Before(&split);
+        wxl::seam::Map::FreeArea::Before(&oddArea);
+        wxl::seam::Map::FreeArea::Before(&bare);
+        Check(tiles::Held() == 0, "Map.FreeArea lets go of a split tile's files and index");
+
+        // 8.1 and later: textures and models by FileDataID, named by the provider's name function.
+        const SplitTwin byId = MakeSplitTwin(true);
+        g_splitFiles         = &byId;
+        provider.name_fn     = &SplitName;
+        tiles::SetProvider(0, &provider);
+        SplitFakeArea ids;
+        ids.x = 33, ids.y = 40;
+        ids.file  = "World\\Maps\\T\\T_33_40.adt";
+        ids.bytes = byId.root.bytes;
+        std::vector<SplitFakeChunk> idChunks;
+        SplitLoad(ids, idChunks, true);
+        Check(ids.textures.size() == 6 && ids.textures[0] == "t\\a.blp" && ids.textures[3] == "t\\d.blp" && ids.textures[4] == "FileDataID_1005.blp" &&
+                  ids.textures[5] == placeholder,
+              "MDID's textures loaded by the names the provider gives, in order; one it does not name a placeholder");
+        bool idSame = SplitSpan(ids.doodadDef, 36 * 3) == SplitSpan(mono.doodadDef, 36 * 3) &&
+                      SplitSpan(ids.mapObjDef, 64 * 2) == SplitSpan(mono.mapObjDef, 64 * 2);
+        bool idPlaced = true, idLayers = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            idPlaced = idPlaced && idChunks[i].placed == monoChunks[i].placed;
+            // A layer naming texture 4 (FileDataID 1005, not named) ends the chunk's layers there.
+            const uint32_t want = SplitU32(monoChunks[i].header + 0x0C);
+            uint32_t       stop = want;
+            for (uint32_t k = 0; k < want; ++k)
+                if (SplitU32(monoChunks[i].layers + 16 * k) == 4)
+                {
+                    stop = k;
+                    break;
+                }
+            idLayers = idLayers && SplitU32(idChunks[i].header + 0x0C) == (stop ? stop : 1u) && idChunks[i].layers;
+        }
+        Check(idSame, "placements by FileDataID become placements by name, as in one file");
+        Check(idPlaced, "their models placed by the names the provider gives, in the client's order");
+        Check(idLayers, "a layer of a texture no one named, and those over it, are left out");
+        Check(tiles::Count().named >= 7 && tiles::Count().unnamed >= 1, "the ids named and not named are counted");
+        wxl::seam::Map::FreeArea::Before(&ids);
+        provider.name_fn = nullptr;
+        tiles::SetProvider(0, nullptr);
+        g_splitFiles = nullptr;
+
+        // Models the client cannot load: their placements are left out, on any tile.
+        namespace gate = wxl::core::services::model_gate;
+        const uint8_t md21[8] = {'M', 'D', '2', '1', 0, 0, 0, 0}, md20new[8] = {'M', 'D', '2', '0', 0x10, 1, 0, 0},
+                      md20[8] = {'M', 'D', '2', '0', 8, 1, 0, 0}, wmo18[12] = {'R', 'E', 'V', 'M', 4, 0, 0, 0, 18, 0, 0, 0},
+                      wmo17[12] = {'R', 'E', 'V', 'M', 4, 0, 0, 0, 17, 0, 0, 0};
+        Check(gate::Judge(md21, 8, false) == gate::Verdict::chunked && gate::Judge(md20new, 8, false) == gate::Verdict::newer &&
+                  gate::Judge(md20, 8, false) == gate::Verdict::loadable && gate::Judge(wmo18, 12, true) == gate::Verdict::newer &&
+                  gate::Judge(wmo17, 12, true) == gate::Verdict::loadable && gate::Judge(nullptr, 0, false) == gate::Verdict::loadable,
+              "an M2 of MD21 or past version 264, a WMO root past 17, cannot be loaded; MD20 264 and WMO 17 can");
+        {
+            std::string later("REVM\4\0\0\0\x11\0\0\0DHOM\0\0\0\0DIFG\0\0\0\0", 28);
+            std::string stockRoot("REVM\4\0\0\0\x11\0\0\0DHOM\0\0\0\0XTOM\0\0\0\0", 28);
+            Check(gate::Judge(reinterpret_cast<const uint8_t*>(later.data()), later.size(), true) == gate::Verdict::later &&
+                      gate::Judge(reinterpret_cast<const uint8_t*>(stockRoot.data()), stockRoot.size(), true) == gate::Verdict::loadable,
+                  "a WMO root of version 17 with a chunk of later clients (GFID) cannot be loaded; 3.3.5a's chunks can");
+        }
+        gate::Clear();
+        g_files.back().bytes[8] = 18; // w\a.wmo, now of version 18
+        g_files.push_back(FakeFile{"m\\bb.m2", std::string("MD21\0\0\0\0", 8)});
+        SplitFakeArea gated;
+        gated.x = 30, gated.y = 41;
+        gated.file  = "World\\Maps\\T\\T_30_41.adt";
+        gated.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> gatedChunks;
+        SplitLoad(gated, gatedChunks, true);
+        bool keptOthers = true;
+        size_t left = 0;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            std::vector<std::string> expect;
+            for (const std::string& p : monoChunks[i].placed)
+                if (p.rfind("m2:m\\a.m2", 0) == 0) expect.push_back(p);
+            left += monoChunks[i].placed.size() - expect.size();
+            keptOthers = keptOthers && gatedChunks[i].placed == expect;
+        }
+        Check(keptOthers && left > 0 && gate::LeftOut() == left,
+              "a tile in one file: placements of an MD21 M2 and of a WMO past 17 left out, the others made in the client's order");
+        Check(tiles::Held() == 0, "and nothing kept for it");
+        g_files.pop_back();
+        g_files.pop_back();
+        gate::Clear();
+        SplitFakeArea missing;
+        missing.x = 30, missing.y = 42;
+        missing.file  = "World\\Maps\\T\\T_30_42.adt";
+        missing.bytes = twin.mono.bytes;
+        std::vector<SplitFakeChunk> missingChunks;
+        SplitLoad(missing, missingChunks, true);
+        bool noWmo = true, m2s = true;
+        for (size_t i = 0; i < 256; ++i)
+        {
+            size_t models = 0;
+            for (const std::string& p : missingChunks[i].placed) noWmo = noWmo && p.rfind("wmo:", 0) != 0;
+            for (const std::string& p : monoChunks[i].placed) models += p.rfind("m2:", 0) == 0 ? 1 : 0;
+            m2s = m2s && missingChunks[i].placed.size() == models;
+        }
+        Check(noWmo && m2s, "a map object root the client's files do not have is left out (it would end the client), the doodads made");
+        gate::Clear();
+
+        // Every split chunk keeps four layer entries CMap::QueryGroundTypeTerrain can read (it takes
+        // m_layers[k] for the k its low-quality map names, whatever nLayers says).
+        bool queryable = true;
+        for (const std::vector<SplitFakeChunk>* set : {&splitChunks, &idChunks})
+            for (const SplitFakeChunk& c : *set)
+            {
+                queryable = queryable && c.layers && SplitU32(c.header + 0x0C) >= 1 && SplitU32(c.header + 0x0C) <= 4;
+                for (uint32_t row = 0; queryable && row < 8; ++row)
+                {
+                    uint16_t bits;
+                    std::memcpy(&bits, c.header + 0x40 + 2 * row, 2);
+                    for (uint32_t col = 0; col < 8; ++col) queryable = queryable && ((bits >> (2 * col)) & 3) < 4;
+                }
+            }
+        Check(queryable, "every chunk of a split tile has a layer and four entries the ground-type query reads");
+    }
+
+    // --- Liquids and far terrain of later clients ----------------------------------------------
+
+    void CheckRetailLiquids()
+    {
+        namespace st = wxl::core::services::split_tile;
+        // A split root: MVER, MHDR (MH2O's slot), 256 MCNKs, MH2O with three chunks of liquid.
+        SplitIff root;
+        root.Chunk("MVER", SplitWords({18}));
+        const size_t mhdr = root.Chunk("MHDR", std::string(64, '\0'));
+        std::string mh2o(256 * 12, '\0');
+        auto add = [&](uint32_t chunk, uint16_t type, uint16_t format, uint8_t x, uint8_t w, uint32_t vertexBytes) {
+            const uint32_t at = static_cast<uint32_t>(mh2o.size());
+            std::string ins(24, '\0');
+            std::memcpy(&ins[0], &type, 2);
+            std::memcpy(&ins[2], &format, 2);
+            ins[12] = static_cast<char>(x), ins[13] = 0, ins[14] = static_cast<char>(w), ins[15] = 2;
+            mh2o += ins;
+            if (vertexBytes)
+            {
+                const uint32_t v = static_cast<uint32_t>(mh2o.size());
+                std::memcpy(&mh2o[at + 20], &v, 4);
+                mh2o.append(vertexBytes, '\x01');
+            }
+            const uint32_t one = 1;
+            std::memcpy(&mh2o[12 * chunk], &at, 4);
+            std::memcpy(&mh2o[12 * chunk + 4], &one, 4);
+        };
+        const uint32_t v = (2 + 1) * (2 + 1);
+        add(0, 2, 42, 0, 2, 0);          // ocean by LiquidObject id, no vertex data
+        add(1, 1222, 427, 0, 2, 5 * v);  // a river by LiquidObject id, heights and depths, a type 3.3.5a has not
+        add(2, 1, 3, 0, 2, 9 * v);       // format 3: heights, coordinates, depths
+        add(3, 1, 0, 7, 2, 5 * v);       // past the chunk's 8 cells
+        const size_t at = root.Chunk("MH2O", mh2o);
+        const uint32_t slot = static_cast<uint32_t>(at - (mhdr + 8));
+        std::memcpy(&root.bytes[mhdr + 8 + 0x28], &slot, 4);
+        for (int i = 0; i < 256; ++i) root.Chunk("MCNK", std::string(128, '\0'));
+        std::vector<uint8_t> bytes(root.bytes.begin(), root.bytes.end());
+        const std::vector<uint8_t> known = {0, 1, 1, 1, 1};
+        const st::LiquidFixes fixes = st::FixLiquids(bytes.data(), static_cast<uint32_t>(bytes.size()), known);
+        const uint8_t* data = bytes.data() + at + 8;
+        auto field = [&](uint32_t chunk, uint32_t off) {
+            uint16_t value;
+            std::memcpy(&value, data + SplitU32(data + 12 * chunk) + off, 2);
+            return value;
+        };
+        Check(field(0, 2) == 2 && field(0, 0) == 2, "an ocean by LiquidObject id without vertex data: depths only (format 2), Ocean kept");
+        Check(field(1, 2) == 0 && field(1, 0) == 1, "a river by LiquidObject id: format 0 from its 5 bytes a vertex, its unknown type made Water");
+        Check(field(2, 2) == 1, "format 3 read as 1, whose heights and coordinates it starts with");
+        Check(SplitU32(data + 12 * 3 + 4) == 0 && fixes.dropped == 1, "a chunk whose liquid lies past its 8 cells is left dry");
+        Check(fixes.formats == 3 && fixes.types == 1, "the fixes counted");
+    }
+
+    void CheckMissingTiles()
+    {
+        namespace tiles = wxl::core::services::terrain_tiles;
+        const uint32_t saved = g_wdtFlags;
+        std::memset(g_wdtTiles, 0, sizeof g_wdtTiles);
+        g_wdtTiles[2 * (64 * 3 + 5)] = 1; // 5_3, in the files
+        g_wdtTiles[2 * (64 * 3 + 6)] = 1; // 6_3, not
+        g_wdtTiles[2 * (64 * 40 + 33)] = 1; // 33_40, not
+        g_files.push_back(FakeFile{"World\\Maps\\Missing\\Missing_5_3.adt", "REVM"});
+        g_wdtFlags = 0;
+        Check(tiles::WdtLoaded() == 0 && g_wdtTiles[2 * (64 * 3 + 6)] == 1,
+              "a WDT of 3.3.5a's layout keeps every tile its MAIN marks, as the client reads it");
+        g_wdtFlags = 0x84;
+        Check(tiles::WdtLoaded() == 2 && g_wdtTiles[2 * (64 * 3 + 5)] == 1 && g_wdtTiles[2 * (64 * 3 + 6)] == 0 &&
+                  g_wdtTiles[2 * (64 * 40 + 33)] == 0,
+              "a later client's WDT (0x80): tiles its files do not have are marked absent, the others kept");
+        g_wdtTiles[2 * (64 * 3 + 6)] = 1;
+        g_wdtFlags = 0x200;
+        Check(tiles::WdtLoaded() == 1 && g_wdtTiles[2 * (64 * 3 + 6)] == 0, "and one of MAID (0x200)");
+        g_files.pop_back();
+        g_wdtFlags = saved;
+        std::memset(g_wdtTiles, 0, sizeof g_wdtTiles);
+    }
+
+    void CheckRetailWdl()
+    {
+        namespace ld = wxl::core::services::low_detail;
+        // Stock: MVER, MAOF at once.
+        SplitIff stock;
+        stock.Chunk("MVER", SplitWords({18}));
+        stock.Chunk("MAOF", std::string(4096 * 4, '\0'));
+        Check(ld::Read(reinterpret_cast<const uint8_t*>(stock.bytes.data()), static_cast<uint32_t>(stock.bytes.size())).clientReads,
+              "a WDL laid out as 3.3.5a's (MAOF or MWMO after MVER) is left to the client");
+        // Retail: MVER, MLDD, MSSN, MAOF, then MARE, MAOE, MAHO for area 65; MARE alone for area 70.
+        SplitIff wdl;
+        wdl.Chunk("MVER", SplitWords({18}));
+        wdl.Chunk("MLDD", std::string(40, '\x7f'));
+        wdl.Chunk("MSSN", std::string(12, '\0'));
+        const size_t maof = wdl.Chunk("MAOF", std::string(4096 * 4, '\0'));
+        std::string heights(1090, '\0');
+        int16_t hi = 120, lo = -30;
+        std::memcpy(&heights[0], &hi, 2);
+        std::memcpy(&heights[2 * 544], &lo, 2);
+        const uint32_t mare65 = static_cast<uint32_t>(wdl.Chunk("MARE", heights));
+        wdl.Chunk("MAOE", std::string(32, '\0'));
+        std::string holes(32, '\0');
+        holes[0] = 1; // one hole of 256
+        wdl.Chunk("MAHO", holes);
+        const uint32_t mare70 = static_cast<uint32_t>(wdl.Chunk("MARE", heights));
+        const uint32_t bad = 1u << 30;
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 65], &mare65, 4);
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 70], &mare70, 4);
+        std::memcpy(&wdl.bytes[maof + 8 + 4 * 71], &bad, 4);
+        const ld::Plan plan = ld::Read(reinterpret_cast<const uint8_t*>(wdl.bytes.data()), static_cast<uint32_t>(wdl.bytes.size()));
+        Check(!plan.clientReads && plan.maof == maof + 8 && plan.areas.size() == 2 && plan.skipped == 1,
+              "a WDL of later clients: MAOF found by its id past MLDD and MSSN, an offset past the file left out");
+        const wxl_core_area_low& a = plan.areas[0];
+        Check(a.index == 65 && a.column == 1 && a.row == 1 && a.heights == mare65 + 8 && a.holes && a.index_count == 3060 &&
+                  a.box_max[2] == 120.0f && a.box_min[2] == -30.0f && std::fabs(a.top_left[0] - (17066.666f - 16 * 33.333332f)) < 0.01f,
+              "an area: MARE's heights and bounds, its MAHO found past MAOE, 12 indices a cell not a hole");
+        Check(plan.areas[1].holes == 0 && plan.areas[1].index_count == 3072, "an area without MAHO: no holes, 3072 indices, as the client");
+        // The gate: the client's own loop would read MLDD as MAOF; the runtime reads the file and fills the far terrain.
+        g_files.push_back(FakeFile{"World\\Maps\\T\\T.wdl", wdl.bytes});
+        g_files.push_back(FakeFile{"World\\Maps\\S\\S.wdl", stock.bytes});
+        FakeLowDetail detail;
+        void*         self = &detail;
+        const char*   path = "World\\Maps\\T";
+        const char*   name = "T";
+        Check(wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name) && detail.data.size() == wdl.bytes.size() &&
+                  detail.areaOffsets == maof + 8 && detail.areas.size() == 2 && detail.areas.count(70),
+              "MapLowDetail.Load takes a later client's WDL: its bytes the client's, its areas made");
+        FakeLowDetail other;
+        self = &other;
+        path = "World\\Maps\\S";
+        name = "S";
+        Check(!wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name) && other.data.empty(), "and leaves a 3.3.5a one to the client");
+        path = "World\\Maps\\None";
+        name = "None";
+        Check(!wxl::seam::MapLowDetail::Load::Gate(&self, &path, &name), "and a missing one (the client loads nothing)");
+        g_files.pop_back();
+        g_files.pop_back();
+    }
+
+    void CheckTerrainLayerLimit()
+    {
+        namespace layers = wxl::core::services::terrain_layers;
+        std::vector<uint8_t> file;
+        const auto put = [&file](uint32_t v) {
+            for (int i = 0; i < 4; ++i) file.push_back(static_cast<uint8_t>(v >> (8 * i)));
+        };
+        put(0x4D564552u); // MVER
+        put(4);
+        put(18);
+        const uint32_t named[3] = {8, 4, 6};
+        size_t         at[3]    = {};
+        for (int c = 0; c < 3; ++c)
+        {
+            put(0x4D434E4Bu); // MCNK, its 128-byte header and nothing else
+            put(128);
+            at[c] = file.size();
+            file.resize(file.size() + 128, 0);
+            std::memcpy(&file[at[c] + 0x0C], &named[c], 4);
+        }
+        const uint64_t before = layers::Count().chunks_cut;
+        const uint32_t cut    = layers::TileLoading(file.data(), static_cast<uint32_t>(file.size()));
+        uint32_t       now[3];
+        for (int c = 0; c < 3; ++c) std::memcpy(&now[c], &file[at[c] + 0x0C], 4);
+        Check(cut == 2 && now[0] == 4 && now[1] == 4 && now[2] == 4 && layers::Count().chunks_cut == before + 2,
+              "terrain layers: an MCNK naming 8 or 6 layers is cut to the client's 4 as its tile is read, one of 4 left");
+        file.resize(file.size() - 64); // the last MCNK cut short: not read past the end
+        std::memcpy(&file[at[2] + 0x0C], &named[2], 4);
+        Check(layers::TileLoading(file.data(), static_cast<uint32_t>(file.size())) == 0, "terrain layers: a chunk running past the file's end is left");
+        Check(layers::TileLoading(nullptr, 64) == 0, "terrain layers: no bytes, nothing");
+    }
+
+    // abi 0.1.43: a program made from a shader provider's answer, on Direct3D 9 and Vulkan.
+    void CheckShaderCode()
+    {
+        namespace code = wxl::core::services::shader_code;
+        const wxl_gx_api& gx = wxl::core::services::GxApi();
+        static const uint32_t answer[3] = {0xFFFF0300u, 0x0000FFFFu, 0x0000FFFFu};
+        static int            asked     = 0;
+        wxl_gx_shader_provider provider{};
+        provider.struct_size = sizeof provider;
+        provider.fn          = [](void*, const wxl_gx_shader_code* in, wxl_gx_shader_answer* out) -> wxl_bool {
+            ++asked;
+            if (in->stage != 1 || std::strcmp(in->name, "Terrain1:6") != 0) return WXL_FALSE;
+            out->code = answer;
+            out->size = std::strcmp(in->name, "Terrain1:6") == 0 ? sizeof answer : 7;
+            return WXL_TRUE;
+        };
+        Check(gx.struct_size >= offsetof(wxl_gx_api, set_shader_provider) + sizeof(void*) && gx.set_shader_provider(&provider) == WXL_OK,
+              "shader code: a mod sets its shader provider");
+        wxl_gx_shader_provider none{};
+        none.struct_size = sizeof none;
+        Check(gx.set_shader_provider(&none) == WXL_E_INVALID, "shader code: a provider without its function is refused");
+
+        static const uint32_t own[2] = {0xFFFF0300u, 0x0000FFFFu};
+        FakeShader terrain{"Terrain1:6", 4, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreatePixel::Before(nullptr, &terrain);
+        const bool swapped = terrain.size == sizeof answer && std::memcmp(terrain.code, answer, sizeof answer) == 0 && terrain.code != answer;
+        wxl::seam::Gx::D3dIShaderCreatePixel::After(nullptr, &terrain);
+        Check(swapped && terrain.code == own && terrain.size == sizeof own,
+              "shader code: Direct3D 9 makes the program from the answer (a copy), and the record gets its own code back");
+        FakeShader ui{"UI:0", 4, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreatePixel::Before(nullptr, &ui);
+        const bool left = ui.code == own;
+        wxl::seam::Gx::D3dIShaderCreatePixel::After(nullptr, &ui);
+        FakeShader vertex{"Terrain1:6", 0, own, sizeof own};
+        wxl::seam::Gx::D3dIShaderCreateVertex::Before(nullptr, &vertex);
+        const bool vleft = vertex.code == own;
+        wxl::seam::Gx::D3dIShaderCreateVertex::After(nullptr, &vertex);
+        Check(left && vleft && ui.code == own, "shader code: a program the provider does not answer is made from its own code");
+        std::vector<uint8_t> out;
+        Check(code::Answer("Terrain1:6", 1, own, sizeof own, out) && out.size() == sizeof answer && !code::Answer("Terrain1:6", 0, own, sizeof own, out),
+              "shader code: the Vulkan renderer's translation is handed the same answer");
+        const int before = asked;
+        code::ForgetMod(0);
+        Check(!code::Answer("Terrain1:6", 1, own, sizeof own, out) && asked == before && code::Count().answered >= 2,
+              "shader code: a mod's provider goes with it");
+        code::Clear();
+    }
+
+    void CheckTerrainService()
+    {
+        namespace grid = wxl::terrain;
+        const wxl_terrain_api& api = wxl::core::services::TerrainApi();
+        for (int32_t y = 0; y < 3; ++y)
+            for (int32_t x = 0; x < 3; ++x)
+            {
+                FakeChunk& chunk = g_ground[y * 3 + x];
+                chunk.cx = 500 + x;
+                chunk.cy = 600 + y;
+                chunk.Reset();
+            }
+        g_ground[6].holes = 1u; // chunk (500, 602), cells (0-1, 0-1)
+        g_mapId           = 0;
+        constexpr wxl::host::ModHost::ModToken kMod = 21, kOther = 22;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+
+        const auto at = [](int32_t cx, int32_t cy, uint32_t i) { return grid::VertexPlane(cx, cy, i); };
+        const auto heightAt = [&](grid::Point2 p, bool original) {
+            double z = -1.0;
+            return api.height(p.x, p.y, original ? WXL_TRUE : WXL_FALSE, &z) == WXL_TRUE ? z : -1.0;
+        };
+        const auto rel = [](int32_t cx, int32_t cy, uint32_t i) { return GroundChunk(cx, cy)->heights[i]; };
+        const auto near = [](double a, double b) { return std::fabs(a - b) < 0.01; };
+        const auto up = [](int32_t cx, int32_t cy, uint32_t i) { return GroundChunk(cx, cy)->normals[3 * i + 2] == 127; };
+        const wxl_terrain_height lower{501, 601, grid::OuterIndex(0, 0), 90.0f};
+
+        // No ground: out of the world, or a map without terrain.
+        g_groundPresent = false;
+        Check(api.set_heights(&lower, 1, 0) == WXL_E_UNSUPPORTED && heightAt(at(501, 601, 50), false) < 0.0,
+              "terrain: without ground an edit is unsupported and no height answers");
+        g_groundPresent = true;
+
+        // Reads.
+        const grid::Point2 inner = at(501, 601, grid::InnerIndex(4, 4));
+        Check(near(heightAt(inner, false), 100.0) && api.presence(inner.x, inner.y) == WXL_TERRAIN_GROUND,
+              "terrain: the height of flat ground, and ground there");
+        const grid::Point2 hole = at(500, 602, grid::InnerIndex(0, 1));
+        Check(api.presence(hole.x, hole.y) == WXL_TERRAIN_HOLE && heightAt(hole, false) < 0.0, "terrain: a hole has no height");
+        const grid::Point2 far = at(510, 601, 70);
+        Check(api.presence(far.x, far.y) == WXL_TERRAIN_NOT_LOADED && api.presence(20000.0, 0.0) == WXL_TERRAIN_NONE,
+              "terrain: a chunk not loaded, and off the map");
+        wxl_terrain_place place{};
+        place.struct_size = sizeof place;
+        Check(api.locate(inner.x, inner.y, &place) == WXL_TRUE && place.chunk_x == 501 && place.chunk_y == 601 &&
+                  place.cell_row == 4 && place.cell_col == 4 && place.nearest == grid::InnerIndex(4, 4) && place.loaded == WXL_TRUE,
+              "terrain: locate answers the chunk, the cell and the nearest vertex");
+        wxl_vec3 vertices[145];
+        Check(api.vertices(501, 601, WXL_FALSE, vertices, 145) == 145 && vertices[144].z == 100.0f &&
+                  near(vertices[144].x, at(501, 601, 144).x) && near(vertices[144].y, at(501, 601, 144).y) &&
+                  api.vertices(510, 601, WXL_FALSE, vertices, 145) == 0,
+              "terrain: a loaded chunk's 145 vertices, none of one not loaded");
+
+        // An edit of a corner vertex: the same ground in four chunks.
+        for (FakeChunk& c : g_ground) c.rebuilds = c.clutterFreed = 0;
+        g_groundForgets = 0;
+        Check(api.set_heights(&lower, 1, 0) == WXL_OK, "terrain: an edit is taken");
+        Check(rel(501, 601, 0) == -10.0f && rel(500, 601, grid::OuterIndex(0, 8)) == -10.0f &&
+                  rel(501, 600, grid::OuterIndex(8, 0)) == -10.0f && rel(500, 600, 144) == -10.0f,
+              "terrain: a corner vertex is set in the four chunks holding it, relative to each one's base");
+        Check(!up(501, 601, grid::OuterIndex(0, 1)) && !up(500, 600, grid::InnerIndex(7, 7)) && up(501, 601, grid::OuterIndex(4, 4)),
+              "terrain: the normals around it lean, across the edges, and the others keep the file's");
+        Check(GroundChunk(500, 600)->normals[3 * 144 + 2] == 127, "terrain: the vertex's own normal stays up at a symmetric dip");
+        Check(near(heightAt(at(501, 601, 0), false), 90.0) && near(heightAt(at(501, 601, 0), true), 100.0),
+              "terrain: the height follows, the original stays readable");
+        Check(g_ground[0].rebuilds == 1 && g_ground[1].rebuilds == 1 && g_ground[3].rebuilds == 1 && g_ground[4].rebuilds == 1 &&
+                  g_ground[4].clutterFreed == 1 && g_ground[8].rebuilds == 0 && g_groundForgets == 1,
+              "terrain: the client rebuilds the chunks reshaped, frees their clutter, and forgets the movement's facets");
+
+        // A region in world space: each vertex once, the corner of four chunks in its own chunk.
+        std::vector<wxl_terrain_vertex> region(64);
+        const grid::Point2 corner = at(501, 601, 0);
+        const uint32_t inCircle = api.vertices_in(corner.x, corner.y, 3.0, region.data(), 64);
+        int  corners = 0;
+        bool known   = true;
+        for (uint32_t i = 0; i < inCircle && i < 64; ++i)
+        {
+            const wxl_terrain_vertex& v = region[i];
+            if (std::fabs(v.x - corner.x) < 0.01f && std::fabs(v.y - corner.y) < 0.01f)
+            {
+                ++corners;
+                known = known && v.chunk_x == 501 && v.chunk_y == 601 && v.index == 0 && near(v.z, 90.0) &&
+                        near(v.original_z, 100.0) && v.loaded == WXL_TRUE && v.inner == WXL_FALSE;
+            }
+        }
+        Check(inCircle == 5 && corners == 1 && known && api.vertices_in(corner.x, corner.y, 3.0, nullptr, 0) == 5,
+              "terrain: vertices_in lists a circle's vertices once, the corner of four chunks in its own, with its height and original");
+        const grid::Point2 beyond = at(503, 601, 0);
+        std::vector<wxl_terrain_vertex> edge(32);
+        const uint32_t onEdge = api.vertices_in(beyond.x, beyond.y, 3.0, edge.data(), 32);
+        bool shared = false, away = false;
+        for (uint32_t i = 0; i < onEdge && i < 32; ++i)
+        {
+            shared = shared || (edge[i].chunk_x == 503 && edge[i].index == 0 && edge[i].loaded == WXL_TRUE && near(edge[i].z, 100.0));
+            away   = away || (edge[i].chunk_x == 503 && edge[i].index != 0 && edge[i].loaded == WXL_FALSE);
+        }
+        Check(shared && away, "terrain: a vertex shared with a loaded chunk reads its height there; one of a chunk not loaded says so");
+        Check(api.vertices_in(corner.x, corner.y, 200.0, nullptr, 0) == 0, "terrain: a radius beyond the limit is refused");
+
+        // Inside the world's drawing the clutter waits for its end.
+        wxl::core::services::terrain::WorldBegin();
+        const wxl_terrain_height again{501, 601, grid::InnerIndex(3, 3), 95.0f};
+        api.set_heights(&again, 1, 0);
+        const int freedInside = g_ground[4].clutterFreed;
+        wxl::core::services::terrain::WorldEnd();
+        Check(freedInside == 1 && g_ground[4].clutterFreed == 2, "terrain: clutter reshaped while the world is drawn is freed after it");
+
+        // A trace meets the edited ground.
+        wxl_terrain_hit hit{};
+        hit.struct_size = sizeof hit;
+        const grid::Point2 dip = at(501, 601, grid::InnerIndex(3, 3));
+        Check(api.trace(wxl_vec3{dip.x, dip.y, 200.0f}, wxl_vec3{dip.x, dip.y, 0.0f}, &hit) == WXL_TRUE &&
+                  std::fabs(hit.point.z - 95.0f) < 0.01f && hit.chunk_x == 501 && hit.chunk_y == 601 && hit.normal.z > 0.0f &&
+                  std::fabs(hit.fraction - 0.525f) < 0.001f,
+              "terrain: a trace meets the edited ground, with its chunk and an upward normal");
+        const grid::Point2 a = at(500, 601, 70), b = at(502, 601, 70);
+        Check(api.trace(wxl_vec3{a.x, a.y, 101.0f}, wxl_vec3{b.x, b.y, 99.0f}, &hit) == WXL_TRUE && hit.chunk_x == 501 &&
+                  std::fabs(hit.point.z - 100.0f) < 0.01f,
+              "terrain: a slanting trace across chunks meets the ground where it crosses it");
+        Check(api.trace(wxl_vec3{hole.x, hole.y, 200.0f}, wxl_vec3{hole.x, hole.y, 0.0f}, &hit) == WXL_FALSE,
+              "terrain: a trace goes through a hole");
+
+        // Owners: another mod's edit shows over this one's, and goes back to it.
+        g_host->SwapCurrentMod(kOther);
+        const wxl_terrain_height deeper{501, 601, grid::OuterIndex(0, 0), 80.0f};
+        api.set_heights(&deeper, 1, 0);
+        const double shown = heightAt(at(501, 601, 0), false);
+        Check(api.reset_chunk(501, 601, 0) == WXL_OK && near(heightAt(at(501, 601, 0), false), 90.0) && near(shown, 80.0),
+              "terrain: the newest edit shows; its reset gives the one before back");
+        g_host->SwapCurrentMod(kMod);
+        Check(api.reset_chunk(501, 601, 0) == WXL_OK && rel(500, 600, 144) == 0.0f && near(heightAt(at(501, 601, 0), false), 100.0),
+              "terrain: a chunk's reset takes the edge vertex off its neighbours too");
+        bool allUp = true;
+        for (const FakeChunk& c : g_ground)
+            for (uint32_t i = 0; i < 145; ++i) allUp = allUp && c.normals[3 * i] == 0 && c.normals[3 * i + 2] == 127;
+        Check(allUp, "terrain: with no edit left, every normal is the file's again");
+        Check(api.reset_chunk(501, 601, 0) == WXL_E_NOT_FOUND && api.reset_all(0) == WXL_E_NOT_FOUND,
+              "terrain: nothing to reset is not found");
+
+        // Layers.
+        const wxl_terrain_height one{502, 602, 70, 101.0f}, two{502, 602, 71, 102.0f};
+        api.set_heights(&one, 1, 1);
+        api.set_heights(&two, 1, 2);
+        Check(api.reset_all(1) == WXL_OK && rel(502, 602, 70) == 0.0f && rel(502, 602, 71) == 2.0f,
+              "terrain: a layer is reset alone");
+
+        // A chunk read again from the disk gets its edits back.
+        g_received.clear();
+        wxl::seam::MapChunk::Purge::Before(GroundChunk(502, 602));
+        const Received* gone = Only(WXL_EV_TerrainChunkUnloaded);
+        Check(gone && gone->As<wxl_terrain_chunk_state_args>().chunk_x == 502 && gone->As<wxl_terrain_chunk_state_args>().edited == WXL_TRUE,
+              "terrain: MapChunk.Purge raises TerrainChunkUnloaded, edited");
+        g_ground[8].Reset();
+        g_received.clear();
+        wxl_terrain_stats stats{};
+        stats.struct_size = sizeof stats;
+        api.stats(&stats);
+        const uint64_t reapplied = stats.reapplied;
+        wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 2, 2);
+        const Received* back = Only(WXL_EV_TerrainChunkLoaded);
+        api.stats(&stats);
+        Check(rel(502, 602, 71) == 2.0f && !up(502, 602, 70) && back && back->As<wxl_terrain_chunk_state_args>().edited == WXL_TRUE &&
+                  stats.reapplied == reapplied + 1,
+              "terrain: MapArea.PrepareChunk After puts the edits back before TerrainChunkLoaded");
+        Check(near(heightAt(at(502, 602, 71), true), 100.0), "terrain: and the originals are what the disk had");
+
+        // PrepareChunk answers nothing on the stock client: EAX holds what CMapChunk::Create left
+        // (5 in the crash of 2026-10-27). The After takes no answer and reads the tile's slot; a
+        // stray value reaching the service is refused, and an empty slot raises nothing.
+        static_assert(std::is_same_v<decltype(&wxl::seam::MapArea::PrepareChunk::After), void(WXL_CALL*)(void*, int32_t, int32_t)>,
+                      "MapArea.PrepareChunk's After is handed no answer");
+        g_received.clear();
+        wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 9, 9);
+        wxl::seam::MapArea::PrepareChunk::After(nullptr, 2, 2);
+        wxl_terrain_chunk_state_args stray{};
+        Check(g_received.empty() && !wxl::core::services::terrain::ChunkLoaded(reinterpret_cast<void*>(5), stray) &&
+                  !wxl::core::services::terrain::ChunkUnloading(reinterpret_cast<void*>(5), stray),
+              "terrain: an empty slot raises nothing, and a value left in EAX (5) is refused as a chunk, never read");
+        {
+            namespace ground = wxl::core::services::terrain;
+            const uint64_t before = ground::Generation();
+            Mute(WXL_EV_TerrainChunkUnloaded);
+            Mute(WXL_EV_TerrainChunkLoaded);
+            wxl::seam::MapArea::PrepareChunk::After(&g_groundArea, 1, 1);
+            const uint64_t loaded = ground::Generation();
+            wxl::seam::MapChunk::Purge::Before(GroundChunk(501, 601));
+            Unmute(WXL_EV_TerrainChunkUnloaded);
+            Unmute(WXL_EV_TerrainChunkLoaded);
+            Check(loaded > before && ground::Generation() > loaded,
+                  "terrain: a chunk read from its tile's slot and one freed move the ground's generation, nobody listening");
+        }
+        GroundChunk(502, 602)->loaded = false;
+        Check(!wxl::core::services::terrain::ChunkLoaded(&g_ground[8], stray), "terrain: a chunk its tile no longer holds is refused");
+        g_ground[8].loaded = true;
+
+        // A player standing still on the ground falls when it goes down; moving, or above it, not.
+        FakeObject me;
+        me.typeId = WXL_OBJECT_PLAYER;
+        const grid::Point2 feet = at(501, 601, grid::InnerIndex(5, 5));
+        me.position = wxl_vec3{feet.x, feet.y, 100.0f};
+        g_localPlayer = &me;
+        g_groundFalls = 0;
+        const wxl_terrain_height underfoot{501, 601, grid::InnerIndex(5, 5), 98.0f};
+        api.set_heights(&underfoot, 1, 0);
+        Check(g_groundFalls == 1, "terrain: a player standing on ground that goes down falls");
+        me.position.z     = 98.0f;
+        me.movementFlags  = 0x1u;
+        const wxl_terrain_height lowerStill{501, 601, grid::InnerIndex(5, 5), 96.0f};
+        api.set_heights(&lowerStill, 1, 0);
+        me.movementFlags = 0;
+        me.position.z    = 150.0f;
+        const wxl_terrain_height lowest{501, 601, grid::InnerIndex(5, 5), 94.0f};
+        api.set_heights(&lowest, 1, 0);
+        const wxl_terrain_height raise{501, 601, grid::InnerIndex(5, 5), 160.0f};
+        me.position.z = 94.0f;
+        api.set_heights(&raise, 1, 0);
+        Check(g_groundFalls == 1, "terrain: one moving, one on something above the ground, and ground raised start no fall");
+        wxl::core::services::terrain::ForgetMod(kMod);
+
+        // Ground raised under the player's feet lifts them onto it through the client's movement.
+        const auto groundAt = [&](float x, float y) {
+            double z = -1.0;
+            api.height(x, y, WXL_FALSE, &z);
+            return static_cast<float>(z);
+        };
+        me.position      = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.movementFlags = 0;
+        me.lifts         = 0;
+        g_groundFalls    = 0;
+        const wxl_terrain_height step{501, 601, grid::InnerIndex(5, 5), 100.4f};
+        api.set_heights(&step, 1, 0);
+        Check(me.lifts == 1 && std::fabs(me.position.z - 100.4f) < 0.01f && g_groundFalls == 1,
+              "terrain: a step's rise under a player standing still puts them on it at once, landing through the client's fall");
+        me.movementFlags = 0x1u;
+        const wxl_terrain_height stepMore{501, 601, grid::InnerIndex(5, 5), 100.9f};
+        api.set_heights(&stepMore, 1, 0);
+        Check(me.lifts == 2 && std::fabs(me.position.z - 100.9f) < 0.01f && g_groundFalls == 1,
+              "terrain: a moving player is put on it too, the movement's next message carrying it");
+        me.movementFlags = 0;
+
+        // Partly under: the highest ground under the footprint, as the collision box rests.
+        const grid::Point2 aside{feet.x + 0.15f, feet.y + 0.15f};
+        wxl::core::services::terrain::ForgetMod(kMod);
+        me.position = wxl_vec3{aside.x, aside.y, groundAt(aside.x, aside.y)};
+        const wxl_terrain_height partly{501, 601, grid::InnerIndex(5, 5), 100.5f};
+        api.set_heights(&partly, 1, 0);
+        Check(me.position.z > groundAt(aside.x, aside.y) + 0.005f && me.position.z < 100.5f,
+              "terrain: an edit partly under the player lifts them to the highest ground under their footprint");
+
+        // A higher rise lifts them frame by frame, never more than a step at a time.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        g_localPlayer = &me;
+        me.position   = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.lifts      = 0;
+        g_groundFalls = 0;
+        g_timeMs      = 50000;
+        const wxl_terrain_height mound{501, 601, grid::InnerIndex(5, 5), 103.0f};
+        api.set_heights(&mound, 1, 0);
+        Check(me.lifts == 0 && wxl::core::services::terrain::Lifting(), "terrain: three yards are not put at once");
+        float lastZ = me.position.z, worstStep = 0.0f;
+        int   frames = 0;
+        while (wxl::core::services::terrain::Lifting() && frames < 100)
+        {
+            g_timeMs += 33;
+            wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+            worstStep = std::max(worstStep, me.position.z - lastZ);
+            lastZ     = me.position.z;
+            ++frames;
+        }
+        Check(!wxl::core::services::terrain::Lifting() && std::fabs(me.position.z - groundAt(feet.x, feet.y)) < 0.05f &&
+                  worstStep <= 8.0f * 0.033f + 0.01f && frames > 5 && g_groundFalls == 1,
+              "terrain: they rise at a steady pace, in steps no higher than a frame's, and land on top");
+
+        // Nothing is lifted through what stands above: a roof, a floor of a building.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        me.position = wxl_vec3{feet.x, feet.y, 100.0f};
+        me.lifts    = 0;
+        g_roofZ     = 101.5f;
+        api.set_heights(&step, 1, 0);
+        Check(me.lifts == 0 && !wxl::core::services::terrain::Lifting(), "terrain: ground raised under a roof lifts nobody");
+        g_roofZ = 0.0f;
+        wxl::core::services::terrain::ForgetMod(kMod);
+        g_localPlayer = nullptr;
+
+        // Refusals: nothing set.
+        const wxl_terrain_height bad[2] = {{501, 601, 3, 90.0f}, {501, 601, 145, 90.0f}};
+        const wxl_terrain_height nan{501, 601, 3, std::nanf("")};
+        Check(api.set_heights(bad, 2, 0) == WXL_E_INVALID && rel(501, 601, 3) == 0.0f && api.set_heights(&nan, 1, 0) == WXL_E_INVALID &&
+                  api.reset_chunk(-1, 0, 0) == WXL_E_INVALID,
+              "terrain: an entry off the grid or a height not a number refuses the whole edit");
+        wxl_terrain_hit unsized{};
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{0, 0, 1}, &unsized) == WXL_FALSE, "terrain: an answer without its struct_size is refused");
+
+        // The cost of an edit: a digging brush (about 5 yards: the vertices within it) and every
+        // vertex of the 3 x 3 chunks, with their normals and rebuilds.
+        std::vector<wxl_terrain_height> brush;
+        for (uint32_t i = 0; i < 145; ++i)
+        {
+            const grid::Point2 p = at(501, 601, i);
+            const float dx = p.x - feet.x, dy = p.y - feet.y;
+            if (dx * dx + dy * dy <= 25.0f) brush.push_back({501, 601, i, 97.0f});
+        }
+        uint32_t brushWorst = 0, brushTotal = 0;
+        for (int n = 0; n < 50; ++n)
+        {
+            for (auto& e : brush) e.height = 97.0f - 0.01f * n;
+            api.set_heights(brush.data(), static_cast<uint32_t>(brush.size()), 3);
+            api.stats(&stats);
+            brushTotal += stats.last_microseconds;
+            brushWorst = std::max(brushWorst, stats.last_microseconds);
+        }
+        std::vector<wxl_terrain_height> block;
+        for (int32_t cy = 600; cy <= 602; ++cy)
+            for (int32_t cx = 500; cx <= 502; ++cx)
+                for (uint32_t i = 0; i < 145; ++i) block.push_back({cx, cy, i, 99.0f + 0.001f * i});
+        api.set_heights(block.data(), static_cast<uint32_t>(block.size()), 3);
+        api.stats(&stats);
+        std::printf("  terrain: an edit of %zu vertices (a 5-yard brush) took %u us on average, %u at worst, over 50; "
+                    "all %zu vertices of 3 x 3 chunks %u us (%u written, %u chunks)\n",
+                    brush.size(), brushTotal / 50, brushWorst, block.size(), stats.last_microseconds, stats.last_vertices,
+                    stats.last_chunks);
+        Check(stats.last_chunks == 9 && stats.edited_chunks == 25,
+              "terrain: the block edit reshaped the nine chunks loaded, and holds the copies of its edge in the sixteen around");
+
+        // A mod that goes takes its edits; the map unloading drops all and says so.
+        wxl::core::services::terrain::ForgetMod(kMod);
+        api.stats(&stats);
+        Check(stats.edited_chunks == 0 && rel(501, 601, 0) == 0.0f, "terrain: a mod's edits come off when it goes");
+        api.set_heights(&lower, 1, 0);
+        g_received.clear();
+        wxl::seam::Map::Unload::Before();
+        const Received* cleared = Only(WXL_EV_TerrainEditsCleared);
+        api.stats(&stats);
+        Check(cleared && cleared->As<wxl_terrain_cleared_args>().chunks == 4 && stats.edited_chunks == 0,
+              "terrain: Map.Unload drops every edit and raises TerrainEditsCleared with the chunks that had some");
+
+        g_host->SwapCurrentMod(previous);
+        g_groundPresent = false;
+        wxl::core::services::terrain::Clear();
+    }
+
     /// MapArea: PrepareChunk's Before raises TerrainChunkBuild with the map, the tile and the chunk.
     void CheckMapArea()
     {
@@ -3182,6 +6062,47 @@ namespace
                   g_vm.ran.back() == "harness: print(1)",
               "run hands the chunk and its name to the engine");
 
+        // The client ends the process at its next frame when its script stack is not empty
+        // (CGGameUI::Idle, error #134): every call the runtime makes into the state leaves it as
+        // it found it.
+        g_vm.stack.clear();
+#if defined(_MSC_VER)
+        {
+            // As a mod's ScriptVmReady handler may at a /reload: the chunk runs from a handler
+            // the host guards, and calls GetBindingKey before the client has loaded the bindings.
+            wxl_result ran = WXL_OK;
+            const auto handler = [](void* context)
+            { *static_cast<wxl_result*>(context) = Script().run(Str("fault: GetBindingKey('TURNLEFT')"), "harness"); };
+            wxl::host::Fault fault;
+            const bool       returned = wxl::host::CallGuarded(handler, &ran, &fault);
+            Check(returned && ran == WXL_E_FAILED && g_vm.stack.empty() && g_vm.calls == 0,
+                  "a chunk the client faults inside fails in the handler that ran it, and the calls and values it "
+                  "left are dropped from the state");
+            g_vm.stack.clear();
+            g_vm.calls = 0;
+        }
+        Check(api.run(Str("print(2)"), "harness") == WXL_OK && g_vm.ran.back() == "harness: print(2)",
+              "and the next chunk runs");
+#endif
+        Check(api.run(Str("leak: 1"), "harness") == WXL_OK && g_vm.stack.empty(),
+              "a value a call into the client leaves on its stack is dropped");
+        {
+            namespace script = wxl::core::services::script;
+            auto pushes  = [] { FakePushNil(&g_vm); FakePushNil(&g_vm); };
+            auto pops    = [] { g_vm.stack.pop_back(); };
+            auto stopped = [] { g_vm.calls += 1; FakePushNil(&g_vm); }; // a call a guard further in abandoned
+            Check(script::Keep("harness pushes", pushes, nullptr) && g_vm.stack.empty(),
+                  "Keep drops what its call left on the stack");
+            FakePushNumber(&g_vm, 3.0);
+            FakePushNumber(&g_vm, 4.0);
+            Check(script::Keep("harness pops", pops, nullptr) && g_vm.stack.size() == 2 &&
+                      g_vm.stack[1].type == WXL_VALUE_NIL,
+                  "puts a nil back for a value its call took that it had not pushed");
+            g_vm.stack.clear();
+            Check(script::Keep("harness stopped", stopped, nullptr) && g_vm.stack.empty() && g_vm.calls == 0,
+                  "and drops the calls its call left unfinished");
+        }
+
         // Events: the client's table is installed when the context is announced; a declared
         // event is installed behind it.
         const size_t tables = g_vm.eventTables.size();
@@ -3198,10 +6119,11 @@ namespace
         text.as.string             = Str("x");
         const wxl_value args[2]    = {payload[0], text};
         Check(api.fire_event("WXL_HARNESS_LATE", args, 2) == WXL_OK && g_vm.signals.size() == 1 &&
-                  g_vm.signals[0].index == 3 && g_vm.signals[0].args.size() == 2 &&
-                  g_vm.signals[0].args[0].number == 7.0 && g_vm.signals[0].args[1].string == "x" &&
-                  g_vm.stack.empty(),
-              "fire_event signals the event at its index with the values pushed, and leaves the stack as it found it");
+                  g_vm.signals[0].index == 3 && g_vm.signals[0].args.size() == 3 &&
+                  g_vm.signals[0].args[0].string == "WXL_HARNESS_LATE" && g_vm.signals[0].args[1].number == 7.0 &&
+                  g_vm.signals[0].args[2].string == "x" && g_vm.stack.empty(),
+              "fire_event signals the event at its index with its name then the values pushed, as the client does, and "
+              "leaves the stack as it found it");
         Check(api.fire_event("WXL_HARNESS_NOT_DECLARED", nullptr, 0) == WXL_E_NOT_FOUND,
               "firing an event nobody declared is not found");
 
@@ -3376,6 +6298,198 @@ namespace
         g_host->Events().Unsubscribe(out);
     }
 
+    // --- wxl.net: claimed numbers through the ProcessMessage gate, sends behind the gate -------
+
+    /// What one handler of a claimed number was handed.
+    struct NetWatch
+    {
+        int                  calls  = 0;
+        uint32_t             opcode = 0;
+        std::vector<uint8_t> body;
+    };
+
+    void WXL_CALL OnNetMessage(void* user, uint32_t opcode, const void* data, uint32_t size)
+    {
+        NetWatch& watch = *static_cast<NetWatch*>(user);
+        ++watch.calls;
+        watch.opcode = opcode;
+        watch.body.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+    }
+
+    /// A message as a 3.3.5a world server puts it on the wire: the size of what follows (the
+    /// opcode included) in 2 bytes big-endian, or 3 with the high bit of the first set past
+    /// 0x7FFF, then the opcode as a u16 little-endian, then the body.
+    std::vector<uint8_t> ServerFrame(uint16_t opcode, const std::vector<uint8_t>& body)
+    {
+        const uint32_t       size = static_cast<uint32_t>(body.size()) + 2;
+        std::vector<uint8_t> frame;
+        if (size > 0x7FFF) frame.push_back(static_cast<uint8_t>(0x80 | (size >> 16)));
+        frame.push_back(static_cast<uint8_t>(size >> 8));
+        frame.push_back(static_cast<uint8_t>(size));
+        frame.push_back(static_cast<uint8_t>(opcode));
+        frame.push_back(static_cast<uint8_t>(opcode >> 8));
+        frame.insert(frame.end(), body.begin(), body.end());
+        return frame;
+    }
+
+    /// Reads a frame as WowConnection::DoMessageReads does (the header's size bytes, the high bit
+    /// for 3) and runs what NetClient::HandleData would: a CDataStore over what follows the
+    /// header, through the ProcessMessage gate. True when the gate took the call.
+    bool ReceiveFrame(const std::vector<uint8_t>& frame, int32_t* answer)
+    {
+        const bool     large  = (frame[0] & 0x80) != 0;
+        const uint32_t header = large ? 3u : 2u;
+        const uint32_t size   = large ? ((frame[0] & 0x7Fu) << 16 | frame[1] << 8 | frame[2]) : (frame[0] << 8 | frame[1]);
+        if (header + size != frame.size()) return false;
+        FakeStore store{ frame.data() + header, size, 0 };
+        void*     self    = reinterpret_cast<void*>(0x1000);
+        void*     message = &store;
+        uint32_t  when    = 1;
+        int32_t   unused  = 0;
+        return wxl::seam::NetClient::ProcessMessage::Gate(answer, &self, &when, &message, &unused);
+    }
+
+    std::vector<uint8_t> Bytes(std::initializer_list<uint8_t> bytes) { return std::vector<uint8_t>(bytes); }
+
+    void CheckNetOpcodes()
+    {
+        using namespace wxl::core::services;
+        constexpr wxl::host::ModHost::ModToken kMod = 41, kOther = 42;
+        const wxl_net_api& api = NetApi();
+        net::Clear();
+        NetSent().clear();
+        const wxl::host::ModHost::ModToken previous = g_host->SwapCurrentMod(kMod);
+
+        NetWatch updates, syncs;
+        Check(api.claim_opcode(0x521) == WXL_OK && api.claim_opcode(0x524) == WXL_OK &&
+                  api.claim_opcode(0x529) == WXL_OK && api.claim_opcode(0x52A) == WXL_OK &&
+                  api.claim_opcode(0x524) == WXL_OK,
+              "a mod claims numbers above 0x520, and its own again");
+        Check(api.set_handler(0x524, &OnNetMessage, &updates) == WXL_OK &&
+                  api.set_handler(0x529, &OnNetMessage, &syncs) == WXL_OK && api.set_compressed(0x529, 0x52A) == WXL_OK,
+              "it sets handlers, and pairs a compressed number with a plain one");
+        Check(api.set_handler(0x600, &OnNetMessage, &updates) == WXL_E_INVALID && api.set_compressed(0x529, 0x600) == WXL_E_INVALID,
+              "a handler or a pairing of a number it does not hold is refused");
+        Check(api.claim_opcode(0x10000) == WXL_E_INVALID && api.claim_opcode(0x100) == WXL_E_INVALID &&
+                  api.claim_opcode(0x520) == WXL_E_INVALID,
+              "a number past 0xFFFF, and the client's own without stock, are refused");
+        Check(api.reserved_opcode_limit() == 0x520 && api.max_send() == 10000, "the limit and the largest body");
+
+        g_host->SwapCurrentMod(kOther);
+        Check(api.claim_opcode(0x524) == WXL_E_INVALID && api.release_opcode(0x524) == WXL_E_NOT_FOUND &&
+                  api.send(0x521, "x", 1) == WXL_E_INVALID,
+              "another mod can neither claim, release nor send a held number");
+        g_host->SwapCurrentMod(kMod);
+
+        const uint8_t seq[4] = {1, 0, 0, 0};
+        Check(api.state() == WXL_NET_OFFLINE && api.connection() == 0 && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "offline: no connection, nothing sent");
+        wxl::seam::NetClient::HandleConnect::After(1, nullptr);
+        const uint32_t first = api.connection();
+        Check(api.state() == WXL_NET_CONNECTED && first != 0 && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "connected but not accepted: nothing sent");
+
+        // The client's own SMSG_AUTH_RESPONSE (0x1EE), AUTH_OK (0x0C): the session is accepted.
+        int32_t answer = -1;
+        Check(!ReceiveFrame(ServerFrame(0x1EE, Bytes({0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})), &answer) &&
+                  api.state() == WXL_NET_AUTHENTICATED,
+              "the client's own answer goes to its dispatch, and accepts the session");
+        Check(api.send(0x521, seq, 4) == WXL_E_FAILED && api.heard() == WXL_FALSE,
+              "the send gate: nothing of the mod's goes out before its server speaks");
+
+        MessageWatch observed;
+        const wxl_subscription watch = g_host->Events().Subscribe(WXL_EV_MessageReceived, &OnMessage, &observed, 0);
+        // SMSG 0x524: a packed guid, a u32, a float.
+        const std::vector<uint8_t> update = Bytes({0x03, 0x05, 0x01, 0x2A, 0, 0, 0, 0, 0, 0x20, 0x40});
+        answer                           = -1;
+        Check(ReceiveFrame(ServerFrame(0x524, update), &answer) && answer == 0,
+              "a claimed number past the client's 0x51F handlers stops at the gate");
+        Check(observed.calls == 1 && observed.opcode == 0x524, "MessageReceived saw it first");
+        Check(updates.calls == 1 && updates.opcode == 0x524 && updates.body == update,
+              "its handler gets the body, byte for byte");
+        Check(api.heard() == WXL_TRUE, "and the mod's gate opens");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.heard() == WXL_FALSE, "for that mod alone");
+        g_host->SwapCurrentMod(kMod);
+
+        Check(api.send(0x521, seq, 4) == WXL_OK && NetSent().size() == 1 &&
+                  NetSent().back() == Bytes({0x21, 0x05, 0, 0, 1, 0, 0, 0}),
+              "the mod sends: the client is handed the opcode as a u32 and the body");
+        Check(api.send(0x521, nullptr, 0) == WXL_OK && NetSent().back() == Bytes({0x21, 0x05, 0, 0}),
+              "an empty body is the opcode alone");
+        std::vector<uint8_t> big(10001, 0x55);
+        Check(api.send(0x521, big.data(), 10001) == WXL_E_INVALID && api.send(0x521, big.data(), 10000) == WXL_OK,
+              "a body is at most 10000 bytes");
+        // Counted by the second: a run that crosses into the next one counts again from there.
+        int        sent = 3;
+        wxl_result last = WXL_OK;
+        while (sent < 200 && (last = api.send(0x521, seq, 4)) == WXL_OK) ++sent;
+        Check(last == WXL_E_BUSY && sent >= 64 && sent <= 128, "past 64 messages of a number in a second, busy");
+
+        // SMSG 0x52A: a u32 size and a zlib stream, inflated and handed to 0x529's handler.
+        std::vector<uint8_t> payload(40000);
+        for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i % 7 + i / 1000);
+        std::vector<uint8_t> stream;
+        Check(wxl::core::zlib::Deflate(payload.data(), payload.size(), stream) && stream.size() < payload.size(),
+              "the runtime's deflate compresses");
+        std::vector<uint8_t> packed(4);
+        const uint32_t       length = static_cast<uint32_t>(payload.size());
+        std::memcpy(packed.data(), &length, 4);
+        packed.insert(packed.end(), stream.begin(), stream.end());
+        Check(ReceiveFrame(ServerFrame(0x52A, packed), &answer) && syncs.calls == 1 && syncs.opcode == 0x529 &&
+                  syncs.body == payload,
+              "a compressed message is inflated and handed to the plain number's handler as one of it");
+        // The same, raw, past 0x7FFF: the server's 3-byte header.
+        Check(ReceiveFrame(ServerFrame(0x529, payload), &answer) && syncs.calls == 2 && syncs.body == payload,
+              "a message past 0x7FFF bytes comes with the 3-byte header and arrives whole");
+        std::vector<uint8_t> lying = packed;
+        const uint32_t       more  = length + 1;
+        std::memcpy(lying.data(), &more, 4);
+        Check(ReceiveFrame(ServerFrame(0x52A, lying), &answer) && syncs.calls == 2,
+              "a stream that does not inflate to its size is dropped");
+        std::vector<uint8_t> huge(4 + 8);
+        const uint32_t       tooBig = WXL_NET_MAX_INFLATED + 1;
+        std::memcpy(huge.data(), &tooBig, 4);
+        Check(ReceiveFrame(ServerFrame(0x52A, huge), &answer) && syncs.calls == 2, "and so is one past 8 MB");
+
+        uint64_t got = 0;
+        std::vector<uint8_t> roundOut(payload.size());
+        Check(api.deflate(payload.data(), length, nullptr, 0, &got) == WXL_E_INVALID && got > 0 && got < payload.size(),
+              "deflate with no room says the room it needs");
+        std::vector<uint8_t> zipped(static_cast<size_t>(got));
+        Check(api.deflate(payload.data(), length, zipped.data(), got, &got) == WXL_OK &&
+                  api.inflate(zipped.data(), static_cast<uint32_t>(got), roundOut.data(), roundOut.size(), &got) == WXL_OK &&
+                  got == payload.size() && roundOut == payload,
+              "deflate and inflate go round");
+        Check(api.inflate("junk", 4, roundOut.data(), roundOut.size(), &got) == WXL_E_INVALID && got == 0,
+              "inflate refuses what is not zlib");
+
+        // A number nobody claimed past 0x51F is left to the client, which drops it.
+        Check(!ReceiveFrame(ServerFrame(0x600, Bytes({1})), &answer), "an unclaimed number goes to the client's dispatch");
+        // A MessageReceived handler that suppresses one stops it before the mod's handler.
+        observed.stop = true;
+        Check(ReceiveFrame(ServerFrame(0x524, update), &answer) && updates.calls == 1,
+              "a suppressing observer stops the message before the mod's handler");
+        observed.stop = false;
+        g_host->Events().Unsubscribe(watch);
+
+        wxl::seam::NetClient::HandleDisconnect::Before(nullptr);
+        Check(api.state() == WXL_NET_OFFLINE && api.connection() == 0 && api.heard() == WXL_FALSE &&
+                  api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "a disconnect closes every gate");
+        wxl::seam::NetClient::HandleConnect::After(1, nullptr);
+        ReceiveFrame(ServerFrame(0x1EE, Bytes({0x0C})), &answer);
+        Check(api.connection() != first && api.state() == WXL_NET_AUTHENTICATED && api.send(0x521, seq, 4) == WXL_E_FAILED,
+              "a new connection is a new number, and the gate stays closed until the server speaks again");
+
+        net::ForgetMod(kMod);
+        g_host->SwapCurrentMod(kOther);
+        Check(api.claim_opcode(0x524) == WXL_OK && !ReceiveFrame(ServerFrame(0x529, Bytes({1})), &answer),
+              "a mod that goes gives its numbers back");
+        g_host->SwapCurrentMod(previous);
+        net::Clear();
+    }
+
     // --- Input: a gate that can answer a window message in the client's place -----------------
 
     bool g_swallow = false;
@@ -3409,6 +6523,697 @@ namespace
               "a handler that writes handled takes the call away from the client");
         Check(answer == 0, "and the window procedure answers 0, as one that handled a message does");
 
+        g_host->Events().Unsubscribe(sub);
+    }
+
+
+    // --- wxl.camera: the view a mod sets, over the client's, around the camera's update -------
+
+    uint32_t g_cameraUpdates = 0;
+    void WXL_CALL OnCameraUpdate(void*, const void*) { ++g_cameraUpdates; }
+
+    void CheckCamera()
+    {
+        namespace cam = wxl::core::services::camera;
+        const wxl_camera_api& api = wxl::core::services::CameraApi();
+
+        wxl_vec3 point{};
+        double   fov = 0.0;
+        g_worldCamera = nullptr;
+        Check(api.position(&point) == WXL_E_UNSUPPORTED && api.fov(&fov) == WXL_E_UNSUPPORTED,
+              "out of the world the camera reads as unsupported");
+
+        g_camera                = FakeCamera{};
+        g_camera.view.position  = wxl_vec3{1.0f, 2.0f, 3.0f};
+        g_camera.view.forward   = wxl_vec3{1.0f, 0.0f, 0.0f};
+        g_camera.view.up        = wxl_vec3{0.0f, 0.0f, 1.0f};
+        g_camera.view.fov       = 1.6f; // with an effect's offset of 0.1
+        g_camera.view.fov_base  = 1.5f;
+        g_camera.view.pivot     = wxl_vec3{5.0f, 5.0f, 1.8f};
+        g_camera.view.followed  = 0;
+        g_worldCamera           = &g_camera;
+        Check(api.position(&point) == WXL_OK && point.z == 3.0f && api.forward(&point) == WXL_OK && point.x == 1.0f &&
+                  api.up(&point) == WXL_OK && point.z == 1.0f && api.fov(&fov) == WXL_OK && std::fabs(fov - 1.6) < 1e-6,
+              "the camera reads where it is, where it looks and what it draws with");
+        Check(api.pivot(&point) == WXL_E_NOT_FOUND, "a camera that follows nothing has no pivot");
+        g_camera.view.followed = 0x42;
+        Check(api.pivot(&point) == WXL_OK && point.z == 1.8f, "the pivot is the followed object's at its height");
+        Check(api.cinematic() == WXL_FALSE, "no cinematic");
+
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_CameraUpdate, &OnCameraUpdate, nullptr, 0);
+        wxl::core::frame::Reset();
+        wxl_frame_args frame{};
+        wxl::core::frame::Begin(frame);
+
+        g_cameraUpdates = 0;
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_cameraUpdates == 1 && g_camera.writes == 0, "an update raises CameraUpdate and writes nothing with no view");
+
+        FakeCamera other;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &other);
+        Check(g_cameraUpdates == 1, "another camera's update is not the world camera's");
+
+        Check(api.set_view(wxl_vec3{0, 0, 0}, wxl_vec3{0, 0, 0}, 0.0) == WXL_E_INVALID &&
+                  api.set_view(wxl_vec3{0, 0, 0}, wxl_vec3{1, 0, 0}, 4.0) == WXL_E_INVALID,
+              "a view with no direction, or a field of view past pi, is invalid");
+        Check(api.release_view() == WXL_E_NOT_FOUND, "releasing a view one does not hold is not found");
+
+        Check(api.set_view(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0}, 1.2) == WXL_OK, "a view is set");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == 1 && g_camera.view.position.x == 7.0f && g_camera.view.forward.y == 1.0f,
+              "the view is written over the client's at the end of the update");
+        Check(std::fabs(g_camera.view.fov - 1.2f) < 1e-6f && std::fabs(g_camera.view.fov_base - 1.1f) < 1e-6f,
+              "the field of view drawn is the view's, the effects' offset kept");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        Check(std::fabs(g_camera.view.fov_base - 1.5f) < 1e-6f, "the client's own field of view is back before its update");
+
+        g_camera.view.cinematic = 1;
+        const uint32_t writes   = g_camera.writes;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == writes, "a cinematic keeps the view");
+        g_camera.view.cinematic = 0;
+
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.release_view() == WXL_OK && std::fabs(g_camera.view.fov_base - 1.5f) < 1e-6f,
+              "releasing the view puts the client's field of view back");
+        const uint32_t released = g_camera.writes;
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == released, "and the client has its camera again");
+
+        api.set_view(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0);
+        cam::ForgetMod(0);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(g_camera.writes == released, "a mod's view goes with it");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.set_view(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a view is refused");
+
+        // A roll: the rows turned around the forward, read back, and 0 the unrolled rows exactly.
+        {
+            namespace facing = wxl::core::camera_facing;
+            wxl_vec3 level[3], none[3], rolled[3];
+            facing::FaceDirection(wxl_vec3{0.6f, -0.3f, 0.2f}, level);
+            facing::Facing(wxl_vec3{0.6f, -0.3f, 0.2f}, 0.0, none);
+            Check(std::memcmp(level, none, sizeof level) == 0, "a roll of 0 leaves SetFacing's rows bit for bit");
+            facing::Facing(wxl_vec3{1.0f, 0.0f, 0.0f}, 0.3, rolled);
+            Check(rolled[2].y < 0.0f && std::fabs(rolled[2].z - std::cos(0.3f)) < 1e-6f &&
+                      std::fabs(facing::Dot(rolled[0], rolled[2])) < 1e-6f && std::fabs(facing::Dot(rolled[1], rolled[2])) < 1e-6f,
+                  "a positive roll leans the camera's up to its right (east, looking north), the rows kept square");
+            Check(std::fabs(facing::RollOf(wxl_vec3{1.0f, 0.0f, 0.0f}, rolled[2]) - 0.3) < 1e-6 &&
+                      std::fabs(facing::RollOf(level[0], level[2])) < 1e-6,
+                  "the roll is read back from the rows, 0 for level ones");
+        }
+        Check(api.set_view_rolled(wxl_vec3{1, 1, 1}, wxl_vec3{1, 0, 0}, 0.0, std::nan("")) == WXL_E_INVALID,
+              "a roll that is not a number is invalid");
+        Check(api.set_view_rolled(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0, -0.4) == WXL_OK, "a rolled view is set");
+        wxl::seam::Camera::UpdateCallback::Before(nullptr, &g_camera);
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        double roll = 0.0;
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll + 0.4) < 1e-5, "it is written rolled, and Roll reads it back");
+        Check(api.set_view_rolled(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0, 0.4 + 6.283185307179586) == WXL_OK,
+              "a roll past a turn is taken modulo a turn");
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll - 0.4) < 1e-5, "and drawn as its remainder");
+        Check(api.set_view(wxl_vec3{7, 8, 9}, wxl_vec3{0, 1, 0.2f}, 0.0) == WXL_OK, "SetView after it");
+        wxl::seam::Camera::UpdateCallback::After(1, nullptr, &g_camera);
+        Check(api.roll(&roll) == WXL_OK && std::fabs(roll) < 1e-6, "draws level again");
+        Check(api.release_view() == WXL_OK, "and the view goes");
+
+        wxl::core::frame::End(frame);
+        g_host->Events().Unsubscribe(sub);
+        g_worldCamera = nullptr;
+    }
+
+    // --- wxl.world: the client's line test ----------------------------------------------------
+
+    // --- wxl.input's block of the game's mouse look ---------------------------------------------
+
+    void CheckMouseLookBlock()
+    {
+        namespace in = wxl::core::services::input;
+        const wxl_input_api& api = wxl::core::services::InputApi();
+        void*    control = &g_inputControl;
+        uint32_t bit     = 0x2;
+        uint32_t time    = 1000;
+        int32_t  result  = -1;
+
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time),
+              "with no block, the left button's look goes to the game");
+        g_lookStops = 0;
+        Check(api.block_mouse_look(WXL_TRUE) == WXL_OK && api.mouse_look_blocked() == WXL_TRUE && g_lookStops == 1,
+              "a block ends a look the game is in");
+        api.block_mouse_look(WXL_TRUE);
+        Check(g_lookStops == 1, "blocking twice is one block");
+
+        // A click of the left button: the press noted, the release within 0.8 s selects.
+        g_inputControl.pending = 1; // INPUT_RELEASE_SELECT, as CameraOrSelectOrMoveStart notes it
+        g_defaultActions.clear();
+        bit = 0x2, time = 1000, result = -1;
+        Check(wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time) && result == 0,
+              "the press sets no look bit: the gate takes the call, answering 0");
+        int32_t keep = 0;
+        bit = 0x2, time = 1200, result = -1;
+        Check(wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep) && result == 0,
+              "the release is the gate's too");
+        Check(g_defaultActions.size() == 1 && g_defaultActions[0] == 1 && g_inputControl.pending == 0,
+              "a short click does the left button's default action, once");
+
+        // A right button held a second: nothing.
+        g_inputControl.pending = 2; // INPUT_RELEASE_ACTION
+        g_defaultActions.clear();
+        bit = 0x1, time = 5000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1, time = 6000;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.empty() && g_inputControl.pending == 0, "a long hold acts on nothing, as in the game");
+
+        // A right click acts.
+        g_inputControl.pending = 2;
+        bit = 0x1, time = 7000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1, time = 7100;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.size() == 1 && g_defaultActions[0] == 4, "a short right click does the right button's action");
+
+        // Both buttons: no click, as the game makes none.
+        g_defaultActions.clear();
+        g_inputControl.pending = 1;
+        bit = 0x2, time = 8000;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x1;
+        wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+        bit = 0x3, time = 8100;
+        wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+        Check(g_defaultActions.empty(), "pressing both buttons makes no click");
+
+        // Other bits go on, the look bits kept out.
+        bit = 0x12, time = 9000, result = -1;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time) && bit == 0x10,
+              "a call with a movement bit and a look bit goes on with the movement bit alone");
+        bit = 0x12, time = 9100;
+        Check(!wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep) && bit == 0x10,
+              "and so does its release");
+        bit = 0x10, result = -1;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time), "a movement bit alone is the game's");
+
+        // A movement key (MOVEBACKWARD, 0x20) pressed and let go around a held button, in either
+        // order: the game gets both edges, and the button stays the gate's.
+        const auto set = [&](uint32_t b, uint32_t t) {
+            bit = b, time = t, result = -1;
+            const bool taken = wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time);
+            return std::make_pair(taken, bit);
+        };
+        const auto unset = [&](uint32_t b, uint32_t t) {
+            bit = b, time = t, result = -1;
+            const bool taken = wxl::seam::InputControl::UnsetControlBit::Gate(&result, &control, &bit, &time, &keep);
+            return std::make_pair(taken, bit);
+        };
+        const auto passes = [](std::pair<bool, uint32_t> call, uint32_t bits) { return !call.first && call.second == bits; };
+        Check(passes(set(0x20, 10000), 0x20) && set(0x2, 10100).first && passes(unset(0x20, 10200), 0x20) &&
+                  unset(0x2, 10300).first,
+              "a movement key let go while a button is held reaches the game");
+        Check(set(0x1, 11000).first && passes(set(0x20, 11100), 0x20) && unset(0x1, 11200).first &&
+                  passes(unset(0x20, 11300), 0x20),
+              "a movement key pressed while a button is held, let go after it, reaches the game both times");
+        Check(passes(set(0x20, 12000), 0x20) && passes(set(0x20, 12050), 0x20) && passes(unset(0x20, 12100), 0x20) &&
+                  passes(unset(0x20, 12150), 0x20),
+              "a movement key pressed again, or let go twice, is the game's each time");
+        Check(set(0x2, 13000).first && passes(unset(0xFFFFFFFFu, 13100), 0xFFFFFFFDu),
+              "the game's reset lets every bit go but the button the gate holds, which it lets go itself");
+        Check(passes(unset(0x2, 13200), 0x2), "and a later release of that button is the game's");
+
+        in::ForgetMod(0);
+        Check(api.mouse_look_blocked() == WXL_FALSE, "a mod's block goes with it");
+        bit = 0x2;
+        Check(!wxl::seam::InputControl::SetControlBit::Gate(&result, &control, &bit, &time), "and the game looks again");
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.block_mouse_look(WXL_TRUE); }).join();
+        Check(fromThread == WXL_E_INVALID && api.mouse_look_blocked() == WXL_FALSE, "off the main thread a block is refused");
+    }
+
+    // --- wxl.pose: a head turned over the animation ----------------------------------------------
+
+    void CheckPose()
+    {
+        const wxl_pose_api& api = wxl::core::services::PoseApi();
+        FakeObject          wolf;
+        wolf.guid   = 0x781;
+        wolf.typeId = WXL_OBJECT_UNIT;
+        FakeObject stone;
+        stone.guid   = 0x782;
+        stone.typeId = WXL_OBJECT_ITEM;
+        wxl::seam::ObjectMgr::InitObject::After(&wolf, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&stone, nullptr, 100u);
+        const wxl_handle unit = wxl::core::objects::HandleOf(&wolf);
+        const wxl_handle item = wxl::core::objects::HandleOf(&stone);
+
+        Check(api.head(item, 0, 0, 0) == WXL_E_INVALID && api.head(0xDEAD, 0, 0, 0) == WXL_E_NOT_FOUND &&
+                  api.head(unit, std::numeric_limits<double>::quiet_NaN(), 0, 0) == WXL_E_INVALID,
+              "a head is a unit's, its angles numbers");
+        g_headBone = FakeHeadBone{};
+        Check(api.head(unit, 0.5, 0.25, 0.0) == WXL_OK, "a unit's head is turned");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        // The turn about z by 0.5 after a nod by -0.25 about y: row a's y is sin(0.5) * cos(0.25).
+        Check(g_headBone.flags == 0x80 && g_headBone.writes == 1 &&
+                  std::fabs(g_headBone.matrix[1] - std::sin(0.5f) * std::cos(0.25f)) < 1e-4f,
+              "the game's animation is told to apply it, and the head bone is turned as asked");
+        Check(api.head(unit, 9.0, -9.0, 0.0) == WXL_OK, "angles past a neck's");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(std::fabs(g_headBone.matrix[0] - std::cos(100.0f * 3.14159265f / 180.0f) * std::cos(80.0f * 3.14159265f / 180.0f)) < 1e-3f,
+              "are held to 100 degrees of yaw and 80 of pitch");
+        FakeObject other;
+        g_headBone.writes = 0;
+        wxl::seam::Unit::PreAnimate::After(&other, nullptr);
+        Check(g_headBone.writes == 0, "another unit's animation leaves the head alone");
+
+        Check(api.release_head(unit) == WXL_OK && api.release_head(unit) == WXL_E_NOT_FOUND, "a head is released once");
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.flags == 0, "released at once, the bone goes back to the animation");
+        g_headBone.writes = 0;
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.writes == 0, "and is left alone after");
+
+        api.head(unit, 0.5, 0.0, 10.0);
+        wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        Check(g_headBone.flags == 0x80 && std::fabs(g_headBone.matrix[1]) < std::sin(0.5f) * 0.5f,
+              "a slow turn starts from where the head is");
+        wxl::core::services::pose::ForgetMod(0);
+        api.head(unit, 0, 0, 0); // turned again by the harness, which is mod 0
+        wxl::core::services::pose::Clear();
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.head(unit, 0, 0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a head is refused");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
+    }
+
+    // --- wxl.animation: animations of the game played on units -------------------------------
+
+    void CheckAnimation()
+    {
+        namespace anim = wxl::core::services::animation;
+        const wxl_animation_api& api = wxl::core::services::AnimationApi();
+        FakeObject me;
+        me.guid   = 0x7A1;
+        me.typeId = WXL_OBJECT_PLAYER;
+        me.health = 100;
+        FakeObject wolf;
+        wolf.guid   = 0x7A2;
+        wolf.typeId = WXL_OBJECT_UNIT;
+        wolf.health = 50;
+        FakeObject stone;
+        stone.guid   = 0x7A3;
+        stone.typeId = WXL_OBJECT_ITEM;
+        wxl::seam::ObjectMgr::InitObject::After(&me, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&wolf, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&stone, nullptr, 100u);
+        const wxl_handle player = wxl::core::objects::HandleOf(&me);
+        const wxl_handle unit   = wxl::core::objects::HandleOf(&wolf);
+        const wxl_handle item   = wxl::core::objects::HandleOf(&stone);
+        g_localPlayer = &me;
+        constexpr wxl::host::ModHost::ModToken kMod = 31, kOther = 32;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+        const auto frame = [&](uint32_t at) {
+            g_timeMs = at;
+            wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+            wxl::seam::Unit::PreAnimate::After(&wolf, nullptr);
+        };
+        const auto ended = [&](wxl_animation_end reason, uint32_t anim_id) {
+            const Received* got = Only(WXL_EV_UnitAnimationEnded);
+            if (!got) return false;
+            const auto args = got->As<wxl_unit_animation_args>();
+            return args.reason == static_cast<uint32_t>(reason) && args.anim_id == anim_id;
+        };
+
+        // Refusals.
+        Check(api.play(item, 17, 0, 0) == WXL_E_INVALID && api.play(0xDEAD, 17, 0, 0) == WXL_E_NOT_FOUND &&
+                  api.play(unit, 600, 0, 0) == WXL_E_INVALID && api.play(unit, 17, 0x10, 0) == WXL_E_INVALID &&
+                  api.play(unit, 17, 0, 50.0) == WXL_E_INVALID && api.play(unit, 17, 0, -1.0) == WXL_E_INVALID &&
+                  api.play(unit, 17, 0, std::numeric_limits<double>::quiet_NaN()) == WXL_E_INVALID && wolf.plays == 0,
+              "animation: an item, a unit gone, an id, a flag or a speed out of range are refused, nothing played");
+        wolf.health = 0;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED, "animation: a dead unit plays nothing");
+        wolf.health       = 50;
+        wolf.modelLoading = true;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED, "animation: nor a unit whose model loads");
+        wolf.modelLoading = false;
+        wolf.refusePlay   = true;
+        Check(api.play(unit, 17, 0, 0) == WXL_E_FAILED && wolf.plays == 1, "animation: nor one the client did not play");
+        wolf.refusePlay = false;
+        uint32_t shown = 0;
+        Check(api.playing(unit, &shown) == WXL_E_NOT_FOUND && api.current(unit, &shown) == WXL_OK && shown == 0 &&
+                  api.current(item, &shown) == WXL_E_INVALID,
+              "animation: nothing played, the model shows its stand");
+
+        // A one-shot: played its length, handed back to the game.
+        g_received.clear();
+        g_timeMs = 1000;
+        Check(api.play(unit, 17, 0, 0) == WXL_OK && wolf.shownAnim == 17 && wolf.lastPlayFlags == 0, "animation: Attack1H is played as an emote is");
+        Check(api.playing(unit, &shown) == WXL_OK && shown == 17 && api.current(unit, &shown) == WXL_OK && shown == 17,
+              "animation: playing and current answer it");
+        frame(1500);
+        Check(g_received.empty() && wolf.updates == 0, "animation: halfway through it plays on");
+        frame(2000);
+        Check(ended(WXL_ANIMATION_END_FINISHED, 17) && wolf.updates == 1 && wolf.shownAnim == 0 &&
+                  api.playing(unit, &shown) == WXL_E_NOT_FOUND,
+              "animation: after its length the game is handed the unit back, and UnitAnimationEnded says finished");
+
+        // Speed, fallback, flags.
+        g_received.clear();
+        Check(api.play(unit, 62, 0, 2.0) == WXL_OK && wolf.animSpeed == 2.0f, "animation: a speed is set on the model");
+        frame(2400);
+        Check(g_received.empty(), "animation: twice as fast, it plays on at 400 ms");
+        frame(2500);
+        Check(ended(WXL_ANIMATION_END_FINISHED, 62), "animation: and is over at 500 ms");
+        Check(api.play(unit, 136, WXL_ANIMATION_NO_BLEND, 0) == WXL_OK && wolf.shownAnim == 62 && wolf.lastPlayFlags == 0x1 &&
+                  api.playing(unit, &shown) == WXL_OK && shown == 136,
+              "animation: an animation the model lacks falls back, unblended; playing answers what was asked");
+        Check(api.play(unit, 136, WXL_ANIMATION_EXACT, 0) == WXL_OK && wolf.shownAnim == 136 && wolf.lastPlayFlags == 0x4,
+              "animation: exact asks the client for that id alone");
+
+        // Interrupted, and replaced.
+        frame(2600);
+        g_received.clear();
+        g_timeMs = 3000;
+        api.play(unit, 17, 0, 0);
+        frame(3000);
+        Check(ended(WXL_ANIMATION_END_REPLACED, 136), "animation: a play takes the place of the one before, said at the next frame");
+        g_received.clear();
+        wolf.shownAnim = 5; // the game runs
+        frame(3100);
+        Check(ended(WXL_ANIMATION_END_INTERRUPTED, 17) && wolf.plays == 6, "animation: the game replacing a one-shot ends it, not played again");
+        g_received.clear();
+        g_timeMs = 3200;
+        api.play(unit, 18, WXL_ANIMATION_OVERRIDE, 0);
+        wolf.shownAnim = 5;
+        frame(3300);
+        Check(ended(WXL_ANIMATION_END_INTERRUPTED, 18) && wolf.plays == 7 && wolf.shownAnim == 5,
+              "animation: override is a loop's: a one-shot under it ends when the game replaces it, not played again");
+
+        // A loop yields to the game and comes back when the unit is idle; override at once.
+        g_received.clear();
+        g_timeMs = 4000;
+        api.play(unit, 62, WXL_ANIMATION_LOOP, 0);
+        frame(6500);
+        Check(g_received.empty() && wolf.shownAnim == 62, "animation: a loop goes on past its length");
+        wolf.shownAnim = 5;
+        const uint32_t plays = wolf.plays;
+        frame(6600);
+        Check(wolf.plays == plays && wolf.shownAnim == 5, "animation: while the unit runs, a loop waits");
+        wolf.shownAnim = 0;
+        frame(6700);
+        Check(wolf.plays == plays + 1 && wolf.shownAnim == 62 && g_received.empty(), "animation: idle again, it comes back");
+        api.play(unit, 62, WXL_ANIMATION_LOOP | WXL_ANIMATION_OVERRIDE, 0);
+        wolf.shownAnim = 5;
+        frame(6800);
+        Check(wolf.plays == plays + 3 && wolf.shownAnim == 62, "animation: override plays it again over the run at once");
+        wolf.health    = 0;
+        wolf.shownAnim = 1;
+        frame(6900);
+        Check(wolf.plays == plays + 3, "animation: but never over death");
+        wolf.health = 50;
+
+        // Stopped by its mod only; a mod that goes stops its own.
+        g_received.clear();
+        g_host->SwapCurrentMod(kOther);
+        Check(api.stop(unit) == WXL_E_NOT_FOUND, "animation: another mod cannot stop it");
+        g_host->SwapCurrentMod(kMod);
+        wolf.shownAnim     = 62;
+        const uint32_t ups = wolf.updates;
+        Check(api.stop(unit) == WXL_OK && wolf.updates == ups + 1 && api.stop(unit) == WXL_E_NOT_FOUND,
+              "animation: its mod stops it once, and the game chooses again");
+        frame(7000);
+        Check(ended(WXL_ANIMATION_END_STOPPED, 62), "animation: UnitAnimationEnded says stopped at the next frame");
+        g_received.clear();
+        api.play(player, 53, 0, 0);
+        anim::ForgetMod(kMod);
+        frame(7100);
+        Check(ended(WXL_ANIMATION_END_STOPPED, 53) && me.updates == 1, "animation: a mod that goes stops its animations");
+
+        // A unit that leaves view ends its play, seen at the player's frame.
+        g_received.clear();
+        api.play(unit, 17, 0, 0);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&wolf);
+        g_timeMs = 7200;
+        wxl::seam::Unit::PreAnimate::After(&me, nullptr);
+        Check(ended(WXL_ANIMATION_END_GONE, 17) && !anim::Busy(), "animation: a unit gone ends its play");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.play(player, 17, 0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID, "animation: off the main thread a play is refused");
+        anim::Clear();
+        g_host->SwapCurrentMod(previous);
+        g_localPlayer = nullptr;
+        wxl::seam::ObjectMgr::ObjDelete::Before(&me);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&stone);
+    }
+
+    // --- wxl.selectioncircle: the game's circles hidden and restyled -----------------------------
+
+    void CheckSelectionCircle()
+    {
+        namespace circles = wxl::core::services::selectioncircle;
+        const wxl_selectioncircle_api& api = wxl::core::services::SelectionCircleApi();
+        FakeObject                     boar;
+        boar.guid     = 0x791;
+        boar.typeId   = WXL_OBJECT_UNIT;
+        boar.reaction = WXL_REACTION_HOSTILE;
+        FakeObject friendBear;
+        friendBear.guid     = 0x792;
+        friendBear.typeId   = WXL_OBJECT_UNIT;
+        friendBear.reaction = WXL_REACTION_FRIENDLY;
+        FakeObject corpse;
+        corpse.guid   = 0x793;
+        corpse.typeId = WXL_OBJECT_CORPSE;
+        wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&friendBear, nullptr, 100u);
+        wxl::seam::ObjectMgr::InitObject::After(&corpse, nullptr, 100u);
+        const wxl_handle boarHandle = wxl::core::objects::HandleOf(&boar);
+        const wxl_handle bearHandle = wxl::core::objects::HandleOf(&friendBear);
+
+        // One projection as a drawer makes it: a box 1 yard around the origin, a colour; the
+        // gate is handed the addresses of the arguments, as both runtimes hand them.
+        float          gameBox[6] = {-1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
+        uint32_t       gameColor  = 0xFF00FF00u;
+        const void*    box        = gameBox;
+        const void*    color      = &gameColor;
+        const void*    matrix     = nullptr;
+        float          fade = 0.5f, offset = 0.4f;
+        uint32_t       a5 = 0x200122, a6 = 1;
+        const auto project = [&] {
+            box   = gameBox;
+            color = &gameColor;
+            return wxl::seam::ProjectTex::Render2d::Gate(&box, &color, &matrix, &fade, &a5, &a6, &offset);
+        };
+        const auto drawTarget = [&](FakeObject& unit) {
+            wxl::seam::Unit::RenderTargetSelection::Before(&unit);
+            const bool taken = project();
+            wxl::seam::Unit::RenderTargetSelection::After(&unit);
+            return taken;
+        };
+        const auto boxOf = [&] { return static_cast<const float*>(box); };
+        const auto colorOf = [&] { return *static_cast<const uint32_t*>(color); };
+
+        Check(!project() && box == gameBox && color == &gameColor, "a projection outside a circle (a spell's cursor) is left alone");
+        Check(!drawTarget(boar) && box == gameBox && color == &gameColor, "with no mod's look, the target's circle is the game's");
+        circles::WorldEnd();
+        Check(api.drawn() == 1 && api.hidden() == 0, "and counted drawn");
+
+        Check(api.hide(0x8u, 0) == WXL_E_INVALID && api.hide(0, 0x200u) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, 9.0f) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, std::numeric_limits<float>::quiet_NaN()) == WXL_E_INVALID &&
+                  api.set_style(0, 0, wxl_str{nullptr, 0}, 0, -1.0f) == WXL_E_INVALID,
+              "a bit that names nothing, or a scale out of range, is refused");
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, 0, wxl_str{"Textures\\Missing.blp", 20}, 0, 1.0f) == WXL_E_NOT_FOUND &&
+                  api.hide_object(0xDEAD) == WXL_E_NOT_FOUND && api.reset_object(boarHandle) == WXL_E_NOT_FOUND,
+              "a texture the client makes nothing of is not found, and so is an object gone or one never changed");
+
+        Check(api.hide(WXL_SELECTIONCIRCLE_TARGET, 0) == WXL_OK, "the target's circles are hidden");
+        Check(drawTarget(boar) && drawTarget(friendBear), "a hidden circle is not projected, whatever the reaction");
+        wxl::seam::Unit::RenderPetTargetSelection::Before(&boar);
+        Check(!project(), "the pet's target is another kind, still drawn");
+        wxl::seam::Unit::RenderPetTargetSelection::After(&boar);
+        circles::WorldEnd();
+        Check(api.drawn() == 1 && api.hidden() == 2, "the frame counts two hidden and one drawn");
+
+        const char kRing[] = "Interface\\Mod\\Ring.blp";
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, WXL_SELECTIONCIRCLE_REACTION(WXL_REACTION_HOSTILE),
+                            wxl_str{kRing, static_cast<uint32_t>(sizeof kRing - 1)}, 0x80FF0000u, 2.0f) == WXL_OK,
+              "hostile targets get a look of their own");
+        wxl::seam::Unit::RenderTargetSelection::Before(&boar);
+        const bool swapped = g_circleTexture != &g_gameCircleTexture &&
+                             static_cast<FakeCircleTexture*>(g_circleTexture)->path == kRing;
+        Check(swapped, "the mod's texture is in the game's place while the circle is drawn");
+        Check(!project() && box != gameBox && boxOf()[0] == -2.0f && boxOf()[4] == 2.0f && boxOf()[5] == 2.0f &&
+                  gameBox[0] == -1.0f && colorOf() == 0x80FF0000u && gameColor == 0xFF00FF00u,
+              "the later look wins over the hide: drawn twice as large in the mod's colour, the game's box and colour untouched");
+        gameColor = 0x80123456u;
+        Check(!project() && colorOf() == 0x40FF0000u, "a fading ring of the game's keeps its fade over the mod's alpha");
+        gameColor = 0xFF00FF00u;
+        wxl::seam::Unit::RenderTargetSelection::After(&boar);
+        Check(g_circleTexture == &g_gameCircleTexture, "and the game's texture is back after it");
+        Check(drawTarget(friendBear), "a friendly target is still hidden");
+
+        Check(api.set_object_style(boarHandle, wxl_str{nullptr, 0}, 0, 0.5f) == WXL_OK, "the boar gets a look of its own");
+        Check(!drawTarget(boar) && boxOf()[0] == -0.5f && boxOf()[2] == -1.0f && color == &gameColor &&
+                  g_circleTexture == &g_gameCircleTexture,
+              "an object's look wins over its kind's: half the size across, never lower, in the game's colour and texture");
+        Check(api.hide_object(bearHandle) == WXL_OK && drawTarget(friendBear), "an object's circles are hidden");
+        wxl::seam::Unit::RenderAutoTrackCursor::Before(&friendBear);
+        Check(project(), "every circle of it, the move marker of the unit moving too");
+        wxl::seam::Unit::RenderAutoTrackCursor::After(&friendBear);
+
+        Check(api.set_style(WXL_SELECTIONCIRCLE_TARGET, WXL_SELECTIONCIRCLE_NO_REACTION, wxl_str{nullptr, 0}, 0xFF0000FFu, 0.0f) ==
+                  WXL_OK,
+              "circles under no unit get a colour");
+        wxl::seam::Corpse::RenderTargetSelection::Before(&corpse);
+        Check(!project() && colorOf() == 0xFF0000FFu && box == gameBox, "a corpse's circle has no reaction, and keeps its size");
+        wxl::seam::Corpse::RenderTargetSelection::After(&corpse);
+
+        Check(api.reset_object(boarHandle) == WXL_OK && api.reset_object(bearHandle) == WXL_OK &&
+                  api.reset(WXL_SELECTIONCIRCLE_TARGET, 0) == WXL_OK,
+              "the looks are given back");
+        Check(!drawTarget(boar) && box == gameBox && color == &gameColor && !drawTarget(friendBear) && g_texturesClosed == 1,
+              "the game's circles again, and the mod's texture let go with its last look");
+
+        // Two looks of one texture share it; it goes with the mod.
+        g_texturesClosed = 0;
+        const size_t opened = g_openedTextures.size();
+        api.set_style(WXL_SELECTIONCIRCLE_PET_TARGET, 0, wxl_str{kRing, static_cast<uint32_t>(sizeof kRing - 1)}, 0, 0.0f);
+        api.set_object_style(boarHandle, wxl_str{"interface/mod/RING.blp", 22}, 0, 0.0f);
+        Check(g_openedTextures.size() == opened + 1, "one texture made for one path, however it is spelt");
+        api.hide(WXL_SELECTIONCIRCLE_MOVE_MARKER, 0);
+        circles::ForgetMod(0);
+        Check(g_texturesClosed == 1 && !drawTarget(boar), "a mod's looks and its texture go with it");
+        wxl::seam::Unit::RenderAutoTrackCursor::Before(&boar);
+        Check(!project(), "the move marker is the game's again");
+        wxl::seam::Unit::RenderAutoTrackCursor::After(&boar);
+
+        api.hide(0, 0);
+        circles::Clear();
+        Check(!drawTarget(boar) && g_circleTexture == &g_gameCircleTexture, "the client's end forgets everything");
+        circles::WorldEnd();
+        circles::WorldEnd();
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.hide(0, 0); }).join();
+        Check(fromThread == WXL_E_INVALID && api.drawn() == 0, "off the main thread a change is refused");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&friendBear);
+        wxl::seam::ObjectMgr::ObjDelete::Before(&corpse);
+    }
+
+    // --- wxl.imgui: the contexts, with no device --------------------------------------------------
+
+    void CheckImGuiService()
+    {
+        const wxl_imgui_api& api = wxl::core::services::ImGuiApi();
+        Check(wxl::View(api.version()) == IMGUI_VERSION ";" IMPLOT_VERSION, "the version is Dear ImGui's and ImPlot's");
+        Check(api.context() != nullptr && api.plot_context() != nullptr && api.context() == api.context(),
+              "the contexts are made once, on first use");
+        void* alloc = nullptr;
+        void* release = nullptr;
+        api.allocators(&alloc, &release, nullptr);
+        Check(alloc && release, "with the allocator they were made with");
+        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0),
+              "before a frame was drawn, no message is ImGui's");
+        Check(!wxl::core::services::imgui::BeginFrame(), "with nobody listening, no frame is opened");
+        Check(!wxl::core::services::imgui::WindowMessage(nullptr, 0x0201, 0, 0), "nor is a message ImGui's");
+        const std::vector<wxl_event> raised = wxl::core::seams::RaisedEvents();
+        Check(std::find(raised.begin(), raised.end(), WXL_EV_ImGuiFrame) != raised.end(),
+              "ImGuiFrame is announced as raised, so a mod may subscribe to it");
+    }
+
+    void CheckWorldTrace()
+    {
+        const wxl_world_api& api = wxl::core::services::WorldApi();
+        wxl_vec3             hit{};
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{20, 4, 0}, 0, &hit) == WXL_TRUE && hit.x == 10.0f && hit.y == 2.0f &&
+                  g_traceFlags == WXL_TRACE_CAMERA,
+              "a trace meets the wall where it is, through the camera's mask when given none");
+        Check(api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{5, 0, 0}, WXL_TRACE_LINE_OF_SIGHT, &hit) == WXL_FALSE &&
+                  g_traceFlags == WXL_TRACE_LINE_OF_SIGHT,
+              "a clear way meets nothing, through the mask given");
+        wxl_bool fromThread = WXL_TRUE;
+        std::thread([&] { fromThread = api.trace(wxl_vec3{0, 0, 0}, wxl_vec3{20, 0, 0}, 0, &hit); }).join();
+        Check(fromThread == WXL_FALSE, "off the main thread nothing is met");
+    }
+
+    // --- wxl.input: captures per mod, the wheel kept from the client ---------------------------
+
+    bool g_keepWheel = false;
+    float g_wheel    = 0.0f;
+    void WXL_CALL OnWheel(void*, const void* args)
+    {
+        const wxl_mouse_wheel_args& wheel = *static_cast<const wxl_mouse_wheel_args*>(args);
+        g_wheel += wheel.delta;
+        if (g_keepWheel && wheel.handled) *wheel.handled = WXL_TRUE;
+    }
+
+    void CheckInputService()
+    {
+        const wxl_input_api& api = wxl::core::services::InputApi();
+        Check(api.cursor_captured() == WXL_FALSE, "nobody holds the pointer at first");
+        Check(api.capture_cursor(WXL_TRUE) == WXL_OK && api.capture_cursor(WXL_TRUE) == WXL_OK &&
+                  api.cursor_captured() == WXL_TRUE,
+              "a capture holds the pointer, twice is still one");
+        Check(api.capture_cursor(WXL_FALSE) == WXL_OK && api.cursor_captured() == WXL_FALSE,
+              "giving it back lets it go");
+        api.capture_cursor(WXL_TRUE);
+        wxl::core::services::input::ForgetMod(0);
+        Check(api.cursor_captured() == WXL_FALSE, "a mod's capture goes with it");
+        Check(api.pointer_over_world() == WXL_TRUE, "the pointer over the world is the client's answer");
+        // The harness's window is no window: holding the pointer there does nothing, and lets go.
+        api.capture_cursor(WXL_TRUE);
+        wxl::core::services::input::Present();
+        wxl::core::services::input::Clear();
+        Check(api.cursor_captured() == WXL_FALSE, "the shutdown lets every capture go");
+
+        // A point of the window: the last to capture or move has its point, the earlier's comes back.
+        wxl_vec3 point{};
+        Check(api.capture_point(&point) == WXL_E_NOT_FOUND, "nobody holds the pointer: it is held nowhere");
+        Check(api.capture_cursor_at(1.2, 0.5) == WXL_E_INVALID && api.capture_cursor_at(0.5, std::nan("")) == WXL_E_INVALID &&
+                  api.cursor_captured() == WXL_FALSE,
+              "a point off the window is invalid and captures nothing");
+        Check(api.capture_cursor_at(0.5, 0.375) == WXL_OK && api.cursor_captured() == WXL_TRUE &&
+                  api.capture_point(&point) == WXL_OK && point.x == 0.5f && point.y == 0.375f,
+              "a capture at a point holds it there");
+        const wxl::host::ModHost::ModToken previous = g_host->SwapCurrentMod(7);
+        Check(api.capture_cursor(WXL_TRUE) == WXL_OK && api.capture_point(&point) == WXL_OK && point.y == 0.5f,
+              "a later mod's capture at the centre has the pointer at the centre");
+        g_host->SwapCurrentMod(previous);
+        Check(api.capture_cursor_at(0.25, 0.375) == WXL_OK && api.capture_point(&point) == WXL_OK && point.x == 0.25f,
+              "the first moving its hold has its point again");
+        Check(api.capture_cursor(WXL_FALSE) == WXL_OK && api.capture_point(&point) == WXL_OK && point.y == 0.5f &&
+                  api.cursor_captured() == WXL_TRUE,
+              "and letting go gives the other's back");
+        wxl::core::services::input::ForgetMod(7);
+        Check(api.cursor_captured() == WXL_FALSE, "until it goes too");
+        long px = 0, py = 0;
+        wxl::core::services::input::PixelAt(1920, 1080, 0.5, 0.5, px, py);
+        Check(px == 960 && py == 540, "the centre is the pixel it always was");
+        wxl::core::services::input::PixelAt(1281, 721, 0.5, 0.5, px, py);
+        Check(px == 640 && py == 360, "of an odd size too");
+        wxl::core::services::input::PixelAt(1920, 1080, 0.5, 0.4, px, py);
+        Check(px == 960 && py == 432, "a point above the centre");
+        wxl::core::services::input::PixelAt(1920, 1080, 1.0, 0.0, px, py);
+        Check(px == 1919 && py == 0, "the edges stay on the window");
+
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_MouseWheel, &OnWheel, nullptr, 0);
+        void*     window  = reinterpret_cast<void*>(0x2000);
+        uint32_t  message = 0x020A; // WM_MOUSEWHEEL
+        uintptr_t wparam  = static_cast<uintptr_t>(static_cast<uint16_t>(-240)) << 16;
+        intptr_t  lparam  = 0;
+        intptr_t  answer  = -1;
+        g_wheel           = 0.0f;
+        g_keepWheel       = false;
+        Check(!wxl::seam::Input::WindowProc::Gate(&answer, &window, &message, &wparam, &lparam) && g_wheel == -2.0f,
+              "a turn of the wheel is raised in notches, towards the player negative, and reaches the client");
+        g_keepWheel = true;
+        Check(wxl::seam::Input::WindowProc::Gate(&answer, &window, &message, &wparam, &lparam) && answer == 0,
+              "a MouseWheel handler that writes handled keeps the turn from the client");
         g_host->Events().Unsubscribe(sub);
     }
 
@@ -3601,7 +7406,9 @@ namespace
 
         g_received.clear();
         wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        const bool inWorld = wxl::core::gx::InWorldPass();
         wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(inWorld && !wxl::core::gx::InWorldPass(), "the world's pass is marked from its Before to its After (the Vulkan device leaves its draws out)");
         wxl::seam::SimpleTop::OnLayerRender::After(&top);
         Check(g_received.empty(), "the world pass and the interface's end raise nothing outside a frame");
 
@@ -3618,12 +7425,15 @@ namespace
         wxl::seam::SimpleTop::OnLayerRender::After(&top);
         present();
 
-        const wxl_event order[] = {WXL_EV_FrameBegin, WXL_EV_WorldRenderBegin, WXL_EV_WorldRenderEnd,
-                                   WXL_EV_UiRenderEnd, WXL_EV_FrameEnd};
-        bool inOrder = g_received.size() == 5;
-        for (size_t i = 0; inOrder && i < 5; ++i) inOrder = g_received[i].event == order[i];
-        Check(inOrder, "a frame raises FrameBegin, the world pass, the interface's end and "
-                       "FrameEnd, in that order");
+        const wxl_event order[] = {WXL_EV_FrameBegin,  WXL_EV_WorldRenderBegin, WXL_EV_RenderPoint, WXL_EV_WorldRenderEnd,
+                                   WXL_EV_UiRenderEnd, WXL_EV_RenderPoint,      WXL_EV_FrameEnd};
+        bool inOrder = g_received.size() == 7;
+        for (size_t i = 0; inOrder && i < 7; ++i) inOrder = g_received[i].event == order[i];
+        Check(inOrder, "a frame raises FrameBegin, the world pass with the point after the world, the interface's end, "
+                       "the point after it and FrameEnd, in that order");
+        Check(inOrder && g_received[2].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_WORLD &&
+                  g_received[5].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_UI,
+              "the points are after the world, then after the interface");
 
         uint64_t first = 0;
         if (inOrder)
@@ -3631,7 +7441,8 @@ namespace
             first     = g_received[0].As<wxl_frame_args>().index;
             bool same = first != 0;
             for (const Received& received : g_received)
-                same = same && received.As<wxl_frame_args>().index == first;
+                same = same && (received.event == WXL_EV_RenderPoint ? received.As<wxl_render_point_args>().frame
+                                                                     : received.As<wxl_frame_args>().index) == first;
             Check(same, "and every slot of it carries that frame's index");
         }
 
@@ -3693,6 +7504,77 @@ namespace
         wxl::seam::ConsoleDevice::Initialize::After("World of Warcraft", true, true);
         Check(wxl::core::stages::Reached() == WXL_STAGE_GRAPHICS,
               "one that left a device announces the graphics stage");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"),
+              "without [gx] api = vulkan the device's bring-up loads no Vulkan loader: D3D9 as it was");
+
+        // The table the recompiled client's CGxDeviceVk calls, without [gx] in the settings.
+        const wxl_gx_vk_backend* vk = WarcraftXLGxVulkan();
+        Check(vk && vk->struct_size == sizeof(wxl_gx_vk_backend) && vk->select_api && vk->device_create &&
+                  vk->device_destroy && vk->device_set_window && vk->device_caps && vk->window_size && vk->scene_begin &&
+                  vk->scene_clear && vk->draw && vk->scene_present && vk->device_restore && vk->gamma_changed &&
+                  vk->cursor_changed && vk->cursor_set && vk->pool_memory && vk->pool_resize && vk->pool_destroy &&
+                  vk->tex_create && vk->tex_destroy && vk->simulate_loss && vk->describe && vk->shader_constants &&
+                  vk->shader_create && vk->shader_destroy && vk->tex_lock && vk->tex_unlock && vk->pool_discard &&
+                  vk->pool_written && vk->shader_prewarm && vk->target_set && vk->tex_copy && vk->tex_stretch && vk->query_create &&
+                  vk->query_destroy && vk->query_begin && vk->query_end && vk->query_result &&
+                  vk->device_layout_hash == wxl::engine::CGxDevice::kLayoutHash,
+              "the Vulkan table is whole, with the layout of CGxDevice it reads the engine by");
+        if (vk)
+        {
+            // A device the runtime did not make is not its: every row answers as for no device.
+            alignas(16) unsigned char fakeDevice[sizeof(wxl::engine::CGxDevice)] = {};
+            alignas(16) unsigned char fakePool[sizeof(wxl::engine::CGxPool)]     = {};
+            alignas(16) unsigned char fakeTex[sizeof(wxl::engine::CGxTex)]       = {};
+            char                      said[128]                                  = {};
+            Check(vk->scene_begin(fakeDevice) == WXL_GX_VK_FRAME_LOST && vk->scene_present(fakeDevice) == WXL_GX_VK_FRAME_LOST &&
+                      !vk->pool_memory(fakeDevice, fakePool) && vk->tex_create(fakeDevice, fakeTex, 4, 4, 1) == 0 &&
+                      !vk->tex_lock(fakeDevice, fakeTex, 0, 0, 0, 0, 4, 4, nullptr) &&
+                      vk->shader_create(fakeDevice, fakeTex, 1, "UI:0", nullptr, 0) == 0 &&
+                      vk->tex_copy(fakeDevice, fakeTex, 0, 0, 0, 0, 4, 4, 0, 0) == 0 &&
+                      vk->tex_stretch(fakeDevice, fakeTex, nullptr, nullptr, 0, 0) == 0 && vk->query_create(fakeDevice) == 0 &&
+                      vk->query_begin(fakeDevice, 1) == 0 && vk->query_end(fakeDevice, 1) == 0 &&
+                      vk->query_result(fakeDevice, 1, nullptr) == 0 &&
+                      vk->device_restore(fakeDevice, said, sizeof said) == WXL_E_INVALID &&
+                      vk->device_set_window(fakeDevice, nullptr, said, sizeof said) == WXL_E_INVALID,
+                  "the Vulkan rows refuse a device they did not make");
+            vk->scene_clear(fakeDevice, 3, 0xFF000000u, 0, 0, 16, 16);
+            vk->draw(fakeDevice, nullptr, 0);
+            const float rows[4] = {};
+            vk->shader_constants(fakeDevice, 0, 0, 1, rows);
+            vk->shader_destroy(fakeDevice, fakeTex);
+            vk->tex_unlock(fakeDevice, fakeTex);
+            vk->pool_discard(fakeDevice, fakePool);
+            vk->pool_written(fakeDevice, fakePool, 0, 16);
+            const void*    codes[1] = {rows};
+            const uint32_t sizes[1] = {sizeof rows};
+            vk->shader_prewarm(fakeDevice, codes, sizes, 1);
+            vk->target_set(fakeDevice);
+            vk->query_destroy(fakeDevice, 1);
+            vk->window_size(fakeDevice, 640, 480, 0);
+            vk->gamma_changed(fakeDevice);
+            vk->cursor_changed(fakeDevice);
+            vk->simulate_loss(fakeDevice);
+            vk->describe(fakeDevice, said, sizeof said);
+            Check(std::strcmp(said, "Vulkan: no device") == 0, "and describe it as no device");
+            std::memset(said, 0, sizeof said);
+            Check(vk->device_create(fakeDevice, nullptr, said, sizeof said) == WXL_E_FAILED && said[0] &&
+                      !GetModuleHandleW(L"vulkan-1.dll"),
+                  "a device asked for without a window is refused with a reason, before any Vulkan loader is loaded");
+        }
+        Check(vk && vk->select_api(WXL_GX_API_D3D9) == WXL_GX_API_D3D9 && vk->select_api(WXL_GX_API_D3D9EX) == WXL_GX_API_D3D9EX &&
+                  vk->select_api(WXL_GX_API_VULKAN) == WXL_GX_API_VULKAN,
+              "without [gx] api the client's request stands");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"), "and choosing loads no Vulkan loader either");
+
+        // [gx] api = vulkan with a device made without the renderer's adapter (here, as for an
+        // OpenGL request): said once, with what the client made, and no loader is loaded for it.
+        wxl::core::settings::Settings vulkan;
+        vulkan.gx_api = wxl::core::settings::GxApi::vulkan;
+        char why[512] = {};
+        const wxl::core::gx::Outcome outcome = wxl::core::gx::DeviceReady(vulkan, why, sizeof why);
+        Check(outcome == wxl::core::gx::Outcome::missed && std::strstr(why, "without the renderer"),
+              "[gx] api = vulkan with a device made without the adapter says so");
+        Check(!GetModuleHandleW(L"vulkan-1.dll"), "and loads no Vulkan loader for it");
         wxl::core::stages::Reach(WXL_STAGE_SCRIPT);
         Check(wxl::core::stages::Reached() == WXL_STAGE_SCRIPT, "and script still follows it");
     }
@@ -4281,6 +8163,707 @@ namespace
 
         assets::ReleaseAll();
         assets::ForgetInstall();
+        g_files.clear();
+    }
+
+    // --- the asset bricks: names nobody has, content hashes, overrides, reloads, the relay ------
+
+    /// A FileMissing as a handler saw it, its strings copied while they were valid.
+    struct Missing
+    {
+        std::string path;
+        uint32_t    kind    = 0;
+        bool        open    = false;
+        bool        pending = false;
+    };
+
+    std::vector<Missing> g_missing;
+
+    void WXL_CALL OnFileMissing(void*, const void* data)
+    {
+        const auto& args = *static_cast<const wxl_file_missing_args*>(data);
+        Missing     seen;
+        seen.path    = std::string(args.path.data, args.path.size);
+        seen.kind    = args.kind;
+        seen.open    = args.open == WXL_TRUE;
+        seen.pending = args.pending == WXL_TRUE;
+        g_missing.push_back(seen);
+    }
+
+    std::string Hex(const uint8_t (&md5)[16])
+    {
+        static const char kDigits[] = "0123456789abcdef";
+        std::string       text;
+        for (uint8_t byte : md5)
+        {
+            text += kDigits[byte >> 4];
+            text += kDigits[byte & 0xF];
+        }
+        return text;
+    }
+
+    struct HashAnswer
+    {
+        std::atomic<int> calls{0};
+        wxl_result       result = WXL_E_FAILED;
+        std::string      md5;
+        uint32_t         layer = 0;
+    };
+
+    void WXL_CALL OnHashed(void* user, uint64_t, wxl_result result, const wxl_file_hash* hash)
+    {
+        HashAnswer& answer = *static_cast<HashAnswer*>(user);
+        answer.result      = result;
+        if (hash)
+        {
+            answer.md5   = Hex(hash->md5);
+            answer.layer = hash->layer;
+        }
+        ++answer.calls;
+    }
+
+    /// Pumps the main thread's queue until @p done or a second passes.
+    template <class Done>
+    bool PumpUntil(Done done)
+    {
+        for (int i = 0; i < 200 && !done(); ++i)
+        {
+            wxl::core::services::hashes::Pump();
+            wxl::core::services::relay::Pump();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return done();
+    }
+
+    // A service published through wxl.relay, and a caller of it.
+    struct FakeService
+    {
+        std::vector<wxl_request> received;
+        std::vector<std::string> methods;
+        std::vector<wxl_request> cancelled;
+        bool                     answerAtOnce = false;
+        wxl_relay_endpoint       table{};
+
+        static void WXL_CALL Request(void* user, wxl_request request, wxl_str method, const wxl_value* args,
+                                     uint32_t count)
+        {
+            FakeService& self = *static_cast<FakeService*>(user);
+            self.received.push_back(request);
+            self.methods.push_back(std::string(method.data, method.size));
+            if (!self.answerAtOnce) return;
+            // An echo of its first argument and a number.
+            wxl_value values[2]{};
+            if (count && args[0].type == WXL_VALUE_STRING) values[0] = args[0];
+            values[1].type      = WXL_VALUE_NUMBER;
+            values[1].as.number = 42;
+            wxl::core::services::RelayApi().answer(request, values, 2);
+        }
+
+        static void WXL_CALL Cancelled(void* user, wxl_request request)
+        {
+            static_cast<FakeService*>(user)->cancelled.push_back(request);
+        }
+
+        const wxl_relay_endpoint* Table()
+        {
+            table = wxl_relay_endpoint{sizeof table, this, &Request, &Cancelled};
+            return &table;
+        }
+    };
+
+    struct Reply
+    {
+        int         calls  = 0;
+        wxl_result  result = WXL_E_UNSUPPORTED;
+        std::string first;
+        double      number = 0;
+    };
+
+    void WXL_CALL OnReply(void* user, wxl_request, wxl_result result, const wxl_value* values, uint32_t count)
+    {
+        Reply& reply = *static_cast<Reply*>(user);
+        ++reply.calls;
+        reply.result = result;
+        if (count && values[0].type == WXL_VALUE_STRING) reply.first.assign(values[0].as.string.data, values[0].as.string.size);
+        if (count > 1 && values[1].type == WXL_VALUE_NUMBER) reply.number = values[1].as.number;
+    }
+
+    // --- wxl.texture: textures made from an SVG or a PNG, served to the client ----------------------
+
+    /// A file as the client reads it: opened through its file stack, read whole; "<none>" when
+    /// it does not open.
+    std::vector<uint8_t> ClientRead(const char* path)
+    {
+        void* file = FakeFileOpen(path);
+        if (!file) return {};
+        std::vector<uint8_t> bytes(static_cast<size_t>(FakeFileSize(file)));
+        const uint32_t       got = bytes.empty() ? 0 : FakeFileRead(file, bytes.data(), static_cast<uint32_t>(bytes.size()));
+        FakeFileClose(file);
+        bytes.resize(got);
+        return bytes;
+    }
+
+    /// A pixel of a BLP's first mip, straight: 0xAARRGGBB, or 0 when there is none.
+    uint32_t BlpPixel(const std::vector<uint8_t>& blp, uint32_t x, uint32_t y)
+    {
+        uint32_t       w = 0, h = 0;
+        const uint8_t* bgra = nullptr;
+        if (!wxl::core::imaging::BlpMip(blp, 0, &w, &h, &bgra) || x >= w || y >= h) return 0;
+        const uint8_t* p = bgra + (static_cast<size_t>(y) * w + x) * 4;
+        return (static_cast<uint32_t>(p[3]) << 24) | (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | p[0];
+    }
+
+    wxl_texture_group TextureGroup(const char* id, uint32_t set, uint32_t color, float width, bool visible)
+    {
+        wxl_texture_group group{};
+        group.struct_size = sizeof group;
+        group.id          = Str(id);
+        group.set         = set;
+        group.color       = color;
+        group.width       = width;
+        group.visible     = visible ? WXL_TRUE : WXL_FALSE;
+        return group;
+    }
+
+    wxl_result MakeTexture(const char* source, uint32_t w, uint32_t h, std::vector<wxl_texture_group> groups, uint32_t tint,
+                           wxl_texture& out)
+    {
+        wxl_texture_request request{};
+        request.struct_size = sizeof request;
+        request.source      = Str(source);
+        request.width       = w;
+        request.height      = h;
+        request.groups      = groups.empty() ? nullptr : groups.data();
+        request.group_count = static_cast<uint32_t>(groups.size());
+        request.tint        = tint;
+        out                 = wxl_texture{};
+        out.struct_size     = sizeof out;
+        return wxl::core::services::TextureApi().make(&request, &out);
+    }
+
+    void CheckTexture()
+    {
+        namespace fs      = std::filesystem;
+        namespace texture = wxl::core::services::texture;
+        const wxl_texture_api& api     = wxl::core::services::TextureApi();
+        const wxl_storage_api& storage = wxl::core::services::StorageApi();
+        Check(api.struct_size == sizeof(wxl_texture_api) && api.make && api.stats, "wxl.texture has the layout texture.h declares");
+
+        BuildFakeStack();
+        g_files.clear();
+        texture::Clear();
+        Mute(WXL_EV_FileOpen);
+        Mute(WXL_EV_FileOpened);
+
+        // The owner's reticle shape: an outline group under a fill group, centred on (10, 10.5).
+        const std::string reticle =
+            "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='21' viewBox='0 0 20 21'>"
+            "<g id='outline'><circle cx='10' cy='10.5' r='3' fill='#17120C' stroke='#17120C' stroke-width='2' "
+            "fill-opacity='0.6' stroke-opacity='0.6'/></g>"
+            "<g id='fill'><circle cx='10' cy='10.5' r='3' fill='#F6F6EE'/></g></svg>";
+        Check(storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), reticle.data(), static_cast<uint32_t>(reticle.size()),
+                            0) == WXL_OK,
+              "texture: an add-on's SVG served to read from");
+
+        // --- made, named, served ---
+        wxl_texture made{};
+        const std::vector<wxl_texture_group> red = {
+            TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFFFF4040u, 0, true),
+            TextureGroup("outline", WXL_TEXTURE_SET_COLOR | WXL_TEXTURE_SET_WIDTH, 0x99000000u, 2.0f, true)};
+        Check(MakeTexture("Interface/AddOns/WxlTest/Reticle.svg", 40, 42, red, 0, made) == WXL_OK && !made.reused &&
+                  std::strncmp(made.path, "Interface\\WXL\\WxlTest\\Reticle_40x42_", 35) == 0 &&
+                  std::strcmp(made.path + std::strlen(made.path) - 4, ".blp") == 0,
+              "texture: made under Interface\\WXL\\<add-on>\\<name>_<w>x<h>_<hash>.blp");
+        Check(made.width == 40 && made.height == 42 && made.texture_width == 64 && made.texture_height == 64 &&
+                  made.right == 40.0f / 64.0f && made.bottom == 42.0f / 64.0f,
+              "texture: a 64 x 64 texture, the picture's corner at 40/64, 42/64");
+        const std::string first = made.path;
+        const std::vector<uint8_t> blp = ClientRead(first.c_str());
+        Check(blp.size() == wxl::core::imaging::kBlpHeaderSize + (4096 + 1024 + 256 + 64 + 16 + 4 + 1) * 4u &&
+                  std::memcmp(blp.data(), "BLP2", 4) == 0 && blp[8] == 3 && blp[9] == 8,
+              "texture: the client reads it through its file stack: a raw BLP2, eight bits of alpha, seven levels");
+        // At twice the drawing's size the centre (20, 21) is the fill, recoloured; the outline at
+        // twice its width (4 units, from 1 to 5) covers column 28 (4.25 units out) at 0x99, dark.
+        const uint32_t centre = BlpPixel(blp, 20, 21), ring = BlpPixel(blp, 28, 21), beyond = BlpPixel(blp, 31, 21);
+        Check(centre == 0xFFFF4040u, "texture: the fill group in its colour, ff4040");
+        Check((ring >> 24) >= 0x99 - 12 && (ring >> 24) <= 0x99 + 2 && (ring & 0xFFFFFFu) == 0,
+              "texture: the outline group in its colour (black, alpha 0x99) at its width");
+        Check((beyond >> 24) < 16, "texture: nothing past the outline's width");
+        Check(BlpPixel(blp, 50, 50) >> 24 == 0, "texture: the padding is transparent");
+
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, {red[1], red[0]}, 0, made) == WXL_OK &&
+                  made.reused && first == made.path,
+              "texture: the same request, its groups in any order, answers the same path without drawing again");
+
+        const std::vector<wxl_texture_group> thin = {
+            TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFFFF4040u, 0, true),
+            TextureGroup("outline", WXL_TEXTURE_SET_COLOR | WXL_TEXTURE_SET_WIDTH, 0x99000000u, 0.0f, true)};
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, thin, 0, made) == WXL_OK && first != made.path,
+              "texture: another width is another path");
+        const std::string noOutline = made.path;
+        const std::vector<uint8_t> bare = ClientRead(noOutline.c_str());
+        Check(BlpPixel(bare, 26, 21) >> 24 == 0 && BlpPixel(bare, 20, 21) == 0xFFFF4040u,
+              "texture: width 0 takes the outline off, the fill stays");
+        Check(!ClientRead(first.c_str()).empty(), "texture: the earlier texture is still served");
+
+        const std::vector<wxl_texture_group> blue = {TextureGroup("fill", WXL_TEXTURE_SET_COLOR, 0xFF4040FFu, 0, true),
+                                                     TextureGroup("outline", WXL_TEXTURE_SET_VISIBLE, 0, 0, false)};
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, blue, 0, made) == WXL_OK && first != made.path &&
+                  BlpPixel(ClientRead(made.path), 20, 21) == 0xFF4040FFu && BlpPixel(ClientRead(made.path), 26, 21) >> 24 == 0,
+              "texture: another colour is another path; a hidden group draws nothing");
+
+        // Natural size, and one edge in proportion.
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 0, 0, {}, 0, made) == WXL_OK && made.width == 20 &&
+                  made.height == 21 && made.texture_width == 32 && made.texture_height == 32,
+              "texture: 0 x 0 is the SVG's own size");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 0, {}, 0, made) == WXL_OK && made.width == 40 &&
+                  made.height == 42,
+              "texture: one edge given, the other in proportion");
+
+        // The source changes: a new path; the old one still answers what it was.
+        const std::string changed = reticle.substr(0, reticle.size() - 6) + "<rect x='0' y='0' width='1' height='1'/></svg>";
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), changed.data(), static_cast<uint32_t>(changed.size()), 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 40, 42, red, 0, made) == WXL_OK && !made.reused &&
+                  first != made.path && ClientRead(first.c_str()) == blp,
+              "texture: a source that changed makes a new path; the old path still reads as it was");
+
+        // --- a PNG ---
+        static const uint8_t png[] = {
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x06, 0x00, 0x00, 0x00, 0x72, 0xb6, 0x0d, 0x24, 0x00, 0x00, 0x00, 0x13, 0x49,
+            0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x0c, 0x81, 0x34, 0x08, 0x30, 0x00, 0x00, 0x48,
+            0xc9, 0x08, 0xf8, 0x71, 0xc5, 0x31, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Dots.png"), png, sizeof png, 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {}, 0, made) == WXL_OK && made.width == 2 &&
+                  made.texture_width == 8 && made.right == 0.25f,
+              "texture: a PNG at its own size, in the smallest texture the client makes (8 x 8)");
+        const std::vector<uint8_t> dots = ClientRead(made.path);
+        Check(BlpPixel(dots, 0, 0) == 0xFFFF0000u && BlpPixel(dots, 1, 0) == 0xFF00FF00u && BlpPixel(dots, 0, 1) == 0xFF0000FFu &&
+                  BlpPixel(dots, 1, 1) >> 24 == 0,
+              "texture: its pixels as they were");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {}, 0x80FFFFFFu, made) == WXL_OK &&
+                  BlpPixel(ClientRead(made.path), 0, 0) == 0x80FF0000u,
+              "texture: a tint multiplies it");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Dots.png", 0, 0, {red[0]}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "is a PNG, which has no groups") != nullptr,
+              "texture: groups on a PNG are refused, and say a tint colours it");
+
+        // --- a mod's folder ---
+        const fs::path root = fs::temp_directory_path() / "wxl-harness-texture";
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+        WriteFileAt(root / "Mods" / "wxl.reticles" / "assets" / "dot.svg", reticle);
+        texture::UseModsDirectory(root / "Mods");
+        Check(MakeTexture("Mods\\wxl.reticles\\assets\\dot.svg", 16, 0, {}, 0, made) == WXL_OK &&
+                  std::strncmp(made.path, "Interface\\WXL\\wxl.reticles\\dot_16x17_", 37) == 0,
+              "texture: a file of a mod's folder, named after the mod's folder");
+        Check(MakeTexture(".\\assets\\dot.svg", 16, 0, {}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "no mod is calling") != nullptr,
+              "texture: \".\\\\\" with no mod calling is refused, and says how an add-on names its file");
+
+        // --- refusals ---
+        Check(MakeTexture("Mods\\wxl.reticles\\assets\\none.svg", 16, 16, {}, 0, made) == WXL_E_NOT_FOUND &&
+                  std::strstr(made.reason, "no file") != nullptr,
+              "texture: no such file is not found");
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Notes.txt"), "plain words", 11, 0);
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Notes.txt", 16, 16, {}, 0, made) == WXL_E_UNSUPPORTED &&
+                  std::strstr(made.reason, "neither an SVG nor a PNG") != nullptr,
+              "texture: a file neither SVG nor PNG is unsupported");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 4096, 16, {}, 0, made) == WXL_E_INVALID &&
+                  std::strstr(made.reason, "2048") != nullptr,
+              "texture: a size past 2048 is refused");
+        Check(MakeTexture("Mods\\..\\Wow.exe", 16, 16, {}, 0, made) == WXL_E_INVALID && std::strstr(made.reason, "..") != nullptr &&
+                  MakeTexture("C:\\x.svg", 16, 16, {}, 0, made) == WXL_E_INVALID,
+              "texture: a name going up a folder, or a path of the disk, is refused");
+        Check(MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 16, 16, {red[0], red[0]}, 0, made) == WXL_E_INVALID &&
+                  MakeTexture("Interface\\AddOns\\WxlTest\\Reticle.svg", 16, 16, {TextureGroup("", 1, 0, 0, true)}, 0, made) ==
+                      WXL_E_INVALID,
+              "texture: a group given twice, or with no id, is refused");
+
+        // --- WxlTexture in the interface ---
+        // The fake VM outlives its contexts, unlike the client's: the earlier contexts' globals go.
+        g_vm.closures.clear();
+        g_vm.live = true;
+        wxl::seam::FrameScript::Initialize::After(1, 0);
+        const char* clientNames[] = {"PLAYER_LOGIN"};
+        wxl::seam::FrameScript::CreateEvents::After(clientNames, 1);
+        const auto ranChunk = [&](const char* name, const char* function) {
+            for (const std::string& chunk : g_vm.ran)
+                if (chunk.find(name) == 0 && chunk.find(function) != std::string::npos) return true;
+            return false;
+        };
+        Check(g_vm.closures.count("__wxl_texture") == 1 &&
+                  ranChunk("WarcraftXL\\WxlTexture: ", "function WxlTexture(source, width, height, groups, tint)"),
+              "texture: a context coming up gets WxlTexture, run before the mods hear of it");
+        {
+            // WxlDraw beside it: the native half draws a shape for the next frame, and answers why not.
+            bool drawFound = false;
+            Check(g_vm.closures.count("__wxl_draw") == 1 && ranChunk("WarcraftXL\\WxlDraw: ", "function WxlDraw(shape, style)"),
+                  "draw: a context coming up gets WxlDraw");
+            std::vector<FakeValue> args(22, Number(0));
+            args[0]  = Number(1);  // a circle
+            args[4]  = Number(3);  // its radius
+            args[14] = Number(1);  // flat
+            args[15] = String("");
+            args[16] = Number(0xFF0000);
+            args[17] = Number(1);
+            args[19] = Number(2);
+            std::vector<FakeValue> drawn = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawFound && drawn.size() == 1 && drawn[0].type == WXL_VALUE_BOOL, "draw: WxlDraw's native half draws a circle");
+            args[4] = Number(0);
+            drawn   = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 2 && drawn[0].type == WXL_VALUE_NIL && drawn[1].string.find("invalid") == 0,
+                  "draw: a circle of no radius answers nil and why");
+            // abi 0.1.38's arguments: a textured, modulated, feathered inside and a shadowed line.
+            args.resize(43, Number(0));
+            args[4]  = Number(3);
+            args[18] = Number(0.8);
+            args[22] = Number(-1);
+            args[24] = Number(-1);
+            args[25] = Number(-1);
+            args[27] = Number(0.5);
+            args[28] = Number(1.5);
+            args[29] = Number(1.5);
+            args[31] = String("SPELLS\\CrackedGround.blp");
+            args[40] = Number(2);
+            args[41] = Number(0.5);
+            args.resize(44, Number(0));
+            args[43] = Number(0.35);
+            drawn    = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 1 && drawn[0].type == WXL_VALUE_BOOL, "draw: WxlDraw's native half takes a texture, a blend, a feather and a shadow");
+            args[40] = Number(9);
+            drawn    = CallGlobal("__wxl_draw", args, &drawFound);
+            Check(drawn.size() == 2 && drawn[0].type == WXL_VALUE_NIL, "draw: a blend that is none answers nil and why");
+            wxl::core::services::draw::Clear();
+        }
+        bool found = false;
+        storage.serve(Str("Interface\\AddOns\\WxlTest\\Reticle.svg"), reticle.data(), static_cast<uint32_t>(reticle.size()), 0);
+        std::vector<FakeValue> results =
+            CallGlobal("__wxl_texture",
+                       {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42),
+                        String("fill\tff4040ff\t\t\noutline\t@2566914048\t2\t"), FakeValue{}},
+                       &found);
+        Check(found && results.size() == 5 && results[0].string == first && results[1].number == 40.0 / 64.0 &&
+                  results[3].number == 64.0,
+              "texture: the interface's call answers the path a mod's same request does, then the coordinates and sizes");
+        results = CallGlobal("__wxl_texture",
+                             {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42),
+                              String("outline\t\t0\t\nfill\t#ff4040\t\t"), FakeValue{}},
+                             &found);
+        Check(results.size() == 5 && results[0].string != first, "texture: \"#rrggbb\" and a width alone read");
+        results = CallGlobal("__wxl_texture",
+                             {String("Interface\\AddOns\\WxlTest\\Reticle.svg"), Number(40), Number(42), String("fill\tred\t\t"),
+                              FakeValue{}},
+                             &found);
+        Check(results.size() == 2 && results[0].type == WXL_VALUE_NIL &&
+                  results[1].string.find("group 'fill': \"red\" is not a colour") != std::string::npos,
+              "texture: a bad colour answers nil and a reason naming the group");
+        results = CallGlobal("__wxl_texture", {String(".\\x.svg"), Number(8), Number(8), String(""), FakeValue{}}, &found);
+        Check(results.size() == 2 && results[1].string.find("no mod is calling") != std::string::npos,
+              "texture: an add-on has no \".\\\\\" folder");
+        results = CallGlobal("__wxl_texture", {Number(3)}, &found);
+        Check(results.size() == 2 && results[1].string.find("'source' (argument 1)") != std::string::npos,
+              "texture: a source that is not a name is refused");
+        wxl::seam::FrameScript::Destroy::Before();
+        g_vm.live = false;
+        g_vm.closures.clear();
+
+        // --- the budget ---
+        wxl_texture_stats stats{};
+        stats.struct_size = sizeof stats;
+        Check(api.stats(&stats) == WXL_OK && stats.textures >= 8 && stats.resident == stats.textures && stats.reused >= 2 &&
+                  stats.bytes > 0 && stats.byte_limit == (64ull << 20),
+              "texture: stats count the textures, the ones in memory, their bytes and the budget");
+        const uint64_t madeBefore = stats.made;
+        texture::SetLimits(1, 2048);
+        api.stats(&stats);
+        Check(stats.resident == 0 && stats.bytes == 0 && stats.released >= 8 && stats.textures >= 8,
+              "texture: past the budget the bytes are let go, the names kept");
+        Check(ClientRead(first.c_str()) == blp, "texture: a name let go is drawn again when the client asks, the same bytes");
+        api.stats(&stats);
+        Check(stats.made == madeBefore + 1, "texture: once");
+        texture::SetLimits(64ull << 20, 1);
+        api.stats(&stats);
+        Check(stats.textures == 1 && ClientRead(noOutline.c_str()).empty(),
+              "texture: past the count the least used names are forgotten, and no longer answer");
+
+        texture::Clear();
+        texture::UseModsDirectory(fs::path());
+        Check(ClientRead(first.c_str()).empty(), "texture: cleared, nothing is served");
+        for (const char* name : {"Interface\\AddOns\\WxlTest\\Reticle.svg", "Interface\\AddOns\\WxlTest\\Dots.png",
+                                 "Interface\\AddOns\\WxlTest\\Notes.txt"})
+            storage.unserve(Str(name));
+        fs::remove_all(root, ignored);
+        Unmute(WXL_EV_FileOpen);
+        Unmute(WXL_EV_FileOpened);
+    }
+
+    void CheckAssetBricks()
+    {
+        namespace assets = wxl::core::services::assets;
+        const wxl_storage_api& api = wxl::core::services::StorageApi();
+        Check(api.struct_size >= offsetof(wxl_storage_api, reload_asset) + sizeof(void*),
+              "wxl.storage carries hashes, overrides and reloads");
+
+        BuildFakeStack();
+        g_files.clear();
+        g_files.push_back(FakeFile{"World\\Base.txt", "the client's", 0, false});
+        const wxl_subscription heard = g_host->Events().Subscribe(WXL_EV_FileMissing, &OnFileMissing, nullptr, 0);
+        Mute(WXL_EV_FileOpen);
+        Mute(WXL_EV_FileOpened);
+
+        // --- FileMissing ---
+        g_missing.clear();
+        void* none = FakeFileOpen("Creature\\Nowhere\\Nowhere.m2");
+        Check(!none && g_missing.size() == 1 && g_missing[0].path == "Creature\\Nowhere\\Nowhere.m2" &&
+                  g_missing[0].kind == WXL_ASSET_MODEL && g_missing[0].open && !g_missing[0].pending,
+              "an open no layer answers raises FileMissing: the name, a model, an open");
+        g_missing.clear();
+        Check(FakeFileExists("Interface\\None.toc") == WXL_FALSE && g_missing.size() == 1 && !g_missing[0].open &&
+                  g_missing[0].kind == WXL_ASSET_INTERFACE,
+              "so does an existence check, told apart from an open");
+        g_missing.clear();
+        void* base = FakeFileOpen("World\\Base.txt");
+        FakeFileClose(base);
+        Check(base && g_missing.empty(), "a file some layer has raises nothing");
+        Check(api.exists(Str("Creature\\Nowhere\\Nowhere.m2")) == WXL_FALSE && ReadAll(api, "World\\Nothing.txt") == "<none>" &&
+                  g_missing.empty(),
+              "nor does a mod's own wxl.storage call");
+        {
+            FakeProvider later;
+            later.pending = {"creature\\later\\later.m2"};
+            uint64_t id   = 0;
+            api.add_provider(later.Table(), 0, &id);
+            Check(!FakeFileOpen("Creature\\Later\\Later.m2") && g_missing.size() == 1 && g_missing[0].pending,
+                  "a name a provider answers \"not yet\" for is missing and pending");
+            api.remove_provider(id);
+        }
+        // --- a path of the mod's own, beside the client's ---
+        Check(api.exists(Str("World\\Mine\\Base.txt")) == WXL_FALSE &&
+                  api.serve(Str("World\\Mine\\Base.txt"), "mine", 4, 0) == WXL_OK &&
+                  ReadAll(api, "World\\Mine\\Base.txt") == "mine" && ReadAll(api, "World\\Base.txt") == "the client's",
+              "served at 0 under a new path, the mod's copy lives beside the client's file");
+
+        // --- overrides ---
+        Check(api.override_file(Str("World\\Base.txt"), Str("World\\Mine\\Base.txt")) == WXL_OK &&
+                  ReadAll(api, "World\\Base.txt") == "mine",
+              "an override puts the mod's copy in place of the client's file");
+        Check(FakeFileExists("World\\Ghost.txt") == WXL_FALSE &&
+                  api.override_file(Str("World\\Ghost.txt"), Str("World\\Base.txt")) == WXL_OK &&
+                  FakeFileExists("World\\Ghost.txt") == WXL_TRUE,
+              "and answers the client's existence checks too");
+        {
+            constexpr uint32_t kOther = 9;
+            const uint32_t previous = g_host->SwapCurrentMod(kOther);
+            api.serve(Str("World\\Theirs\\Base.txt"), "theirs", 6, 0);
+            api.override_file(Str("World\\Base.txt"), Str("World\\Theirs\\Base.txt"));
+            const std::string latest = ReadAll(api, "World\\Base.txt");
+            wxl::core::services::storage::RemoveOverridesOf(kOther);
+            assets::ReleaseOf(kOther);
+            g_host->SwapCurrentMod(previous);
+            Check(latest == "theirs" && ReadAll(api, "World\\Base.txt") == "mine",
+                  "the latest of two mods' overrides wins, and its mod going uncovers the earlier");
+        }
+        api.unserve(Str("World\\Mine\\Base.txt"));
+        g_missing.clear();
+        Check(!FakeFileOpen("World\\Base.txt") && g_missing.size() == 1 && g_missing[0].path == "World\\Base.txt",
+              "an override whose copy is gone leaves nothing to read, and FileMissing names the file asked for");
+        Check(api.restore_file(Str("World\\Base.txt")) == WXL_OK && api.restore_file(Str("World\\Base.txt")) == WXL_E_NOT_FOUND &&
+                  api.restore_file(Str("World\\Ghost.txt")) == WXL_OK && FakeFileExists("World\\Ghost.txt") == WXL_FALSE,
+              "restored once; again is not found; the client's answers come back");
+        Check(api.override_file(Str(""), Str("x")) == WXL_E_INVALID &&
+                  api.override_file(Str(std::string(260, 'a').c_str()), Str("x")) == WXL_E_INVALID,
+              "an empty name or one past 259 bytes is refused");
+
+        // --- content hashes ---
+        wxl::core::services::hashes::ForgetCache();
+        wxl_file_hash hash{};
+        hash.struct_size = sizeof hash;
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "264705c71ad404bef10ffa7dfbe2a94b" &&
+                  hash.size == 12 && hash.layer == WXL_FILE_LAYER_ARCHIVE &&
+                  std::string(hash.source.data, hash.source.size) == "Data\\fake.MPQ",
+              "an archive's file hashes to the MD5 of its bytes, its archive named");
+        FileNamed("World\\Base.txt")->bytes = "THE CLIENT'S";
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "264705c71ad404bef10ffa7dfbe2a94b",
+              "a second ask answers from what was kept");
+        Check(api.hash_file(Str("World\\Base.txt"), WXL_HASH_FRESH, &hash) == WXL_OK &&
+                  Hex(hash.md5) == "06489070e9742e6455e883d71adf48a8",
+              "WXL_HASH_FRESH reads it again");
+        api.serve(Str("World\\Mine\\Base.txt"), "mine", 4, 0);
+        Check(api.hash_file(Str("World\\Mine\\Base.txt"), 0, &hash) == WXL_OK && Hex(hash.md5) == "918b81db5e91d031548b963c93845e5b" &&
+                  hash.layer == WXL_FILE_LAYER_SERVED,
+              "served bytes hash as they are served");
+        api.override_file(Str("World\\Base.txt"), Str("World\\Mine\\Base.txt"));
+        Check(api.hash_file(Str("World\\Base.txt"), 0, &hash) == WXL_OK && hash.layer == WXL_FILE_LAYER_SERVED,
+              "an overridden name hashes as what the client would read");
+        api.restore_file(Str("World\\Base.txt"));
+        api.unserve(Str("World\\Mine\\Base.txt"));
+        g_missing.clear();
+        Check(api.hash_file(Str("World\\Nothing.txt"), 0, &hash) == WXL_E_NOT_FOUND && g_missing.empty(),
+              "a name no layer has is not found, and raises nothing");
+        {
+            FakeProvider later;
+            later.pending = {"world\\soon.txt"};
+            uint64_t id   = 0;
+            api.add_provider(later.Table(), 1, &id);
+            Check(api.hash_file(Str("World\\Soon.txt"), 0, &hash) == WXL_E_PENDING, "one a provider has not yet is pending");
+            api.remove_provider(id);
+        }
+        {
+            HashAnswer answer;
+            uint64_t   request = 0;
+            Check(api.hash_file_async(Str("World\\Base.txt"), WXL_HASH_FRESH, &OnHashed, &answer, &request) == WXL_OK &&
+                      request != 0,
+                  "hash_file_async answers a request at once");
+            Check(PumpUntil([&] { return answer.calls.load() > 0; }) && answer.calls.load() == 1 &&
+                      answer.result == WXL_OK && answer.md5 == "06489070e9742e6455e883d71adf48a8",
+                  "and the hash comes later, at the main thread's pump");
+            HashAnswer dropped;
+            constexpr uint32_t kGoing = 9;
+            const uint32_t previous = g_host->SwapCurrentMod(kGoing);
+            api.hash_file_async(Str("World\\Base.txt"), WXL_HASH_FRESH, &OnHashed, &dropped, &request);
+            g_host->SwapCurrentMod(previous);
+            wxl::core::services::hashes::ForgetMod(kGoing);
+            PumpUntil([] { return false; });
+            Check(dropped.calls.load() == 0, "a request of a mod that went is never answered");
+        }
+
+        // --- reloads ---
+        {
+            wxl_asset_reload done{};
+            done.struct_size = sizeof done;
+            Check(api.reload_asset(Str("Textures\\Fake.blp"), &done) == WXL_OK && done.textures == 2 && done.busy == 1,
+                  "a texture is read again in place, one still loading left alone");
+            FakeObject unit;
+            unit.guid   = 0x77;
+            unit.typeId = WXL_OBJECT_UNIT;
+            FakeObject item;
+            item.guid   = 0x78;
+            item.typeId = WXL_OBJECT_ITEM;
+            wxl::core::objects::Service().Track(&unit);
+            wxl::core::objects::Service().Track(&item);
+            g_displayAgain = 0;
+            done           = wxl_asset_reload{sizeof done, 0, 0, 0, 0};
+            Check(api.reload_asset(Str("Character\\Character.MDX"), &done) == WXL_OK && done.models == 1 &&
+                      done.objects == 1 && g_displayAgain == 1,
+                  "a model is dropped from the cache and the unit drawn with it made again, not the item");
+            done = wxl_asset_reload{sizeof done, 0, 0, 0, 0};
+            Check(api.reload_asset(Str("Character\\Character00.skin"), &done) == WXL_OK && done.models == 1,
+                  "a model's skin reloads its model");
+            wxl::core::objects::Service().Untrack(&unit);
+            wxl::core::objects::Service().Untrack(&item);
+            Check(api.reload_asset(Str("Textures\\Loading.blp"), &done) == WXL_E_PENDING && done.busy == 1 &&
+                      api.reload_asset(Str("Interface\\Icons\\Shared.blp"), &done) == WXL_E_UNSUPPORTED && done.busy == 0,
+                  "a texture still loading is pending; one only on the interface's atlas cannot be read again");
+            Check(api.reload_asset(Str("World\\Building.wmo"), &done) == WXL_E_UNSUPPORTED &&
+                      api.reload_asset(Str("Textures\\None.blp"), &done) == WXL_E_NOT_FOUND,
+                  "another kind is unsupported, a texture the client does not hold not found");
+            wxl_result away = WXL_OK;
+            std::thread([&] { away = api.reload_asset(Str("Textures\\Fake.blp"), &done); }).join();
+            Check(away == WXL_E_INVALID, "and only the main thread may ask");
+        }
+
+        // --- the relay ---
+        {
+            namespace relay = wxl::core::services::relay;
+            const wxl_relay_api& rapi = wxl::core::services::RelayApi();
+            constexpr uint32_t kPublisher = 11, kCaller = 12;
+            FakeService service;
+            uint32_t    previous = g_host->SwapCurrentMod(kPublisher);
+            Check(rapi.publish(Str("test.echo"), service.Table()) == WXL_OK && rapi.published(Str("TEST.echo")) == WXL_TRUE,
+                  "a mod publishes a service, found in any case");
+            g_host->SwapCurrentMod(kCaller);
+            Check(rapi.publish(Str("test.echo"), service.Table()) == WXL_E_INVALID && rapi.unpublish(Str("test.echo")) == WXL_E_NOT_FOUND,
+                  "another mod can neither take the name nor take it back");
+
+            Reply       first;
+            wxl_value   arg{};
+            arg.type      = WXL_VALUE_STRING;
+            arg.as.string = Str("hello");
+            wxl_request request = 0;
+            service.answerAtOnce = true;
+            Check(rapi.call(Str("test.echo"), Str("echo"), &arg, 1, &OnReply, &first, &request) == WXL_OK && request &&
+                      service.received.empty() && first.calls == 0,
+                  "a call answers its number at once, and nothing is handed to anyone yet");
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            Check(service.received.size() == 1 && service.methods[0] == "echo" && first.calls == 1 &&
+                      first.result == WXL_OK && first.first == "hello" && first.number == 42,
+                  "the pump hands the request to the service, and its answer to the caller");
+
+            service.answerAtOnce = false;
+            Reply later;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("slow"), nullptr, 0, &OnReply, &later, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            wxl_value value{};
+            value.type      = WXL_VALUE_BOOL;
+            value.as.boolean = WXL_TRUE;
+            wxl_result fromThread = WXL_E_FAILED;
+            std::thread([&] { fromThread = rapi.answer(request, &value, 1); }).join();
+            Check(fromThread == WXL_OK && later.calls == 0, "a service answers later, from a thread of its own");
+            relay::Pump();
+            Check(later.calls == 1 && later.result == WXL_OK && rapi.answer(request, &value, 1) == WXL_E_NOT_FOUND,
+                  "the answer comes at the next pump; a second one is refused");
+
+            Reply failed;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("bad"), nullptr, 0, &OnReply, &failed, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            rapi.fail(request, Str("no such asset"));
+            relay::Pump();
+            Check(failed.calls == 1 && failed.result == WXL_E_FAILED && failed.first == "no such asset",
+                  "a failure reaches the caller with its reason");
+
+            Reply nobody;
+            rapi.call(Str("test.nobody"), Str("x"), nullptr, 0, &OnReply, &nobody, &request);
+            relay::Pump();
+            Check(nobody.calls == 1 && nobody.result == WXL_E_NOT_FOUND, "a name nobody publishes fails as not found");
+
+            Reply cancelled;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("long"), nullptr, 0, &OnReply, &cancelled, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            g_host->SwapCurrentMod(kPublisher);
+            Check(rapi.cancel(request) == WXL_E_NOT_FOUND, "only its caller may cancel a request");
+            g_host->SwapCurrentMod(kCaller);
+            Check(rapi.cancel(request) == WXL_OK, "its caller takes it back");
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            Check(service.cancelled.size() == 1 && service.cancelled[0] == request && rapi.answer(request, nullptr, 0) == WXL_E_NOT_FOUND &&
+                      cancelled.calls == 0,
+                  "the service is told, its answer refused, the caller never answered");
+
+            Reply orphan;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("orphan"), nullptr, 0, &OnReply, &orphan, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            relay::ForgetMod(kCaller);
+            relay::Pump();
+            Check(service.cancelled.size() == 2 && orphan.calls == 0, "a caller that goes cancels its requests");
+
+            Reply gone;
+            g_host->SwapCurrentMod(kCaller);
+            rapi.call(Str("test.echo"), Str("gone"), nullptr, 0, &OnReply, &gone, &request);
+            g_host->SwapCurrentMod(previous);
+            relay::Pump();
+            relay::ForgetMod(kPublisher);
+            relay::Pump();
+            Check(gone.calls == 1 && gone.result == WXL_E_NOT_FOUND && rapi.published(Str("test.echo")) == WXL_FALSE,
+                  "a service whose mod goes fails what it had not answered, and is gone");
+            relay::Clear();
+        }
+
+        Unmute(WXL_EV_FileOpen);
+        Unmute(WXL_EV_FileOpened);
+        g_host->Events().Unsubscribe(heard);
+        assets::ReleaseAll();
+        assets::ForgetInstall();
+        wxl::core::services::hashes::ForgetCache();
         g_files.clear();
     }
 
@@ -5187,6 +9770,13 @@ namespace
                           std::string(zone.real_zone_text.data, zone.real_zone_text.size) };
     }
 
+    /// Refuses a click on a model or a name plate, as a mod without click targeting would.
+    void WXL_CALL RefuseClickOnObjects(void*, const void* args)
+    {
+        const auto* click = static_cast<const wxl_world_click_request_args*>(args);
+        if (click->hit == WXL_WORLD_HIT_OBJECT || click->hit == WXL_WORLD_HIT_NAME_PLATE) *click->refused = WXL_TRUE;
+    }
+
     void CheckWorldZoneMouseoverClick()
     {
         FakeObject boar;
@@ -5278,6 +9868,50 @@ namespace
             Check(args.object == boarHandle && args.point.x == 10.0f && args.point.z == 30.0f && args.button == 0,
                   "with the object, its position, and the left button as 0");
         }
+
+        // The click before the game acts on it: nobody listening, the gate never takes it.
+        Mute(WXL_EV_WorldClickRequest);
+        int      frame  = 0;
+        void*    self   = &frame;
+        uint32_t button = 4;
+        g_clickHit      = FakeClickHit{2, boar.guid, wxl_vec3{10.0f, 20.0f, 31.0f}};
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "WorldFrame.PerformDefaultAction: with nobody listening, the click is the game's");
+        Unmute(WXL_EV_WorldClickRequest);
+        g_received.clear();
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a click nobody refuses goes on to the game");
+        const Received* request = Only(WXL_EV_WorldClickRequest);
+        Check(request != nullptr, "and raises WorldClickRequest once");
+        if (request)
+        {
+            const wxl_world_click_request_args args = request->As<wxl_world_click_request_args>();
+            Check(args.button == WXL_MOUSE_RIGHT && args.hit == WXL_WORLD_HIT_OBJECT && args.object == boarHandle &&
+                      args.object_guid == boar.guid && args.point.z == 31.0f && args.targeting == WXL_FALSE,
+                  "with the right button, the model hit, the unit, its guid and the point");
+        }
+        const wxl_subscription refuse =
+            g_host->Events().Subscribe(WXL_EV_WorldClickRequest, &RefuseClickOnObjects, nullptr, 0);
+        button = 1;
+        Check(wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a handler that refuses a click on a model takes the call: the game does nothing");
+        g_clickHit       = FakeClickHit{1, 0, wxl_vec3{1.0f, 2.0f, 3.0f}};
+        g_spellTargeting = WXL_TRUE;
+        g_received.clear();
+        Check(!wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "the same handler lets a click on the ground through");
+        request = Only(WXL_EV_WorldClickRequest);
+        Check(request && request->As<wxl_world_click_request_args>().hit == WXL_WORLD_HIT_GROUND &&
+                  request->As<wxl_world_click_request_args>().object == WXL_HANDLE_NONE &&
+                  request->As<wxl_world_click_request_args>().button == WXL_MOUSE_LEFT &&
+                  request->As<wxl_world_click_request_args>().targeting == WXL_TRUE,
+              "which says the ground, no object, the left button and a spell waiting for its target");
+        g_clickHit = FakeClickHit{4, boar.guid, wxl_vec3{}};
+        Check(wxl::seam::WorldFrame::PerformDefaultAction::Gate(&self, &button),
+              "a name plate's unit is refused too");
+        g_host->Events().Unsubscribe(refuse);
+        g_clickHit       = FakeClickHit{};
+        g_spellTargeting = WXL_FALSE;
 
         wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
     }
@@ -5386,6 +10020,262 @@ namespace
               "the first value of a variable raises it with an empty previous");
 
         g_host->Events().Unsubscribe(sub);
+    }
+
+    // --- wxl.cvar: variables registered, saved, read back and held ------------------------------
+
+    void CheckCVarService()
+    {
+        namespace cvars = wxl::core::services::cvar;
+        const wxl_cvar_api& api  = wxl::core::services::CVarApi();
+        const auto          str  = [](const char* text) { return wxl_str{text, static_cast<uint32_t>(std::strlen(text))}; };
+        const auto          read = [&](const char* name) {
+            wxl_str out{};
+            return api.get(str(name), &out) == WXL_OK ? std::string(out.data, out.size) : std::string("<none>");
+        };
+        const auto flagsOf = [&](const char* name) {
+            uint32_t out = 0;
+            return api.flags(str(name), &out) == WXL_OK ? out : 0xFFFFFFFFu;
+        };
+        constexpr wxl::host::ModHost::ModToken kMod = 11, kOther = 12;
+        const wxl::host::ModHost::ModToken     previous = g_host->SwapCurrentMod(kMod);
+
+        // Before the client reads Config.wtf: the registration waits.
+        Check(api.register_cvar(str("test_early"), str("5"), WXL_CVAR_SAVED | WXL_CVAR_LATCHED, str("set early")) == WXL_OK,
+              "a variable is registered before the client reads Config.wtf");
+        Check(!FakeFindCVar("test_early") && api.exists(str("TEST_EARLY")) && read("test_early") == "5" &&
+                  api.set(str("test_early"), str("6")) == WXL_E_PENDING &&
+                  flagsOf("test_early") == (WXL_CVAR_SAVED | WXL_CVAR_LATCHED | WXL_CVAR_MOD),
+              "it waits: found without case, its default read, a set answered pending, its flags its own");
+
+        // CVar::Initialize: the registrations made, then the file's lines, then the latch.
+        wxl::seam::ConsoleVar::Initialize::Before("Config.wtf");
+        FakeTableCVar* early = FakeFindCVar("test_early");
+        Check(early && early->defaultValue && std::string(early->defaultValue) == "5" && (early->flags & 0x80000001u) == 0x80000001u &&
+                  !(early->flags & 0x2) && g_cvarHelp["test_early"] && std::string(g_cvarHelp["test_early"]) == "set early",
+              "just before the file is read it is made: default, archived, registered, its help kept, not latched yet");
+        FakeConfigLine("test_early", "7");
+        FakeConfigLine("test_late", "9");
+        FakeConfigLine("test_ranged", "50");
+        FakeConfigLine("test_char", "z");
+        wxl::seam::ConsoleVar::Initialize::After("Config.wtf");
+        Check(read("test_early") == "7" && (early->flags & 0x2), "the saved line reached it, and it latches from now on");
+        Check(!api.exists(str("test_late")) && read("test_late") == "<none>",
+              "a line nobody registered is kept by the client, and found by nobody");
+
+        Check(api.register_cvar(str("test_late"), str("1"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_late") == "9",
+              "a registration after the file was read adopts the saved value");
+        wxl_str fallback{};
+        Check(api.get_default(str("test_late"), &fallback) == WXL_OK && std::string(fallback.data, fallback.size) == "1",
+              "and its default is the registered one");
+
+        // A range: a saved value outside it goes back to the default; every set is held to it.
+        Check(api.register_cvar(str("test_ranged"), str("2"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_ranged") == "50",
+              "a variable with a saved 50");
+        Check(api.set_range(str("test_ranged"), 0.0, 10.0) == WXL_OK && read("test_ranged") == "2",
+              "a range of 0 to 10 sends it back to its default");
+        Check(api.set_range(str("test_ranged"), 5.0, 1.0) == WXL_E_INVALID && api.set_range(str("test_ranged"), 3.0, 10.0) == WXL_E_INVALID,
+              "bounds the wrong way round, or that leave the default out, are refused");
+        Check(api.set(str("test_ranged"), str("11")) == WXL_E_INVALID && api.set(str("test_ranged"), str("abc")) == WXL_E_INVALID &&
+                  api.set_number(str("test_ranged"), 3.5) == WXL_OK && read("test_ranged") == "3.5",
+              "a set outside the range, or no number, is refused; a number inside is written as it reads back");
+        FakeSet(*FakeFindCVar("test_ranged"), "20", true, false, false);
+        Check(read("test_ranged") == "3.5", "the console's set outside the range is refused by the callback");
+        double number = 0.0;
+        Check(api.get_number(str("test_ranged"), &number) == WXL_OK && number == 3.5 && api.get_number(str("test_late"), &number) == WXL_OK &&
+                  number == 9.0,
+              "the values read as numbers");
+
+        // A latched variable: a set waits for the next start.
+        Check(api.set(str("test_early"), str("8")) == WXL_OK && read("test_early") == "7" &&
+                  (flagsOf("test_early") & WXL_CVAR_PENDING) && early->latched && std::string(early->latched) == "8",
+              "a latched set keeps the value and waits, which flags tells");
+
+        // CVarChanged follows a set made through the service.
+        StrWatch                     watch;
+        const wxl_subscription sub = g_host->Events().Subscribe(WXL_EV_CVarChanged, &OnCVar, &watch, 0);
+        Check(api.set(str("test_late"), str("10")) == WXL_OK && watch.calls == 1 && watch.strings[0] == "test_late" &&
+                  watch.strings[1] == "9" && watch.strings[2] == "10",
+              "a set raises CVarChanged with the name, the old and the new value");
+        Check(api.reset(str("test_late")) == WXL_OK && read("test_late") == "1" && watch.calls == 2, "a reset gives the default back");
+        g_host->Events().Unsubscribe(sub);
+
+        // Switches.
+        Check(api.set_bool(str("test_late"), WXL_TRUE) == WXL_OK && read("test_late") == "1", "a switch is written 1");
+        wxl_bool on = WXL_FALSE;
+        api.set(str("test_late"), str("enabled"));
+        Check(api.get_bool(str("test_late"), &on) == WXL_OK && on == WXL_TRUE, "\"enabled\" reads as on, as GetCVarBool reads it");
+        api.set(str("test_late"), str("off"));
+        Check(api.get_bool(str("test_late"), &on) == WXL_OK && on == WXL_FALSE, "and \"off\" as off");
+
+        // Read-only: the console refused, the mod not, another mod refused.
+        Check(api.register_cvar(str("test_ro"), str("1"), WXL_CVAR_READ_ONLY, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_ro")->flags & 0x100) && !(FakeFindCVar("test_ro")->flags & 0x1),
+              "a read-only variable of the session: the console's read-only bit, not archived");
+        FakeSet(*FakeFindCVar("test_ro"), "2", true, false, false);
+        Check(read("test_ro") == "1" && api.set(str("test_ro"), str("3")) == WXL_OK && read("test_ro") == "3",
+              "a set from outside is refused, its mod's goes through");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.set(str("test_ro"), str("4")) == WXL_E_INVALID && read("test_ro") == "3", "another mod cannot set it");
+
+        // Ownership.
+        Check(api.register_cvar(str("TEST_LATE"), str("0"), 0, str("")) == WXL_E_INVALID && api.release(str("test_late")) == WXL_E_NOT_FOUND &&
+                  api.set_range(str("test_late"), 0.0, 1.0) == WXL_E_NOT_FOUND,
+              "another mod can neither register a held name, nor release it, nor range it");
+        g_host->SwapCurrentMod(kMod);
+        Check(api.release(str("test_late")) == WXL_OK && api.release(str("test_late")) == WXL_E_NOT_FOUND, "its mod releases it once");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.register_cvar(str("test_late"), str("0"), WXL_CVAR_SAVED, str("")) == WXL_OK && read("test_late") == "off",
+              "a released variable is registered by another mod, its value kept");
+        g_host->SwapCurrentMod(kMod);
+
+        // The client's own and the interface's.
+        FakeRegisterFull("farclip", "", 0x1, "777", nullptr, false, false);
+        FakeRegisterFull("addonSetting", nullptr, 0, "a", nullptr, true, true);
+        Check(api.register_cvar(str("FARCLIP"), str("1"), 0, str("")) == WXL_E_INVALID && read("farclip") == "777" &&
+                  (flagsOf("farclip") & (WXL_CVAR_CLIENT | WXL_CVAR_SAVED)) == (WXL_CVAR_CLIENT | WXL_CVAR_SAVED),
+              "the client's own variable cannot be registered, and reads as the client's and saved");
+        Check(api.set(str("farclip"), str("800")) == WXL_OK && read("farclip") == "800", "a mod sets a variable of the client");
+        Check(read("addonSetting") == "a" && flagsOf("addonSetting") == WXL_CVAR_INTERFACE,
+              "the interface's RegisterCVar is read, and never saved");
+        FakeRegisterFull("lockedOne", "", 0x4, "x", nullptr, false, false);
+        Check(api.set(str("lockedOne"), str("y")) == WXL_E_INVALID, "a variable the client locked is refused");
+
+        // Malformed names, flags and values.
+        std::string longName(64, 'n');
+        std::string longValue(250, 'v');
+        Check(api.register_cvar(str("a b"), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str(""), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str(longName.c_str()), str("1"), 0, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_q"), str("say \"hi\""), 0, str("")) == WXL_E_INVALID,
+              "a name with a space, empty or too long, and a value with a quote, are refused");
+        Check(api.register_cvar(str("test_f"), str("1"), 0x80u, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_ACCOUNT | WXL_CVAR_CHARACTER, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_LATCHED, str("")) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_f"), str("1"), WXL_CVAR_READ_ONLY | WXL_CVAR_CHARACTER, str("")) == WXL_E_INVALID,
+              "a flag that names nothing, account with character, latched unsaved, read-only per character are refused");
+        Check(api.register_cvar(str("test_long"), str(""), WXL_CVAR_SAVED, str("")) == WXL_OK &&
+                  api.set(str("test_long"), str(longValue.c_str())) == WXL_E_INVALID &&
+                  api.register_cvar(str("test_long2"), str(""), 0, str("")) == WXL_OK &&
+                  api.set(str("test_long2"), str(longValue.c_str())) == WXL_OK,
+              "a value too long for a line of Config.wtf is refused for a saved variable only");
+        Check(api.register_cvar(str("test_seen"), str("1"), WXL_CVAR_PROTECTED | WXL_CVAR_HIDDEN, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_seen")->flags & 0x48) == 0x48 &&
+                  flagsOf("test_seen") == (WXL_CVAR_PROTECTED | WXL_CVAR_HIDDEN | WXL_CVAR_MOD),
+              "protected and hidden reach the client's bits and read back");
+
+        // The account's and the character's: made again when the client deletes them.
+        Check(api.register_cvar(str("test_char"), str("x"), WXL_CVAR_CHARACTER, str("")) == WXL_OK && read("test_char") == "z" &&
+                  (FakeFindCVar("test_char")->flags & 0x31) == 0x21,
+              "a character's variable: archived in the character's category");
+        Check(api.register_cvar(str("test_account"), str("q"), WXL_CVAR_ACCOUNT, str("")) == WXL_OK &&
+                  (FakeFindCVar("test_account")->flags & 0x31) == 0x11,
+              "an account's variable: archived in the account's category");
+        FakeDeleteCategory(0x20);
+        Check(!FakeFindCVar("test_char") && FakeFindCVar("test_account"), "the character leaving the world deletes its own");
+        wxl::seam::ConsoleVar::DeleteCharacterCVars::After();
+        Check(read("test_char") == "x" && (FakeFindCVar("test_char")->flags & 0x80000021u) == 0x80000021u,
+              "it is made again at once, at its default");
+        FakeConfigLine("test_char", "w");
+        Check(read("test_char") == "w", "and the next character's saved value reaches it");
+        FakeDeleteCategory(0x10);
+        wxl::seam::ConsoleVar::DeleteAccountCVars::After();
+        Check(read("test_account") == "q" && FakeFindCVar("test_account"), "likewise the account's at login");
+
+        // A mod's go with it; the variables stay.
+        cvars::ForgetMod(kMod);
+        Check(read("test_early") == "7" && api.release(str("test_early")) == WXL_E_NOT_FOUND, "a mod's variables are released, not removed");
+        g_host->SwapCurrentMod(kOther);
+        Check(api.register_cvar(str("test_early"), str("5"), WXL_CVAR_SAVED, str("")) == WXL_OK && !(FakeFindCVar("test_early")->flags & 0x2),
+              "another mod takes it, with its own flags");
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.set(str("test_late"), str("1")); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a call is refused");
+        g_host->SwapCurrentMod(previous);
+    }
+
+    std::string_view SigText(wxl_str text) { return std::string_view(text.data ? text.data : "", text.size); }
+
+    /// Has every interface taken as signed, as wxl.glue-unlock does with GlueXML and FrameXML.
+    void WXL_CALL AcceptSignature(void*, const void* args)
+    {
+        *static_cast<const wxl_interface_signature_args*>(args)->accepted = WXL_TRUE;
+    }
+
+    /// Keeps the loose interface folders on disk.
+    void WXL_CALL RefuseCleanup(void*, const void* args)
+    {
+        *static_cast<const wxl_interface_cleanup_args*>(args)->refused = WXL_TRUE;
+    }
+
+    void CheckInterfaceSignature()
+    {
+        namespace sig = wxl::seam::FrameXML::CheckSignature;
+        uint8_t        digest[16]{};
+        const char*    toc    = "Interface\\FrameXML\\FrameXML.toc";
+        const char*    extra  = "Interface\\FrameXML\\Bindings.xml";
+        const uint8_t* key    = digest;
+        uint8_t*       out    = digest;
+        int32_t        result = -5;
+
+        g_sigChecks = g_sigDigests = 0;
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+        Mute(WXL_EV_InterfaceSignature);
+        Check(!sig::Gate(&result, &toc, &extra, &key, &out) && g_sigChecks == 0 && result == -5,
+              "FrameXML.CheckSignature: with nobody listening, the client checks alone");
+        Unmute(WXL_EV_InterfaceSignature);
+
+        g_received.clear();
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_MODIFIED &&
+                  g_sigChecks == 1 && g_sigLetThrough && digest[0] == 0xAB,
+              "listened to, the gate has the client judge (its own call let through) and answers the client's verdict");
+        const Received* judged = Only(WXL_EV_InterfaceSignature);
+        Check(judged && SigText(judged->As<wxl_interface_signature_args>().file) == toc &&
+                  SigText(judged->As<wxl_interface_signature_args>().extra) == extra &&
+                  judged->As<wxl_interface_signature_args>().verdict == WXL_INTERFACE_SIGNATURE_MODIFIED,
+              "and raises InterfaceSignature once, with the .toc, the file hashed with it and the verdict");
+
+        const wxl_subscription accept = g_host->Events().Subscribe(WXL_EV_InterfaceSignature, &AcceptSignature, nullptr, 0);
+        std::memset(digest, 0, sizeof digest);
+        result = -5;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED &&
+                  digest[0] == 0xAB && g_sigDigests == 0,
+              "a modified interface a handler accepts answers signed, with the digest the client made");
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MISSING;
+        std::memset(digest, 0, sizeof digest);
+        const char* glue = "Interface\\GlueXML\\GlueXML.toc";
+        const char* none = nullptr;
+        g_received.clear();
+        Check(sig::Gate(&result, &glue, &none, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED &&
+                  digest[0] == 0xCD && g_sigDigests == 1,
+              "one with no .sig answers signed too, its digest made as the client makes it, which it had not");
+        judged = Only(WXL_EV_InterfaceSignature);
+        Check(judged && judged->As<wxl_interface_signature_args>().extra.size == 0 &&
+                  judged->As<wxl_interface_signature_args>().verdict == WXL_INTERFACE_SIGNATURE_MISSING,
+              "GlueXML.toc is hashed alone: its extra file is empty");
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_SIGNED;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_SIGNED && g_sigDigests == 1,
+              "a signed interface stays signed, nothing made again");
+        g_host->Events().Unsubscribe(accept);
+
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_CORRUPT;
+        Check(sig::Gate(&result, &toc, &extra, &key, &out) && result == WXL_INTERFACE_SIGNATURE_CORRUPT && g_sigDigests == 1,
+              "with no handler accepting, the client's verdict stands");
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+
+        namespace cleanup = wxl::seam::AddOns::DeleteInterfaceFiles;
+        Mute(WXL_EV_InterfaceCleanupRequest);
+        Check(!cleanup::Gate(), "AddOns.DeleteInterfaceFiles: with nobody listening, the client clears its folders");
+        Unmute(WXL_EV_InterfaceCleanupRequest);
+        g_received.clear();
+        Check(!cleanup::Gate() && Count(WXL_EV_InterfaceCleanupRequest) == 1,
+              "a request nobody refuses raises InterfaceCleanupRequest and lets the client clear them");
+        const wxl_subscription keep = g_host->Events().Subscribe(WXL_EV_InterfaceCleanupRequest, &RefuseCleanup, nullptr, 0);
+        Check(cleanup::Gate(), "a handler that refuses it takes the call: the folders stay");
+        g_host->Events().Unsubscribe(keep);
     }
 
     void WXL_CALL OnGlueScreen(void* user, const void* args)
@@ -5531,7 +10421,7 @@ namespace
         const wxl_subscription realmSub = g_host->Events().Subscribe(WXL_EV_GlueRealm, &OnRealm, &realms, 0);
         Body realmList;
         realmList.U16(2)
-            .U8(1).U8(0).U8(0x4).Str("Dawnlight").Str("127.0.0.1:8085").F32(1.5f).U8(3).U8(2).U8(1).U8(3).U8(3).U8(5).U16(12340)
+            .U8(1).U8(0).U8(0x4).Str("Test Realm").Str("127.0.0.1:8085").F32(1.5f).U8(3).U8(2).U8(1).U8(3).U8(3).U8(5).U16(12340)
             .U8(0).U8(1).U8(0x2).Str("Old").Str("10.0.0.1:8085").F32(0.0f).U8(0).U8(1).U8(2);
         store = realmList.Store();
         FakeLogin grunt;
@@ -5549,7 +10439,7 @@ namespace
                       first.version_major == 3 && first.version_build == 12340,
                   "the first with its type, flags, population, characters, category, id and version");
             Check(second.index == 1 && second.locked == WXL_TRUE && second.realm_id == 2 && second.version_major == 0 &&
-                      realms.strings.size() == 4 && realms.strings[0] == "Dawnlight" &&
+                      realms.strings.size() == 4 && realms.strings[0] == "Test Realm" &&
                       realms.strings[1] == "127.0.0.1:8085" && realms.strings[2] == "Old",
                   "the second locked and without a version, and the names and addresses");
         }
@@ -7314,6 +12204,66 @@ namespace
         ValidateLink::original = nullptr;
     }
 
+    // --- FrameXML_CheckSignature and DeleteInterfaceFiles, through their detours ---------------
+
+    /// The client's check behind the detour: what runs once the gate lets the call through.
+    __declspec(noinline) int32_t __cdecl FakeCheckOriginal(const char*, const char*, const uint8_t*, uint8_t* digest)
+    {
+        return FakeJudge(digest);
+    }
+
+    uint32_t g_cleared = 0;
+    __declspec(noinline) void __cdecl FakeDeleteOriginal() { ++g_cleared; }
+
+    using SignatureLink = wxl::core::seams::GateOf<wxl::seam::FrameXML::CheckSignature::Convention,
+                                                   wxl::seam::FrameXML::CheckSignature::Signature>::
+        Link<&wxl::seam::FrameXML::CheckSignature::Gate>;
+    using CleanupLink = wxl::core::seams::GateOf<wxl::seam::AddOns::DeleteInterfaceFiles::Convention,
+                                                 wxl::seam::AddOns::DeleteInterfaceFiles::Signature>::
+        Link<&wxl::seam::AddOns::DeleteInterfaceFiles::Gate>;
+    using SignatureFn = int32_t(__cdecl*)(const char*, const char*, const uint8_t*, uint8_t*);
+
+    void CheckInterfaceSignatureDetour()
+    {
+        // As on the stock client: the binding's call to the client's address enters the detour
+        // again, whose gate lets it through to the original.
+        SignatureLink::original = Opaque(&FakeCheckOriginal);
+        static SignatureFn detour;
+        detour = Opaque(reinterpret_cast<SignatureFn>(&SignatureLink::Detour));
+        auto* const before = g_sigClient;
+        g_sigClient = [](const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest) -> int32_t
+        { return detour(toc, extra, modulus, digest); };
+
+        uint8_t digest[16]{};
+        g_sigChecks = g_sigDigests = 0;
+        g_sigVerdict = WXL_INTERFACE_SIGNATURE_MODIFIED;
+        Check(detour("Interface\\FrameXML\\FrameXML.toc", "Interface\\FrameXML\\Bindings.xml", nullptr, digest) ==
+                      WXL_INTERFACE_SIGNATURE_MODIFIED && g_sigChecks == 1,
+              "the FrameXML_CheckSignature detour, listened to: the client judges once, through the detour again");
+        const wxl_subscription accept = g_host->Events().Subscribe(WXL_EV_InterfaceSignature, &AcceptSignature, nullptr, 0);
+        Check(detour("Interface\\FrameXML\\FrameXML.toc", "Interface\\FrameXML\\Bindings.xml", nullptr, digest) ==
+                      WXL_INTERFACE_SIGNATURE_SIGNED && g_sigChecks == 2 && digest[0] == 0xAB,
+              "and answers signed in EAX for a file a handler accepts, the stack as the caller left it");
+        g_host->Events().Unsubscribe(accept);
+        Mute(WXL_EV_InterfaceSignature);
+        Check(detour("Interface\\GlueXML\\GlueXML.toc", nullptr, nullptr, digest) == WXL_INTERFACE_SIGNATURE_MODIFIED &&
+                  g_sigChecks == 3,
+              "with nobody listening, straight to the client's check");
+        Unmute(WXL_EV_InterfaceSignature);
+        g_sigClient = before;
+        SignatureLink::original = nullptr;
+
+        CleanupLink::original = Opaque(&FakeDeleteOriginal);
+        void (*const clear)() = Opaque(reinterpret_cast<void (*)()>(&CleanupLink::Detour));
+        g_cleared = 0;
+        clear();
+        const wxl_subscription keep = g_host->Events().Subscribe(WXL_EV_InterfaceCleanupRequest, &RefuseCleanup, nullptr, 0);
+        clear();
+        g_host->Events().Unsubscribe(keep);
+        Check(g_cleared == 1, "the DeleteInterfaceFiles detour runs the client's clearing unless a handler refuses it");
+        CleanupLink::original = nullptr;
+    }
+
     // --- SFile::OpenEx's two rows, chained as Install links them, and CMapObj::Load ---------------
 
     std::string g_openedName;
@@ -7460,6 +12410,381 @@ namespace
         FindGateLink::original = nullptr;
         wxl::core::services::assets::ReleaseAll();
         wxl::core::services::assets::ForgetInstall();
+    }
+
+    // --- The Vulkan renderer behind the stock client's device (gx/x86/Adapter.cpp) ---------------
+
+    namespace gx86 = wxl::core::gx::x86;
+
+    uint32_t g_stockCalls = 0; ///< calls into the stand-ins of Wow.exe's functions
+
+    /// A stand-in for one function of calls_x86.def, in the row's convention: it answers zero.
+    template <auto Member, class Fn>
+    struct StockStandIn;
+
+    template <auto Member, class R, class Self, class... A>
+    struct StockStandIn<Member, R(__fastcall*)(Self, void*, A...)>
+    {
+        static R __fastcall Call(Self, void*, A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    template <auto Member, class R, class... A>
+    struct StockStandIn<Member, R(__stdcall*)(A...)>
+    {
+        static R __stdcall Call(A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    template <auto Member, class R, class... A>
+    struct StockStandIn<Member, R(__cdecl*)(A...)>
+    {
+        static R __cdecl Call(A...)
+        {
+            ++g_stockCalls;
+            if constexpr (!std::is_void_v<R>) return R{};
+        }
+    };
+
+    /// Blocks a slot's pointer parameters point at: every dword of one points at a zeroed block, so
+    /// a reference to a pointer (CGxShader*&, CGxQuery*&) and an object's pointer members (a
+    /// buffer's pool) read a zeroed object.
+    struct alignas(16) ScratchBlock
+    {
+        uint8_t bytes[0x4000];
+    };
+    std::vector<std::unique_ptr<ScratchBlock>> g_scratch;
+
+    void* Scratch()
+    {
+        g_scratch.push_back(std::make_unique<ScratchBlock>());
+        std::memset(g_scratch.back()->bytes, 0, sizeof(ScratchBlock));
+        void* inner = nullptr;
+        g_scratch.push_back(std::make_unique<ScratchBlock>());
+        std::memset(g_scratch.back()->bytes, 0, sizeof(ScratchBlock));
+        inner = g_scratch.back()->bytes;
+        void* outer = g_scratch[g_scratch.size() - 2]->bytes;
+        for (size_t at = 0; at < sizeof(ScratchBlock); at += sizeof inner) std::memcpy(static_cast<uint8_t*>(outer) + at, &inner, sizeof inner);
+        return outer;
+    }
+
+    template <class T>
+    uint32_t SlotArg()
+    {
+        if constexpr (std::is_pointer_v<T>) return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(Scratch()));
+        else return 0;
+    }
+
+    template <class Sig>
+    struct SlotArgs;
+
+    template <class R, class Self, class... A>
+    struct SlotArgs<R(Self, A...)>
+    {
+        static std::vector<uint32_t> Make() { return {SlotArg<A>()...}; }
+        static constexpr bool kFloat = std::is_floating_point_v<R>;
+    };
+
+    uint32_t g_slotEspBefore = 0, g_slotEspAfter = 0;
+
+    /// Calls a slot as the engine calls a vtable entry: the arguments pushed right to left, `this`
+    /// in ECX, the callee popping them; ESP is read on both sides. A float answer is left on the
+    /// x87 stack by the callee and taken off here.
+    __declspec(noinline) void CallSlot(void* fn, void* self, const uint32_t* args, uint32_t count, int32_t floating)
+    {
+        __asm {
+            mov  dword ptr [g_slotEspBefore], esp
+            mov  ecx, count
+            mov  edx, args
+        push_next:
+            test ecx, ecx
+            jz   pushed
+            mov  eax, dword ptr [edx + ecx * 4 - 4]
+            push eax
+            dec  ecx
+            jmp  push_next
+        pushed:
+            mov  ecx, self
+            xor  edx, edx
+            call fn
+            mov  dword ptr [g_slotEspAfter], esp
+            cmp  floating, 0
+            je   done
+            fstp st(0)
+        done:
+        }
+    }
+
+    // The stock vtable stand-in: its D3D9 DeviceCreate and deleting destructor record their calls.
+    uint32_t g_d3d9Created = 0, g_d3d9Destroyed = 0;
+    int32_t __fastcall StandInD3d9Create(void*, void*, void*, const void*)
+    {
+        ++g_d3d9Created;
+        return 1;
+    }
+    void* __fastcall StandInD3d9Destructor(void* self, void*, uint32_t)
+    {
+        ++g_d3d9Destroyed;
+        return self;
+    }
+    void __fastcall StandInKept(void*, void*) {}
+    /// The client's window where there is no display: a handle no window has, which the system's
+    /// calls on it refuse.
+    void* __stdcall StandInCreateWindow(uint32_t, const char*, const char*, uint32_t, int32_t, int32_t, int32_t, int32_t, void*, void*,
+                                        void*, void*)
+    {
+        return reinterpret_cast<void*>(static_cast<uintptr_t>(0x00F00F00));
+    }
+    intptr_t __cdecl StandInWindowProc(void* window, uint32_t message, uintptr_t wparam, intptr_t lparam)
+    {
+        return DefWindowProcA(static_cast<HWND>(window), message, wparam, lparam);
+    }
+
+    // CGxDevice::ITexWHDStartEnd as Wow.exe's (0x006A5EF0): a mipmapped texture's first level is the
+    // device's base mip level, read through ECX (`mov ecx,[ecx+0x350]` at 0x006A5FAE).
+    void* g_whdThis = nullptr;
+    void __fastcall StandInWHDStartEnd(void* self, void*, void* texture, uint32_t* width, uint32_t* height, uint32_t* base, uint32_t* count)
+    {
+        g_whdThis       = self;
+        const auto* tex = static_cast<const wxl::engine::CGxTex*>(texture);
+        *count          = 7; // a 64x64 texture
+        *base           = self ? std::min<uint32_t>(static_cast<const wxl::engine::CGxDevice*>(self)->m_baseMipLevel, *count - 1) : 99;
+        *width          = tex->m_width >> *base;
+        *height         = tex->m_height >> *base;
+    }
+    void __cdecl StandInTexUser(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, uint32_t* stride, const void** texels)
+    {
+        *stride = 0;
+        *texels = nullptr;
+    }
+
+    // CGxDevice::DeviceCreate as Wow.exe's: the window procedure kept, then DeviceSetFormat through the vtable.
+    int32_t __fastcall StandInBaseDeviceCreate(void* self, void*, void* proc, const void* format)
+    {
+        static_cast<wxl::engine::CGxDevice*>(self)->m_windowProc = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(proc));
+        using Fn = int32_t(__fastcall*)(void*, void*, const void*);
+        return Opaque(reinterpret_cast<Fn>((*static_cast<void* const* const*>(self))[13]))(self, nullptr, format);
+    }
+    int32_t __fastcall StandInBaseSetFormat(void* self, void*, const void* format)
+    {
+        std::memcpy(&static_cast<wxl::engine::CGxDevice*>(self)->m_format, format, sizeof(wxl::engine::CGxFormat));
+        return 1;
+    }
+
+    // The backend table's stand-in: what the adapter asks of the renderer.
+    struct BackendCalls
+    {
+        wxl_result create = WXL_E_FAILED;
+        uint32_t   created = 0, destroyed = 0, scenes = 0, presents = 0, draws = 0, caps = 0;
+        uint32_t   textures = 0, tex_width = 0, tex_levels = 0;
+    } g_backendCalls;
+
+    wxl_gx_vk_backend MakeBackendStandIn()
+    {
+        wxl_gx_vk_backend b{};
+        b.struct_size        = sizeof b;
+        b.device_layout_hash = wxl::engine::CGxDevice::kLayoutHash;
+        b.select_api         = [](int32_t api) -> int32_t { return api; };
+        b.device_create      = [](void*, void*, char* why, uint32_t size) -> wxl_result {
+            ++g_backendCalls.created;
+            if (g_backendCalls.create != WXL_OK) std::snprintf(why, size, "no Vulkan loader (vulkan-1.dll is not installed: the graphics driver brings it)");
+            return g_backendCalls.create;
+        };
+        b.device_destroy     = [](void*) { ++g_backendCalls.destroyed; };
+        b.device_set_window  = [](void*, void*, char*, uint32_t) -> wxl_result { return WXL_OK; };
+        b.device_caps        = [](void*) { ++g_backendCalls.caps; };
+        b.window_size        = [](void*, uint32_t, uint32_t, int32_t) {};
+        b.scene_begin        = [](void*) -> int32_t { return ++g_backendCalls.scenes, WXL_GX_VK_FRAME_OK; };
+        b.scene_clear        = [](void*, uint32_t, uint32_t, int32_t, int32_t, int32_t, int32_t) {};
+        b.draw               = [](void*, const wxl_gx_batch*, int32_t) { ++g_backendCalls.draws; };
+        b.scene_present      = [](void*) -> int32_t { return ++g_backendCalls.presents, WXL_GX_VK_FRAME_OK; };
+        b.device_restore     = [](void*, char*, uint32_t) -> wxl_result { return WXL_OK; };
+        b.gamma_changed      = [](void*) {};
+        b.cursor_changed     = [](void*) {};
+        b.cursor_set         = [](void*) {};
+        b.pool_memory        = [](void*, void*) -> char* { return nullptr; };
+        b.pool_resize        = [](void*, void*) {};
+        b.pool_destroy       = [](void*, void*) {};
+        b.tex_create         = [](void*, void* tex, uint32_t width, uint32_t height, uint32_t levels) -> int32_t {
+            ++g_backendCalls.textures;
+            g_backendCalls.tex_width  = width;
+            g_backendCalls.tex_levels = levels;
+            static int record;
+            static_cast<wxl::engine::CGxTex*>(tex)->m_apiSpecificData = &record;
+            return 1;
+        };
+        b.tex_destroy        = [](void*, void*) {};
+        b.simulate_loss      = [](void*) {};
+        b.describe           = [](void*, char* out, uint32_t size) { std::snprintf(out, size, "stand-in"); };
+        b.shader_constants   = [](void*, int32_t, uint32_t, uint32_t, const float*) {};
+        b.shader_create      = [](void*, void*, int32_t, const char*, const void*, uint32_t) -> int32_t { return 1; };
+        b.shader_destroy     = [](void*, void*) {};
+        b.tex_lock           = [](void*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t*) -> char* { return nullptr; };
+        b.tex_unlock         = [](void*, void*) {};
+        b.pool_discard       = [](void*, void*) {};
+        b.pool_written       = [](void*, void*, uint32_t, uint32_t) {};
+        b.shader_prewarm     = [](void*, const void* const*, const uint32_t*, uint32_t) {};
+        b.target_set         = [](void*) {};
+        b.tex_copy           = [](void*, void*, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.tex_stretch        = [](void*, void*, const int32_t*, const int32_t*, uint32_t, uint32_t) -> int32_t { return 0; };
+        b.query_create       = [](void*) -> uint32_t { return 0; };
+        b.query_destroy      = [](void*, uint32_t) {};
+        b.query_begin        = [](void*, uint32_t) -> int32_t { return 0; };
+        b.query_end          = [](void*, uint32_t) -> int32_t { return 0; };
+        b.query_result       = [](void*, uint32_t, uint32_t*) -> int32_t { return 1; };
+        b.read_pixels        = [](void*, int32_t, int32_t, uint32_t, uint32_t, void*) -> int32_t { return 0; };
+        b.sample_counts      = [](void*) -> uint32_t { return 1; };
+        b.bone_palette       = [](void*, const float*, uint32_t) {};
+        return b;
+    }
+
+    /// The x86 adapter's vtable copy and its thunks, over stand-ins of Wow.exe's functions and of
+    /// the renderer's table: every slot slots.def gives the front pops what the row says, the
+    /// kept ones stay the device's own, a device whose Vulkan cannot start gets its vtable back and
+    /// makes itself as the D3D9 device, and one whose Vulkan starts draws through the table.
+    void CheckGxAdapterX86()
+    {
+        static void* fakeVtable[84];
+        static void* fakeVtableEx[84];
+        for (int i = 0; i < 84; ++i) fakeVtable[i] = fakeVtableEx[i] = reinterpret_cast<void*>(&StandInKept);
+        fakeVtable[8] = fakeVtableEx[8] = reinterpret_cast<void*>(&StandInD3d9Destructor);
+        fakeVtable[10] = fakeVtableEx[10] = reinterpret_cast<void*>(&StandInD3d9Create);
+
+        static gx86::Stock stock;
+#define WXL_BINDING_CALL_X86(domain, name, symbol, ret, conv, params) \
+    stock.domain##_##name = &StockStandIn<&gx86::Stock::domain##_##name, decltype(stock.domain##_##name)>::Call;
+#include "wxl/core/binding/calls_x86.def"
+        stock.GxCall_DeviceCreate    = &StandInBaseDeviceCreate;
+        stock.GxCall_DeviceSetFormat = &StandInBaseSetFormat;
+        stock.GxCall_ITexWHDStartEnd = &StandInWHDStartEnd;
+        static void*    devicePtr = nullptr;
+        static uint8_t  shadow[2 * 0x1008] = {};
+        static void*    uiVertex[2] = {};
+        static void*    uiPixel     = nullptr;
+        static int32_t  adjust[2]   = {};
+        static float    aspect      = 0.0f;
+        static int32_t  minSize[2]  = {320, 240};
+        static uint32_t perBlock[13] = {}, bits[13] = {};
+        stock.device_ptr        = &devicePtr;
+        stock.shadow_constants  = shadow;
+        stock.ui_vertex_shaders = uiVertex;
+        stock.ui_pixel_shader   = &uiPixel;
+        stock.client_adjust     = adjust;
+        stock.win_aspect        = &aspect;
+        stock.win_min_size      = minSize;
+        stock.bytes_per_block   = perBlock;
+        stock.bit_depth         = bits;
+        stock.vtables[0]        = fakeVtable;
+        stock.vtables[1]        = fakeVtableEx;
+        stock.create_window     = &StandInCreateWindow;
+        static const wxl_gx_vk_backend backend = MakeBackendStandIn();
+        gx86::UseForTests(&stock, &backend);
+
+        // The device: a D3D9 device's bytes, its own vtable, render states to read.
+        auto  deviceBlock = std::make_unique<ScratchBlock>();
+        std::memset(deviceBlock->bytes, 0, sizeof(ScratchBlock));
+        void* device = deviceBlock->bytes;
+        auto* engine = static_cast<wxl::engine::CGxDevice*>(device);
+        *static_cast<void***>(device) = fakeVtable;
+        engine->m_appRenderStates.m_data = Scratch();
+        devicePtr = device;
+
+        Check(!gx86::Adopt(Scratch()), "a device whose vtable is neither D3D9's nor D3D9Ex's is not adopted");
+        Check(gx86::Adopt(device) && gx86::Adopted(device) && gx86::VtableOf(device) != fakeVtable,
+              "a D3D9 device is given the adapter's copy of its vtable");
+        void* const* table = gx86::VtableOf(device);
+        uint32_t     kept = 0, front = 0, balanced = 0, unbalanced = 0;
+        std::string  wrong;
+#define WXL_GX_SLOT(index, name, ret, params, pops, kind, d3d9, d3d9_at, d3d9ex, d3d9ex_at) \
+        WXL_GX_SLOT_HARNESS_##kind(index, name, ret, params, pops)
+#define WXL_GX_SLOT_HARNESS_keep(index, name, ret, params, pops) \
+        if (table[index] == fakeVtable[index]) ++kept; else wrong += " kept:" #name;
+#define WXL_GX_SLOT_HARNESS_front(index, name, ret, params, pops)                                                       \
+        if (table[index] != reinterpret_cast<void*>(&gx86::slots::name)) wrong += " front:" #name;                      \
+        else ++front;                                                                                                    \
+        if (index != 8 && index != 10)                                                                                   \
+        {                                                                                                                \
+            const std::vector<uint32_t> args = SlotArgs<ret params>::Make();                                            \
+            if (std::getenv("WXL_VK_TRACE")) std::printf("     slot %s\n", #name);                                     \
+            CallSlot(table[index], device, args.data(), static_cast<uint32_t>(args.size()), SlotArgs<ret params>::kFloat); \
+            if (g_slotEspBefore == g_slotEspAfter && args.size() * 4 == pops) ++balanced;                                \
+            else ++unbalanced, wrong += " esp:" #name;                                                                   \
+        }
+#include "wxl/gx/slots.def"
+#undef WXL_GX_SLOT_HARNESS_keep
+#undef WXL_GX_SLOT_HARNESS_front
+        std::printf("     x86 adapter: %u slot(s) kept, %u taken by the front, %u called and balanced%s\n", kept, front, balanced,
+                    wrong.c_str());
+        Check(kept == 27 && front == 57 && wrong.empty(), "the copy holds the device's own entries where slots.def keeps them, the "
+                                                          "adapter's where the front takes them");
+        Check(balanced == 55 && unbalanced == 0, "each slot taken, called as a vtable entry, pops what its row says and leaves ESP as found");
+
+        // Vulkan cannot start: the device is the D3D9 device it was made as again.
+        g_backendCalls = BackendCalls{};
+        g_d3d9Created  = 0;
+        auto* format   = static_cast<wxl::engine::CGxFormat*>(Scratch());
+        std::memset(format, 0, sizeof *format);
+        format->m_window = 1;
+        format->m_size   = {640, 480};
+        uint32_t args[2] = {static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&StandInWindowProc)), static_cast<uint32_t>(reinterpret_cast<uintptr_t>(format))};
+        CallSlot(table[10], device, args, 2, 0);
+        Check(g_slotEspBefore == g_slotEspAfter && gx86::VtableOf(device) == fakeVtable && !gx86::AdoptedDevice() && g_d3d9Created == 1,
+              "Vulkan that cannot start gives the device its own vtable back and its D3D9 DeviceCreate makes it, with the same format");
+        Check(g_backendCalls.created == 1, "after the renderer was asked for the device once, on the client's window");
+
+        // Vulkan starts: the device draws through the table, and goes with it.
+        Check(gx86::Adopt(device), "the device is adopted again");
+        g_backendCalls        = BackendCalls{};
+        g_backendCalls.create = WXL_OK;
+        CallSlot(table[10], device, args, 2, 0);
+        if (g_backendCalls.created && gx86::AdoptedDevice() == device)
+        {
+            Check(g_slotEspBefore == g_slotEspAfter && g_backendCalls.caps >= 1 && g_backendCalls.scenes == 1 && engine->m_context == 1,
+                  "a device whose Vulkan starts opens its first frame through the table");
+            wxl_gx_batch batch{};
+            uint32_t     drawArgs[2] = {static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&batch)), 3};
+            CallSlot(table[42], device, drawArgs, 2, 0);
+            CallSlot(table[38], device, nullptr, 0, 0);
+            Check(g_backendCalls.draws == 1 && g_backendCalls.presents == 1 && g_backendCalls.scenes == 2,
+                  "its draws and presents reach the table, and the next frame opens");
+
+            // A mipmapped texture bound for the first time: made with every level from the device's
+            // base mip, which CGxDevice::ITexWHDStartEnd reads through `this`.
+            auto* tex                 = static_cast<wxl::engine::CGxTex*>(Scratch());
+            std::memset(tex, 0, sizeof *tex);
+            tex->m_width              = 64;
+            tex->m_height             = 64;
+            tex->m_flags.m_filter     = 4; // trilinear: mips
+            tex->m_needsUpdate        = 1;
+            tex->m_needsCreation      = 1;
+            tex->m_userFunc           = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&StandInTexUser));
+            engine->m_baseMipLevel    = 0;
+            g_whdThis                 = nullptr;
+            uint32_t texArg           = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(tex));
+            CallSlot(table[0], device, &texArg, 1, 0);
+            Check(g_slotEspBefore == g_slotEspAfter && g_whdThis == device && g_backendCalls.textures == 1 &&
+                      g_backendCalls.tex_levels == 7 && g_backendCalls.tex_width == 64 && !tex->m_needsCreation,
+                  "a texture bound the first time is made from the device's base mip with all its levels (ITexWHDStartEnd given `this`)");
+            uint32_t flags = 0;
+            g_d3d9Destroyed = 0;
+            CallSlot(table[8], device, &flags, 1, 0);
+            Check(g_slotEspBefore == g_slotEspAfter && g_backendCalls.destroyed == 1 && g_d3d9Destroyed == 1 &&
+                      gx86::VtableOf(device) == fakeVtable && !gx86::AdoptedDevice(),
+                  "deleting it releases the Vulkan device, gives back its vtable and runs its own destructor");
+        }
+        else
+        {
+            std::printf("     (no window could be made here: the Vulkan path past DeviceSetFormat is the owner's to see)\n");
+            Check(gx86::VtableOf(device) == fakeVtable, "and without a window the device falls back as above");
+        }
+        gx86::UseForTests(nullptr, nullptr);
+        g_scratch.clear();
     }
 #endif
 }
@@ -8429,6 +13754,20 @@ namespace
         if (call->side == WXL_POINT_REPLACE) PointApi().call_original(call);
     }
 
+    void CheckEngineService()
+    {
+        const wxl_engine_api& engine = wxl::core::services::EngineApi();
+        uint64_t              hash   = 0;
+        Check(engine.struct_size == sizeof(wxl_engine_api) && engine.layout("CM2Shared", &hash) == WXL_OK && hash != 0,
+              "wxl.engine answers a type's layout hash");
+        uint64_t again = 0;
+        Check(engine.layout("CGxDevice::TextureTarget", &again) == WXL_OK &&
+                  engine.layout("CGxDevice_TextureTarget", &hash) == WXL_OK && again == hash,
+              "by the fork's name or the headers' one");
+        Check(engine.layout("CNoSuchType", &hash) == WXL_E_NOT_FOUND && engine.layout(nullptr, &hash) == WXL_E_INVALID,
+              "and refuses a type it does not describe or no name");
+    }
+
     void CheckEveryPoint()
     {
         const wxl_point_api& api = PointApi();
@@ -8468,19 +13807,26 @@ namespace
                   (camera.flags & WXL_POINT_ON_X86) && (camera.flags & WXL_POINT_ON_X64),
               "the camera point: its name, lowered signature, two arguments, stable, replaceable, on both runtimes");
         const wxl_point_info& finish = infos[pts::kCM2Shared_FinishLoading];
-        Check(!(finish.flags & WXL_POINT_ON_X86) && (finish.flags & WXL_POINT_ON_X64) && !(finish.flags & WXL_POINT_STABLE),
-              "CM2Shared::FinishLoading is provisional and on the recompiled client only");
+        Check((finish.flags & WXL_POINT_ON_X86) && (finish.flags & WXL_POINT_ON_X64) && !(finish.flags & WXL_POINT_STABLE),
+              "CM2Shared::FinishLoading is provisional and on both runtimes (Wow.exe has it at 0x0083CF00)");
+        const wxl_point_info& init = infos[pts::kM2Init_uint8_t_uint32_t_M2Data];
+        Check(std::string_view(init.name.data, init.name.size) == "M2Init(uint8_t*,uint32_t,M2Data&)" &&
+                  std::string_view(init.signature.data, init.signature.size) == "i32(ptr,u32,ptr)" &&
+                  (init.flags & WXL_POINT_ON_X86) && (init.flags & WXL_POINT_ON_X64),
+              "M2Init(uint8_t*,uint32_t,M2Data&): an overload named by its types, its reference an address, on both "
+              "runtimes (de-inlined on x86)");
 
         uint32_t id = 0;
         Check(api.find("No::SuchPoint", &id) == WXL_E_NOT_FOUND, "find: a name the table does not hold is not_found");
 #if defined(_M_IX86)
-        Check(api.find("CM2Shared::FinishLoading", &id) == WXL_E_UNSUPPORTED &&
-                  std::string_view(finish.absent.data, finish.absent.size).find("x64 only") == 0,
-              "find: an inlined function is unsupported on x86, and list says `x64 only` and why");
-        Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED,
-              "find: outside Wow.exe 12340 no x86 point is there (the harness is not the client)");
+        Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED &&
+                  api.find("M2Init(uint8_t*,uint32_t,M2Data&)", &id) == WXL_E_UNSUPPORTED,
+              "find: outside Wow.exe 12340 no x86 point is there (the harness is not the client), a de-inlined "
+              "one included");
         PlaceStandIns();
         Check(api.find("CGCamera::UpdateCallback", &id) == WXL_OK, "find: placed on stand-ins, the x86 points are there");
+        Check(api.find("M2Init(uint8_t*,uint32_t,M2Data&)", &id) == WXL_OK && id == pts::kM2Init_uint8_t_uint32_t_M2Data + 1,
+              "find: a de-inlined point is there once its parent is");
 #else
         Check(api.find("CGCamera::UpdateCallback", &id) == WXL_E_UNSUPPORTED,
               "find: before the client hands its table, no x64 point is there");
@@ -8744,6 +14090,152 @@ namespace
               "a compiled function's prologue passes");
     }
 
+    // --- De-inlining: a parent's recompiled body, in which an inlined function is real --------
+
+    /// The parent as Wow.exe has it: the child's work copied into it, no call to see.
+    __declspec(noinline) int32_t __fastcall StandInFinish(void* self, void*)
+    {
+        g_sink = g_sink + 6;
+        return static_cast<int32_t>(reinterpret_cast<uintptr_t>(self) & 0xFF) + 5;
+    }
+
+    struct StandInModel
+    {
+        uint32_t flags;
+        uint32_t size;
+        uint8_t  bytes[16];
+    };
+
+    int g_childBodies = 0;
+
+    /// The child as the fork writes it, and as extract.py --runtime writes its head.
+    __declspec(noinline) int32_t __cdecl TestChildBody(uint8_t* base, uint32_t size, StandInModel& data)
+    {
+        ++g_childBodies;
+        data.flags |= 0x100;
+        return base == data.bytes && size == data.size ? 1 : 0;
+    }
+
+    __declspec(noinline) int32_t __cdecl TestChild(uint8_t* base, uint32_t size, StandInModel& data)
+    {
+        if (!wxl::core::deinlined::Armed(pts::kM2Init_uint8_t_uint32_t_M2Data)) return TestChildBody(base, size, data);
+        return wxl::core::deinlined::Enter<pts::kM2Init_uint8_t_uint32_t_M2Data>(&TestChildBody, base, size, &data);
+    }
+
+    /// The parent recompiled: the same work, the child called.
+    __declspec(noinline) int32_t __fastcall TestFinishBody(void* self, void*)
+    {
+        StandInModel* model = static_cast<StandInModel*>(self);
+        g_sink           = g_sink + 60;
+        return TestChild(model->bytes, model->size, *model) ? 1000 + static_cast<int32_t>(model->size) : 0;
+    }
+
+    /// The second parent as Wow.exe has it (a low-priority sequence read): the child copied in too.
+    __declspec(noinline) int32_t __fastcall StandInSequence(void* self, void*, uint32_t index, uint8_t*, uint32_t)
+    {
+        g_sink = g_sink + 7;
+        return static_cast<int32_t>(reinterpret_cast<uintptr_t>(self) & 0xFF) + static_cast<int32_t>(index);
+    }
+
+    /// The second parent recompiled: the child called, and the sequence's own work after it.
+    __declspec(noinline) int32_t __fastcall TestSequenceBody(void* self, void*, uint32_t index, uint8_t*, uint32_t)
+    {
+        StandInModel* model = static_cast<StandInModel*>(self);
+        g_sink           = g_sink + 70;
+        if (!TestChild(model->bytes, model->size, *model)) return 0;
+        model->flags |= 0x200;
+        return 2000 + static_cast<int32_t>(index);
+    }
+
+    /// A function too short to detour: where the second parent is put to make its body refused.
+    const uint8_t kTinyParent[16] = {0x33, 0xC0, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC};
+
+    int g_childSeen = 0;
+    uint32_t g_childSize = 0;
+    void WXL_CALL ChildBefore(wxl_point_call* call, void*)
+    {
+        ++g_childSeen;
+        g_childSize = *static_cast<uint32_t*>(call->args[1]);
+        StandInModel* model = *static_cast<StandInModel**>(call->args[2]);
+        model->flags |= 0x1; // a write through the reference reaches the model
+    }
+
+    void WXL_CALL ChildReplace(wxl_point_call* call, void*)
+    {
+        PointApi().call_original(call);
+        *static_cast<int32_t*>(call->result) = 0; // refuse the file
+    }
+
+    int g_parentSeen = 0;
+    void WXL_CALL ParentBefore(wxl_point_call*, void*) { ++g_parentSeen; }
+
+    void CheckDeinlined()
+    {
+        namespace dei               = wxl::core::deinlined;
+        const wxl_point_api& api    = PointApi();
+        const uint32_t       child  = pts::kM2Init_uint8_t_uint32_t_M2Data;
+        const uint32_t       parent = pts::kCM2Shared_FinishLoading;
+        const uint32_t       body   = dei::kParent_CM2Shared_FinishLoading;
+        const uint32_t       second = dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t;
+        using FinishFn              = int32_t(__thiscall*)(void*);
+        using SequenceFn            = int32_t(__thiscall*)(void*, uint32_t, uint8_t*, uint32_t);
+        const FinishFn   finish     = Opaque(reinterpret_cast<FinishFn>(&StandInFinish));
+        const SequenceFn sequence   = Opaque(reinterpret_cast<SequenceFn>(&StandInSequence));
+        StandInModel      model{0, 9, {}};
+        uint8_t           buffer[8] = {};
+        const int32_t     self      = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&model) & 0xFF);
+
+        g_childBodies = g_childSeen = g_parentSeen = 0;
+        Check(finish(&model) == self + 5 && sequence(&model, 3, buffer, sizeof buffer) == self + 3 &&
+                  !pts::x86::BodyInPlace(body) && !pts::x86::BodyInPlace(second) && g_childBodies == 0,
+              "x86: with no handler on the de-inlined point, both parents run Wow.exe's own bodies");
+
+        // Both parents or none: one that cannot be detoured gives the other back.
+        pts::x86::PlaceParent(second, reinterpret_cast<uintptr_t>(kTinyParent), 3);
+        const uint32_t refused = Attach(child, WXL_POINT_BEFORE, &ChildBefore, nullptr);
+        Check(!refused && !pts::x86::BodyInPlace(body) && !wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)),
+              "x86: when one parent's body cannot be put in place, the point is not attached and the other "
+              "parent is given back");
+        pts::x86::PlaceParent(second, Address(&StandInSequence), 0);
+
+        const uint32_t before = Attach(child, WXL_POINT_BEFORE, &ChildBefore, nullptr);
+        Check(before && pts::x86::BodyInPlace(body) && pts::x86::BodyInPlace(second),
+              "x86: the de-inlined point's first handler puts the recompiled body of each of its parents in place");
+        Check(finish(&model) == 1009 && g_childBodies == 1 && g_childSeen == 1 && g_childSize == 9 &&
+                  model.flags == 0x101,
+              "x86: the parent now runs its recompiled body, in which the child is a call: its Before sees the "
+              "arguments, writes through the reference, and the child's body runs");
+        model.flags = 0x100;
+        Check(sequence(&model, 3, buffer, sizeof buffer) == 2003 && g_childBodies == 2 && g_childSeen == 2 &&
+                  model.flags == 0x301,
+              "x86: the second parent, a function that is no point, runs its recompiled body too: the child fires "
+              "from it as well, with the stack as its caller left it");
+        g_childBodies = 1;
+        g_childSeen   = 1;
+        model.flags   = 0x101;
+
+        const uint32_t onParent = Attach(parent, WXL_POINT_BEFORE, &ParentBefore, nullptr);
+        Check(onParent && finish(&model) == 1009 && g_parentSeen == 1 && g_childSeen == 2,
+              "x86: the parent's own point still runs in front of the recompiled body");
+
+        const uint32_t replace = Attach(child, WXL_POINT_REPLACE, &ChildReplace, nullptr);
+        Check(replace && finish(&model) == 0 && g_childBodies == 3,
+              "x86: a Replace on the de-inlined point changes what the parent sees (the file refused)");
+        api.detach(replace);
+
+        api.detach(before);
+        Check(!pts::x86::BodyInPlace(body) && !pts::x86::BodyInPlace(second),
+              "x86: its last handler gone, both recompiled bodies leave");
+        g_childBodies = 0;
+        Check(finish(&model) == self + 5 && sequence(&model, 3, buffer, sizeof buffer) == self + 3 &&
+                  g_childBodies == 0 && g_parentSeen == 3,
+              "x86: both parents run Wow.exe's bodies again, the first one's own point still attached");
+        api.detach(onParent);
+        Check(!wxl::hook::Armed(reinterpret_cast<void*>(&StandInFinish)) &&
+                  !wxl::hook::Armed(reinterpret_cast<void*>(&StandInSequence)),
+              "x86: and with nothing left neither function is detoured");
+    }
+
     void CheckPointDetours()
     {
         const wxl_point_api& api = PointApi();
@@ -8821,6 +14313,13 @@ namespace
         pts::x86::Place(pts::kvFrameScript_SignalEvent, Address(&StandInSignal), 0);
         pts::x86::Place(pts::kNetClient_ProcessMessage, Address(&StandInProcess), 0);
         pts::x86::AddSite(pts::kCGCamera_UpdateCallback, Address(&InlinedCamera), "[esp+4],[esp+8]");
+        pts::x86::Place(pts::kCM2Shared_FinishLoading, Address(&StandInFinish), 0);
+        namespace dei = wxl::core::deinlined;
+        pts::x86::PlaceBody(dei::kParent_CM2Shared_FinishLoading, reinterpret_cast<void*>(&TestFinishBody));
+        pts::x86::PlaceParent(dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t,
+                              Address(&StandInSequence), 0);
+        pts::x86::PlaceBody(dei::kParent_CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t,
+                            reinterpret_cast<void*>(&TestSequenceBody));
     }
 }
 #endif
@@ -8874,6 +14373,109 @@ void CheckClientError()
     Check(text.find("session end: fatal error (#134 0x85100086: Invalid function pointer: ") != std::string::npos,
           "the session ends on it");
     Check(text.find("second") == std::string::npos, "a second fatal error writes nothing: one report");
+}
+
+/// [engine] animate_threads: a scene's models animated as the client does it (its main thread
+/// every other model, its one worker the others, woken by an event and waited for by another)
+/// and by the gates on 2, 4 and 8 threads; each model's work a chain of 4x4 products per bone.
+void BenchAnimate()
+{
+    using Clock = std::chrono::steady_clock;
+    namespace animate = wxl::core::tuning::animate;
+    printf("\nanimate_threads (%s; main-thread ms per frame, median of 200):\n", sizeof(void*) == 8 ? "x64" : "x86");
+
+    struct Stock
+    {
+        HANDLE         start = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE         done  = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        FakeAnimScene* scene = nullptr;
+        static unsigned long __stdcall Main(void* p)
+        {
+            auto& self = *static_cast<Stock*>(p);
+            for (;;)
+            {
+                WaitForSingleObject(self.start, INFINITE);
+                // CM2Scene::AnimateThread: the second, fourth... model.
+                for (FakeAnimModel* m = self.scene->head ? self.scene->head->next : nullptr; m; m = m->next ? m->next->next : nullptr)
+                    if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), self.scene);
+                SetEvent(self.done);
+            }
+        }
+    };
+    static Stock stock;
+    CloseHandle(CreateThread(nullptr, 0, &Stock::Main, &stock, 0, nullptr));
+
+    int   cacheObject = 0;
+    void* cache       = &cacheObject;
+    auto  median      = [](std::vector<double>& v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    for (const auto& load : {std::pair<uint32_t, uint32_t>{0, 400}, {40, 150}, {80, 300}, {80, 600}, {400, 300}})
+    {
+        const uint32_t bones = load.first, models = load.second;
+        AnimScene      a(models, 6, bones);
+        std::vector<double> single, client, gated[3];
+        for (int frame = 0; frame < 220; ++frame)
+        {
+            Clock::time_point t0 = Clock::now();
+            for (FakeAnimModel& m : a.models)
+                if (!m.parent) FakeAnimateModel(static_cast<FakeM2Model*>(&m), &a.scene);
+            if (frame >= 20) single.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            t0          = Clock::now();
+            stock.scene = &a.scene;
+            SetEvent(stock.start);
+            for (FakeAnimModel* m = a.scene.head; m; m = m->next ? m->next->next : nullptr)
+                if (!m->parent) FakeAnimateModel(static_cast<FakeM2Model*>(m), &a.scene);
+            WaitForSingleObject(stock.done, INFINITE);
+            if (frame >= 20) client.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            const uint32_t counts[3] = {2, 4, 8};
+            for (int k = 0; k < 3; ++k)
+            {
+                animate::SetThreadsForTests(counts[k]);
+                t0 = Clock::now();
+                a.Frame(cache);
+                if (frame >= 20) gated[k].push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            }
+        }
+        printf("  %3u models, %2u bones: one thread %.3f ms, the client's two %.3f; the gates on 2 threads %.3f, 4 %.3f, 8 %.3f\n", models,
+               bones, median(single), median(client), median(gated[0]), median(gated[1]), median(gated[2]));
+    }
+    animate::SetThreadsForTests(0);
+}
+
+/// [engine] trim_alloc: SMemAlloc and SMemFree's heap work, a block allocated and one freed, with
+/// the CRT heap's HeapSize after each (as Wow.exe) and without (the call taken out).
+void BenchTrimAlloc()
+{
+    using Clock = std::chrono::steady_clock;
+    HANDLE   heap = HeapCreate(0, 0x1000, 0); // _heap_init's
+    void*    live[4096] = {};
+    uint32_t seed = 1;
+    volatile SIZE_T sink = 0;
+    printf("\ntrim_alloc (%s; ns per block allocated and freed, 2,000,000 of 8 to 520 bytes):\n", sizeof(void*) == 8 ? "x64" : "x86");
+    for (int with = 1; with >= 0; --with)
+    {
+        const Clock::time_point t0 = Clock::now();
+        const int               n  = 2000000;
+        for (int i = 0; i < n; ++i)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            const uint32_t slot = (seed >> 8) & 4095;
+            const SIZE_T   size = ((((seed >> 20) & 0x1FF) + 8) + 7) & ~SIZE_T{7};
+            if (live[slot])
+            {
+                if (with) sink = HeapSize(heap, 0, live[slot]);
+                HeapFree(heap, 0, live[slot]);
+            }
+            live[slot] = HeapAlloc(heap, 0, size);
+            if (with) sink = HeapSize(heap, 0, live[slot]);
+        }
+        printf("  %-46s %8.1f ns\n", with ? "with the size query (stock)" : "without it (trim_alloc)",
+               std::chrono::duration<double, std::nano>(Clock::now() - t0).count() / n);
+    }
+    (void)sink;
+    HeapDestroy(heap);
 }
 
 void Bench()
@@ -9088,6 +14690,9 @@ void Bench()
             printf("  %-46s %8.1f MB for 1,000,000 live blocks\n", "accounting's own tables", c.bytes / 1048576.0);
     time("snapshot, 1,000,000 blocks live", 20, [&] { footprint.snapshot(); });
     wxl::core::services::footprint::Reset();
+
+    BenchAnimate();
+    BenchTrimAlloc();
 }
 
 namespace
@@ -9123,8 +14728,9 @@ namespace
                   drawn->As<wxl_model_batch_args>().base_vertex == 12 &&
                   drawn->As<wxl_model_batch_args>().start_index == 300 &&
                   drawn->As<wxl_model_batch_args>().primitive_count == 40 &&
-                  drawn->As<wxl_model_batch_args>().viewport_max_z == 1.0f,
-              "a drawn batch raises ModelBatchDrawn with the numbers of the device's draw");
+                  drawn->As<wxl_model_batch_args>().viewport_max_z == 1.0f &&
+                  drawn->As<wxl_model_batch_args>().batch == nullptr,
+              "a drawn batch raises ModelBatchDrawn with the numbers of the device's draw, and no batch for wxl.render on D3D9");
 
         g_received.clear();
         wxl::seam::M2::DrawBatch::After(&render);
@@ -9136,6 +14742,82 @@ namespace
         Check(gx.struct_size == sizeof(wxl_gx_api) && gx.d3d9_device() == nullptr,
               "wxl.gx answers no device where the client hands none over");
         gx.invalidate_state(); // nothing to invalidate: it must not fault
+#if !defined(_M_IX86)
+        Check(gx.api() == WXL_GX_BACKEND_D3D9, "wxl.gx 2 answers the API the client's device runs on: Direct3D 9 here");
+#else
+        Check(gx.api() <= WXL_GX_BACKEND_VULKAN, "wxl.gx 2 answers an API the contract names");
+#endif
+    }
+
+    // --- wxl.render, wxl.vk and the points of the frame on a device the renderer does not drive -------
+
+    void CheckRenderService()
+    {
+        const wxl_render_api& r = wxl::core::services::RenderApi();
+        const wxl_vk_api&     v = wxl::core::services::VkApi();
+        const wxl_str         why = r.unsupported_reason();
+        Check(r.struct_size == sizeof(wxl_render_api) && r.supported() == WXL_FALSE &&
+                  std::string_view(why.data, why.size).find("Direct3D 9") != std::string_view::npos,
+              "wxl.render says it does not drive Direct3D 9, and why");
+        wxl_render_pipeline_desc desc{};
+        desc.struct_size = sizeof desc;
+        wxl_render_pass pass{};
+        pass.struct_size = sizeof pass;
+        uint64_t address = 0;
+        Check(r.create_image(8, 8, WXL_RENDER_FORMAT_RGBA8, 1) == WXL_HANDLE_NONE && r.create_screen_image(2, WXL_RENDER_FORMAT_RGBA8, 0) == WXL_HANDLE_NONE &&
+                  r.create_buffer(64) == WXL_HANDLE_NONE && r.create_pipeline(&desc) == WXL_HANDLE_NONE &&
+                  r.image_slot(16) == WXL_RENDER_NO_SLOT && r.buffer_address(16, &address) == WXL_E_UNSUPPORTED,
+              "no resource is made on it");
+        int batch = 0;
+        Check(r.begin(&pass) == WXL_E_UNSUPPORTED && r.draw(16, 3, 1, nullptr, 0) == WXL_E_UNSUPPORTED &&
+                  r.draw_batch(&batch, 16, nullptr, 0) == WXL_E_UNSUPPORTED && r.keep_batch(&batch) == nullptr &&
+                  r.scene_color_slot() == WXL_RENDER_NO_SLOT && r.scene_depth_slot() == WXL_RENDER_NO_SLOT,
+              "no pass, no draw, no batch kept, no copy of the scene");
+        const uint32_t word = 0x07230203u;
+        Check(r.replace_shader(wxl_str{"Diffuse", 7}, 1, &word, 4) == WXL_E_UNSUPPORTED &&
+                  r.restore_shader(wxl_str{"Diffuse", 7}, 1) == WXL_E_UNSUPPORTED,
+              "no shader of the client is replaced");
+        desc.kind = WXL_RENDER_PIPELINE_COMPUTE;
+        desc.compute = &word;
+        desc.compute_size = 4;
+        const float matrix[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        uint64_t    palette    = 1;
+        Check(r.create_pipeline(&desc) == WXL_HANDLE_NONE && r.dispatch(16, 1, 1, 1, nullptr, 0) == WXL_E_UNSUPPORTED &&
+                  r.bone_palette(matrix, sizeof matrix, &palette) == WXL_E_UNSUPPORTED && palette == 0,
+              "no compute pipeline, no dispatch, no bone palette");
+        r.end();
+        r.destroy_image(16);
+        uint64_t out = 0;
+        Check(v.struct_size == sizeof(wxl_vk_api) && !v.instance() && !v.device() && !v.queue() && !v.command_buffer() &&
+                  v.api_version() == 0 && v.frame(&out) == WXL_E_UNSUPPORTED && v.image(16, WXL_FALSE, &out) == WXL_E_UNSUPPORTED,
+              "wxl.vk hands out nothing of a Vulkan device there is not");
+#if defined(WXL_CORE_PROFILE) && WXL_CORE_PROFILE
+        const wxl_profile_api& profile = wxl::core::profile::Api();
+        Check(profile.gpu_zone_begin(wxl_str{"zone", 4}) == WXL_E_UNSUPPORTED, "a GPU zone is refused where wxl.render does not draw");
+        profile.gpu_zone_end();
+#endif
+
+        // The points: inside a frame the client paints, each where its seam is, with the frame's index.
+        g_gxContext = g_gxVisible = true;
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(g_received.empty(), "outside a frame no point is raised");
+        wxl::seam::Scrn::OnPaint::Before(nullptr, nullptr);
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(g_received.size() == 2 && g_received[0].event == WXL_EV_RenderPoint &&
+                  g_received[0].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_OPAQUE_WORLD &&
+                  g_received[1].As<wxl_render_point_args>().point == WXL_RENDER_POINT_AFTER_LIQUIDS &&
+                  g_received[0].As<wxl_render_point_args>().frame != 0 && g_received[0].As<wxl_render_point_args>().samples == 0,
+              "after the opaque world and after the liquids, RenderPoint with the frame's index (no samples: D3D9 is not drawn by the runtime)");
+        Mute(WXL_EV_RenderPoint);
+        g_received.clear();
+        wxl::seam::WorldScene::RenderDetailDoodads::After();
+        Check(g_received.empty(), "a point nobody listens to costs a flag");
+        Unmute(WXL_EV_RenderPoint);
+        wxl::seam::Gx::ScenePresent::Before();
     }
 
     // --- Component: AppearanceChanged, and models kept on the copies the client strips ------------
@@ -9187,6 +14869,106 @@ namespace
         g_received.clear();
         wxl::seam::Component::FreeComponent::Before(nullptr);
         Check(g_received.empty(), "no component raises nothing");
+    }
+
+    void CheckAnimateGates()
+    {
+        namespace animate = wxl::core::tuning::animate;
+        using wxl::core::tuning::FloatState;
+        int cacheObject = 0;
+        void* cache = &cacheObject;
+
+        animate::SetThreadsForTests(0);
+        {
+            AnimScene a(9, 0);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&FakeAnimateThread); void* arg = &a.scene;
+            Check(!wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg) && a.scene.head == &a.models[0],
+                  "animate_threads 0: BeginThread runs as the client's, the list untouched");
+            void* wait = cache;
+            Check(!wxl::seam::M2::WaitThread::Gate(&wait), "and WaitThread too");
+        }
+
+        animate::SetThreadsForTests(4);
+        {
+            AnimScene a(9, 0);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&CheckAnimateGates); void* arg = &a.scene;
+            Check(!wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg) && a.scene.head == &a.models[0],
+                  "a BeginThread for another function than AnimateThread is the client's");
+        }
+
+        // The main thread's state made unlike a new thread's: x87 single precision (as D3D9 leaves
+        // it) and MXCSR with flush to zero.
+        const FloatState before = wxl::core::tuning::CaptureFloat();
+        FloatState mainState = before;
+#if defined(_M_IX86)
+        mainState.control = 0x007F;
+#endif
+        mainState.mxcsr = 0x9F80;
+        wxl::core::tuning::LoadFloat(mainState);
+        {
+            AnimScene a(301, 7);
+            void* self = cache; void* fn = reinterpret_cast<void*>(&FakeAnimateThread); void* arg = &a.scene;
+            const bool taken = wxl::seam::M2::BeginThread::Gate(&self, &fn, &arg);
+            Check(taken && a.scene.head == nullptr, "animate_threads 4: BeginThread taken, the list hidden from the client's loop");
+            void* other = &self;
+            Check(!wxl::seam::M2::WaitThread::Gate(&other), "a WaitThread of another cache is the client's");
+            void* wait = cache;
+            Check(wxl::seam::M2::WaitThread::Gate(&wait) && a.scene.head == &a.models[0], "WaitThread taken, the list back");
+            Check(!wxl::seam::M2::WaitThread::Gate(&wait), "and only once");
+            bool once = true, attachedLeft = true, mainSide = true, workerSide = true;
+            std::set<DWORD> threads;
+            for (uint32_t i = 0; i < a.models.size(); ++i)
+            {
+                const FakeAnimModel& m = a.models[i];
+                if (m.parent)
+                {
+                    attachedLeft = attachedLeft && m.animated == 0;
+                    continue;
+                }
+                once = once && m.animated == 1;
+                threads.insert(m.thread);
+                if (i % 2 == 0) mainSide = mainSide && m.state == mainState;
+                else workerSide = workerSide && !(m.state == mainState);
+            }
+            Check(once, "every model of the list hung on nothing is animated once");
+            Check(attachedLeft, "a model attached to another is left to its parent");
+            Check(mainSide, "the first, third... model with the main thread's floating point state");
+            Check(workerSide, "the second, fourth... with a new thread's, as the client's worker has");
+            Check(wxl::core::tuning::CaptureFloat() == mainState, "the main thread's own state is back after");
+            printf("    (%zu thread(s) animated the 301 models)\n", threads.size());
+        }
+        wxl::core::tuning::LoadFloat(before);
+        {
+            AnimScene a(1000, 5);
+            bool all = true;
+            for (int frame = 0; frame < 50; ++frame)
+            {
+                all = all && a.Frame(cache);
+                for (uint32_t i = 0; i < a.models.size(); ++i)
+                    all = all && a.models[i].animated == (a.models[i].parent ? 0 : frame + 1);
+            }
+            Check(all, "50 frames of 1000 models: each animated once a frame, the client's loop finding nothing");
+            AnimScene empty(0, 0);
+            Check(empty.Frame(cache) && empty.scene.head == nullptr, "an empty list is taken and left empty");
+        }
+        const animate::Counters totals = animate::Totals();
+        Check(totals.frames >= 52 && totals.models >= 50 * 800, "the pool counts its frames and models");
+        animate::SetThreadsForTests(0);
+    }
+
+    void CheckDrops()
+    {
+        using wxl::core::tuning::drops::Drop;
+        using wxl::core::tuning::drops::Outcome;
+        // SMemAlloc's `call _msize` at 0x0076E58A: E8 and 0x004112F8 - 0x0076E58F.
+        uint8_t code[5] = {0xE8, 0x69, 0x2D, 0xCA, 0xFF};
+        Check(Drop(code, 0x0076E58A, 0x004112F8) == Outcome::dropped && code[0] == 0x0F && code[1] == 0x1F && code[4] == 0x00,
+              "the stock call is replaced by a five-byte NOP");
+        Check(Drop(code, 0x0076E58A, 0x004112F8) == Outcome::already, "a second time, it is already gone");
+        uint8_t hooked[5] = {0xE9, 0x00, 0x00, 0x00, 0x00};
+        Check(Drop(hooked, 0x0076E58A, 0x004112F8) == Outcome::foreign && hooked[0] == 0xE9, "other bytes are left as they are");
+        uint8_t other[5] = {0xE8, 0x69, 0x2D, 0xCA, 0xFF};
+        Check(Drop(other, 0x0076E5AC, 0x004112F8) == Outcome::foreign, "a call to another place is left too");
     }
 
     void CheckM2Service()
@@ -9326,6 +15108,158 @@ namespace
         int unit = 0;
         Check(m2.object_model(WXL_HANDLE_NONE) == nullptr, "no object, no model");
         (void)unit;
+    }
+
+    // --- wxl.m2: models of the world and bone watchers ------------------------------------------
+
+    struct BoneCounts
+    {
+        std::atomic<int> asked{0};
+        std::atomic<int> called{0};
+        std::atomic<int> faulted{0};
+    };
+    BoneCounts g_boneCounts;
+
+    wxl_bool WXL_CALL OnlyA(void*, wxl_str path, uint32_t count, void*)
+    {
+        ++g_boneCounts.asked;
+        return count == 3 && path.size == 4 && path.data[0] == 'a' ? WXL_TRUE : WXL_FALSE;
+    }
+    void WXL_CALL MoveFirstBone(const wxl_m2_bones* bones, void* user)
+    {
+        ++g_boneCounts.called;
+        bones->matrices[0] = static_cast<float>(bones->time_ms) + (user ? 1.0f : 0.0f);
+    }
+    void WXL_CALL FaultingWatcher(const wxl_m2_bones*, void*)
+    {
+        ++g_boneCounts.faulted;
+        *static_cast<volatile int*>(nullptr) = 1;
+    }
+
+    void CheckM2World()
+    {
+        const wxl_m2_api& m2 = wxl::core::services::M2Api();
+        g_world              = FakeWorldState{};
+        const int32_t map    = g_mapId;
+
+        Check(m2.create_world_model(M2Str("")) == nullptr, "a world model needs a file");
+        void* effect = m2.create_world_model(M2Str("Spells\\Fire_Base.m2"));
+        Check(effect && g_world.made == 1, "a model is made in the world's scene");
+
+        wxl_m2_placement at{};
+        at.struct_size = sizeof at;
+        at.position    = wxl_vec3{1.0f, 2.0f, 3.0f};
+        at.yaw         = 0.5f;
+        g_mapId        = -1;
+        Check(m2.place_model(effect, &at) == WXL_E_FAILED && g_world.placed == 0, "nothing is placed with no map loaded");
+        g_mapId = 0;
+        FakeM2Model stranger;
+        Check(m2.place_model(&stranger, &at) == WXL_E_INVALID && m2.place_model(effect, nullptr) == WXL_E_INVALID,
+              "a model the mod did not make, or no placement, is refused");
+        Check(m2.place_model(effect, &at) == WXL_OK && g_world.placed == 1 && g_world.placement.yaw == 0.5f &&
+                  g_world.placement.scale == 1.0f && g_world.placement.position.z == 3.0f,
+              "a placement reaches the client, a scale of 0 read as 1");
+        wxl_m2_placement older{};
+        older.struct_size = static_cast<uint32_t>(offsetof(wxl_m2_placement, yaw));
+        older.position    = wxl_vec3{4.0f, 5.0f, 6.0f};
+        older.yaw         = 9.0f;
+        Check(m2.place_model(effect, &older) == WXL_OK && g_world.placement.position.x == 4.0f &&
+                  g_world.placement.yaw == 0.0f && g_world.placement.scale == 1.0f,
+              "a shorter placement is read no further than its struct_size");
+
+        at.scale = 2.0f;
+        Check(m2.set_model_transform(effect, &at) == WXL_OK && g_world.transform.scale == 2.0f,
+              "a model's transform on its point reaches the client");
+        Check(m2.play_animation(effect, 158, 0.0f) == WXL_OK && g_world.anim == 158 && g_world.speed == 1.0f &&
+                  m2.play_animation(&stranger, 1, 1.0f) == WXL_E_INVALID,
+              "an animation plays at speed 1 unless asked, on the mod's models only");
+        m2.set_alpha(effect, 2.0f);
+        m2.set_emitting(effect, WXL_FALSE);
+        Check(g_world.alpha == 1.0f && g_world.emitting == 0, "alpha is held to [0, 1]; emitters are switched");
+
+        uint32_t length = 0;
+        Check(m2.model_loaded(effect) && m2.animation_length(effect, 0, &length) == WXL_OK && length == 1333,
+              "a loaded model answers how long an animation lasts");
+        AsFake(effect)->loaded = false;
+        Check(!m2.model_loaded(effect) && m2.animation_length(effect, 0, &length) == WXL_E_FAILED,
+              "and fails while it loads");
+        AsFake(effect)->loaded = true;
+        wxl_vec3 hand{};
+        Check(m2.attachment_world(&g_charModel, 32, &hand) == WXL_OK && hand.z == 31.5f &&
+                  m2.attachment_world(&g_charModel, 1, &hand) == WXL_E_NOT_FOUND,
+              "a point of a loaded model is read in the world; not found for one it lacks");
+
+        float          ground = -1.0f;
+        const wxl_vec3 above{5.0f, 5.0f, 10.0f};
+        Check(m2.ground_height(&above, 2.0f, 50.0f, &ground) == WXL_OK && ground == 0.0f &&
+                  g_traceFlags == 0x120111,
+              "the ground is traced straight down, with the mask the client's spell effects use");
+        const wxl_vec3 below{5.0f, 5.0f, -5.0f};
+        Check(m2.ground_height(&below, 1.0f, 1.0f, &ground) == WXL_E_NOT_FOUND &&
+                  m2.ground_height(&above, -1.0f, 1.0f, &ground) == WXL_E_INVALID,
+              "no ground in reach is not found; a negative reach is refused");
+
+        // Leaving the world takes the placed models out of it, once.
+        g_uiReloading = 1;
+        wxl::seam::World::LeaveWorld::Before();
+        Check(g_world.unplaced == 0, "a /reload leaves the placed models where they are");
+        g_uiReloading = 0;
+        wxl::seam::World::LeaveWorld::Before();
+        Check(g_world.unplaced == 1, "leaving the world takes them out of it");
+        const int freed = g_fakeModelsFreed;
+        m2.release_model(effect);
+        Check(g_world.unplaced == 1 && g_fakeModelsFreed == freed + 1, "a model taken out is only released after");
+        void* again = m2.create_world_model(M2Str("Spells\\Fire_Base.m2"));
+        m2.place_model(again, &at);
+        m2.release_model(again);
+        Check(g_world.unplaced == 2 && g_fakeModelsFreed == freed + 2, "a placed model released is taken out first");
+
+        // Bone watchers.
+        uint32_t token = 0;
+        Check(m2.watch_bones(nullptr, nullptr, nullptr, &token) == WXL_E_INVALID && !wxl::core::services::m2::WatchingBones(),
+              "a watcher needs a function");
+        int  user = 0;
+        Check(m2.watch_bones(&OnlyA, &MoveFirstBone, &user, &token) == WXL_OK && token != 0 &&
+                  wxl::core::services::m2::WatchingBones(),
+              "a watcher is taken");
+        FakeM2Model a, b;
+        b.texType = 2; // the fake names it b.m2
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&b, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_boneCounts.asked == 2 && g_boneCounts.called == 2 && a.matrices[0][0] == 43.0f && b.matrices[0][0] == 0.0f,
+              "the filter is asked once per file, the watcher called each frame for the files it took");
+        int16_t  parent = 0;
+        wxl_vec3 pivot{};
+        Check(m2.bone_info(&a, 1, &parent, &pivot) == WXL_OK && parent == 0 && pivot.z == 1.0f &&
+                  m2.bone_info(&a, 3, &parent, &pivot) == WXL_E_NOT_FOUND,
+              "a file's bone: its parent and pivot; not found past the last");
+
+        uint32_t faulty = 0;
+        Check(m2.watch_bones(nullptr, &FaultingWatcher, nullptr, &faulty) == WXL_OK, "a second watcher is taken");
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_boneCounts.faulted == 1 && g_boneCounts.called == 4 && g_boneCounts.asked == 4,
+              "a watcher that faults is dropped; the others go on, the files asked again of the new set");
+
+        m2.unwatch_bones(token);
+        Check(!wxl::core::services::m2::WatchingBones(), "unwatched, no watcher is left");
+        const int asked = g_bonesAsked;
+        wxl::seam::M2::AnimateMT::After(&a, nullptr, nullptr, nullptr, 1.0f, 1.0f);
+        Check(g_bonesAsked == asked && g_boneCounts.called == 4, "with no watcher the client is not even asked");
+
+        std::vector<uint32_t> tokens;
+        for (uint32_t i = 0; i < 16; ++i)
+        {
+            uint32_t t = 0;
+            if (m2.watch_bones(nullptr, &MoveFirstBone, nullptr, &t) == WXL_OK) tokens.push_back(t);
+        }
+        uint32_t past = 0;
+        Check(tokens.size() == 16 && m2.watch_bones(nullptr, &MoveFirstBone, nullptr, &past) == WXL_E_FAILED,
+              "sixteen watchers at most");
+        wxl::core::services::m2::ForgetMod(wxl::core::Host() ? wxl::core::Host()->CurrentMod() : 0);
+        Check(!wxl::core::services::m2::WatchingBones(), "a disabled mod's watchers go with it");
+        g_mapId = map;
     }
 
     // --- M2Shared: the loader's stages as events, and wxl.m2file ----------------------------------
@@ -9585,7 +15519,1132 @@ namespace
         Check(!md::Rebuild(render.At(), globals, &out) && !md::Rebuild(nullptr, globals, &out),
               "nor a renderer with no section, nor none");
     }
+
+    // --- wxl.highlight on x86: what a batch's draw had bound, read from the engine ----------------
+
+    void CheckHighlightDrawX86()
+    {
+        namespace hd = wxl::core::binding::x86::highlight_draw;
+        Block device(WXL_TYPE_SIZE("CGxDeviceD3d9Ex")), shader(WXL_TYPE_SIZE("CGxShader"));
+        Block states(WXL_TYPE_SIZE("CGxStateBom") * 100);
+        int   decl = 0, index = 0, stream0 = 0, stream2 = 0, program = 0;
+
+        device.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), hd::kApiD3d9Ex);
+        device.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_context"), 1);
+        device.Put<void*>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentVertexDecl"), &decl);
+        device.Put<void*>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dCurrentIndexBuf"), &index);
+        device.Put<void*>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf") + 0, &stream0);
+        device.Put<void*>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamBuf") + 2 * sizeof(void*), &stream2);
+        device.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamOfs") + 2 * 4, 640);
+        device.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamStride") + 0, 48);
+        device.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d9Ex", "m_d3dVertexStreamStride") + 2 * 4, 8);
+        device.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_hwRenderStates.m_count"), 100);
+        device.Put<void*>(WXL_FIELD("CGxDevice", "m_hwRenderStates.m_data"), states.At());
+        states.Put<void*>(hd::kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"), shader.At());
+        shader.Put<void*>(WXL_FIELD("CGxShader", "m_apiSpecific"), &program);
+        Block texture(WXL_TYPE_SIZE("CGxTex"));
+        int   d3dTexture = 0;
+        texture.Put<void*>(WXL_FIELD("CGxTex", "m_apiSpecificData"), &d3dTexture);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), texture.At());
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 224);
+
+        hd::State state;
+        Check(hd::ReadState(device.At(), state) && state.declaration == &decl && state.indices == &index &&
+                  state.streams[0] == &stream0 && state.streams[1] == nullptr && state.streams[2] == &stream2 &&
+                  state.offsets[2] == 640 && state.strides[0] == 48 && state.strides[2] == 8 && state.vertexShader == &program,
+              "a D3D9Ex device's declaration, index buffer, streams and vertex program are read from its copy");
+        Check(state.texture0 == &d3dTexture && state.alphaRef == 224, "with its first texture and its alpha test's reference");
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 0);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), nullptr);
+        Check(hd::ReadState(device.At(), state) && state.texture0 == nullptr && state.alphaRef == 0,
+              "a draw without texture or alpha test has neither");
+        states.Put<void*>(hd::kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"), nullptr);
+        Check(hd::ReadState(device.At(), state) && state.vertexShader == nullptr, "no vertex program: the fixed pipeline");
+
+        Block d3d(WXL_TYPE_SIZE("CGxDeviceD3d"));
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), hd::kApiD3d9);
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_context"), 1);
+        d3d.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &decl);
+        d3d.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &index);
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamOfs") + 4, 96);
+        Check(hd::ReadState(d3d.At(), state) && state.indices == &index && state.offsets[1] == 96,
+              "and a D3D9 device's at its own offsets");
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_intF5C"), 1);
+        Check(!hd::ReadState(d3d.At(), state), "a lost device has nothing bound");
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_intF5C"), 0);
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), 0);
+        Check(!hd::ReadState(d3d.At(), state) && !hd::ReadState(nullptr, state), "nor an OpenGL one, nor none");
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), hd::kApiD3d9);
+        d3d.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_context"), 0);
+        Check(hd::ReadBindings(d3d.At(), state) && state.indices == &index,
+              "what the engine believes bound is read whatever the device's state, to be put back");
+
+        Check(!hd::IntoTexture(device.At()), "the device draws to the screen");
+        device.Put<void*>(WXL_FIELD("CGxDevice", "m_textureTarget[0].m_apiSpecific"), &decl);
+        Check(hd::IntoTexture(device.At()), "or into a texture (a portrait)");
+
+        // The engine's shadow: FLT_MAX where nothing was set this frame.
+        std::vector<uint8_t> shadow(hd::kShadowSize, 0);
+        float* rows = reinterpret_cast<float*>(shadow.data());
+        for (uint32_t i = 0; i < hd::kRows * 4; ++i) rows[i] = FLT_MAX;
+        rows[4 * 31] = 1.0f;
+        Check(!hd::RowSet(rows) && hd::RowSet(rows + 4 * 31), "a register set this frame is told from one left unset");
+    }
+
+    // --- wxl.highlight on x86: the passes, over a device that records them -----------------------
+
+    /// A Direct3D 9 device that records what is set on it and hands out made-up objects.
+    struct RecordingDevice final : wxl::core::gx::d3d9::Device
+    {
+        D3DCAPS9            caps{};
+        char                objects[64]{};          ///< the addresses of what it makes
+        int                 made = 0, released = 0;
+        IDirect3DSurface9*  scene = reinterpret_cast<IDirect3DSurface9*>(&objects[62]);
+        IDirect3DSurface9*  depth = reinterpret_cast<IDirect3DSurface9*>(&objects[63]);
+        D3DMULTISAMPLE_TYPE samples = D3DMULTISAMPLE_NONE;
+        IDirect3DSurface9*  targets[2]{};
+        IDirect3DSurface9*  boundDepth = nullptr;
+        IDirect3DBaseTexture9* textures[3]{};
+        std::map<int, DWORD> states;
+        IDirect3DVertexShader9*      vs = nullptr;
+        IDirect3DPixelShader9*       ps = nullptr;
+        IDirect3DVertexDeclaration9* declaration = nullptr;
+        IDirect3DVertexBuffer9*      streams[8]{};
+        IDirect3DIndexBuffer9*       indices = nullptr;
+        float                        vertexConstants[256][4]{};
+        float                        pixelConstants[256][4]{};
+        DWORD                        programVersion = 0xFFFE0300u;
+        struct Drawn
+        {
+            IDirect3DSurface9* target0, *target1, *depth;
+            IDirect3DVertexShader9* vs;
+            IDirect3DPixelShader9*  ps;
+            bool   indexed;
+            INT    baseVertex;
+            UINT   startIndex, primitives;
+            DWORD  zEnable, zWrite, blend;
+            float  bone;  ///< c31.x as the draw saw it
+            float  color; ///< the mask's red, c200.x or c30.x
+            float  alpha; ///< the mask's alpha reference, c202.x or c29.x
+            IDirect3DBaseTexture9* texture0;
+        };
+        std::vector<Drawn> draws;
+        std::vector<std::pair<IDirect3DSurface9*, IDirect3DSurface9*>> resolves;
+
+        RecordingDevice()
+        {
+            caps.PixelShaderVersion               = D3DPS_VERSION(3, 0);
+            caps.VertexShaderVersion              = D3DVS_VERSION(3, 0);
+            caps.NumSimultaneousRTs               = 4;
+            caps.MaxPixelShader30InstructionSlots = 32768;
+            targets[0]                            = scene;
+            boundDepth                            = depth;
+        }
+        template <class T>
+        T* Make()
+        {
+            return reinterpret_cast<T*>(&objects[made++ % 60]);
+        }
+        HRESULT Caps(D3DCAPS9& out) override { out = caps; return S_OK; }
+        HRESULT GetRenderTarget(DWORD i, IDirect3DSurface9** out) override { *out = targets[i]; return S_OK; }
+        HRESULT SetRenderTarget(DWORD i, IDirect3DSurface9* s) override { targets[i] = s; return S_OK; }
+        HRESULT GetDepthStencil(IDirect3DSurface9** out) override { *out = boundDepth; return S_OK; }
+        HRESULT SetDepthStencil(IDirect3DSurface9* s) override { boundDepth = s; return S_OK; }
+        HRESULT SurfaceDesc(IDirect3DSurface9* s, D3DSURFACE_DESC& out) override
+        {
+            out                 = D3DSURFACE_DESC{};
+            out.Width           = 1600;
+            out.Height          = 900;
+            out.MultiSampleType = s == depth ? samples : D3DMULTISAMPLE_NONE;
+            return S_OK;
+        }
+        HRESULT TextureSurface(IDirect3DTexture9*, IDirect3DSurface9** out) override { *out = Make<IDirect3DSurface9>(); return S_OK; }
+        HRESULT Clear(DWORD, D3DCOLOR) override { return S_OK; }
+        HRESULT StretchRect(IDirect3DSurface9* from, IDirect3DSurface9* to) override
+        {
+            resolves.emplace_back(from, to);
+            return S_OK;
+        }
+        HRESULT CreateRenderTarget(UINT, UINT, D3DFORMAT, D3DMULTISAMPLE_TYPE, DWORD, IDirect3DSurface9** out) override
+        {
+            *out = Make<IDirect3DSurface9>();
+            return S_OK;
+        }
+        HRESULT CreateTargetTexture(UINT, UINT, D3DFORMAT, IDirect3DTexture9** out) override { *out = Make<IDirect3DTexture9>(); return S_OK; }
+        HRESULT CreateVertexShader(const DWORD* code, IDirect3DVertexShader9** out) override
+        {
+            *out = code && code[0] == 0xFFFE0300u ? Make<IDirect3DVertexShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreatePixelShader(const DWORD* code, IDirect3DPixelShader9** out) override
+        {
+            *out = code && (code[0] == 0xFFFF0300u || code[0] == 0xFFFF0200u) ? Make<IDirect3DPixelShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreateDeclaration(const D3DVERTEXELEMENT9*, IDirect3DVertexDeclaration9** out) override
+        {
+            *out = Make<IDirect3DVertexDeclaration9>();
+            return S_OK;
+        }
+        void  Release(IUnknown* object) override { released += object ? 1 : 0; }
+        DWORD VertexShaderVersion(IDirect3DVertexShader9*) override { return programVersion; }
+        void  SetViewport(const D3DVIEWPORT9&) override {}
+        void  SetRenderState(D3DRENDERSTATETYPE state, DWORD value) override { states[state] = value; }
+        void  SetSamplerState(DWORD, D3DSAMPLERSTATETYPE, DWORD) override {}
+        void  SetTexture(DWORD i, IDirect3DBaseTexture9* t) override
+        {
+            if (i < 3) textures[i] = t;
+        }
+        void SetDeclaration(IDirect3DVertexDeclaration9* d) override { declaration = d; }
+        void SetStreamSource(UINT i, IDirect3DVertexBuffer9* b, UINT, UINT) override { streams[i] = b; }
+        void SetIndices(IDirect3DIndexBuffer9* i) override { indices = i; }
+        void SetVertexShader(IDirect3DVertexShader9* s) override { vs = s; }
+        void SetPixelShader(IDirect3DPixelShader9* s) override { ps = s; }
+        void SetVertexConstants(UINT first, const float* values, UINT count) override
+        {
+            std::memcpy(vertexConstants[first], values, count * 16);
+        }
+        void SetPixelConstants(UINT first, const float* values, UINT count) override
+        {
+            std::memcpy(pixelConstants[first], values, count * 16);
+        }
+        DWORD State(D3DRENDERSTATETYPE s) { return states.count(s) ? states[s] : 0xDEADu; }
+        void  Record(bool indexed, INT baseVertex, UINT startIndex, UINT primitives)
+        {
+            const bool model3 = programVersion >= 0xFFFE0300u;
+            draws.push_back(Drawn{targets[0], targets[1], boundDepth, vs, ps, indexed, baseVertex, startIndex, primitives,
+                                  State(D3DRS_ZENABLE), State(D3DRS_ZWRITEENABLE), State(D3DRS_ALPHABLENDENABLE),
+                                  vertexConstants[31][0], model3 ? pixelConstants[200][0] : pixelConstants[30][0],
+                                  model3 ? pixelConstants[202][0] : pixelConstants[29][0], textures[0]});
+        }
+        void DrawIndexed(D3DPRIMITIVETYPE, INT baseVertex, UINT, UINT, UINT startIndex, UINT primitives) override
+        {
+            Record(true, baseVertex, startIndex, primitives);
+        }
+        void DrawUp(D3DPRIMITIVETYPE, UINT primitives, const void*, UINT) override { Record(false, 0, 0, primitives); }
+    };
 #endif
+
+    // --- wxl.highlight: the highlights mods set, and on x86 the passes that draw them -------------
+
+    void CheckHighlight()
+    {
+        const wxl_highlight_api& api = wxl::core::services::HighlightApi();
+        FakeObject boar;
+        boar.guid   = 0x791;
+        boar.typeId = WXL_OBJECT_UNIT;
+        wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
+        const wxl_handle target = wxl::core::objects::HandleOf(&boar);
+
+        // The client's flag of an event: up while a mod listens or while the runtime needs the seam.
+        {
+            namespace listening = wxl::core::listening;
+            const wxl_event event   = WXL_EV_ModelBatchDrawn;
+            const bool      mods    = g_host->Listening(event);
+            listening::ModsListen(event, false);
+            listening::RuntimeWants(event, true);
+            const bool runtimeAlone = wxl_core_listening[event] != 0;
+            listening::ModsListen(event, true);
+            listening::RuntimeWants(event, false);
+            const bool modsAlone = wxl_core_listening[event] != 0;
+            listening::ModsListen(event, false);
+            Check(runtimeAlone && modsAlone && wxl_core_listening[event] == 0,
+                  "the client's flag of an event is up while a mod listens or the runtime needs its seam, down when neither does");
+            listening::ModsListen(event, mods);
+        }
+        const bool modsListen = g_host->Listening(WXL_EV_ModelBatchDrawn);
+
+#if !defined(_M_IX86)
+        const wxl_str why = api.unsupported_reason();
+        Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("Vulkan") != std::string_view::npos,
+              "the recompiled client on Direct3D 9 draws no highlight, and says why: its Vulkan renderer draws them");
+        Check(api.set(target, 0xFF0000u, 2.0f, 8.0f, 0.5f) == WXL_E_UNSUPPORTED && api.clear(target) == WXL_E_NOT_FOUND &&
+                  api.drawn() == 0,
+              "a highlight is refused as unsupported, and nothing is drawn");
+        int world = 0;
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(api.drawn() == 0, "a world pass draws none");
+
+        // The service's path on the Vulkan renderer, here a wxl.render without a device and no
+        // engine renderer: the drawing itself is checked on lavapipe (core/tests/vk/render_tests.cpp).
+        static wxl::vk::render::Render                    vkRender;
+        static wxl::core::services::highlight::VulkanTarget vkTarget{&vkRender, nullptr};
+        wxl::core::services::highlight::UseVulkanTarget(&vkTarget);
+        Check(api.supported() == WXL_TRUE && wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0),
+              "with a Vulkan renderer highlights are supported; nothing is highlighted yet");
+        Check(api.set(target, 0xFFE03020u, 4.0f, 8.0f, 0.5f) == WXL_OK && wxl_core_listening[WXL_EV_ModelBatchDrawn] != 0,
+              "a highlight set, the client calls M2.DrawBatch even with no mod listening to ModelBatchDrawn");
+        namespace hs = wxl::core::services::highlight;
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(!hs::LastPass().resolved && hs::LastPass().refusal.find("M2.DrawBatch") != std::string::npos && api.drawn() == 0,
+              "a world pass in which no model batch reached the runtime says so");
+        int vkModel = 0, other = 0;
+        auto vkBatch = [&](void* root, uint32_t blend) {
+            g_gxDraw                 = wxl_model_batch_args{};
+            g_gxDraw.root_model      = root;
+            g_gxDraw.primitive_type  = 4;
+            g_gxDraw.primitive_count = 40;
+            g_gxDraw.blend_mode      = blend;
+            g_gxDrew                 = true;
+            wxl::seam::M2::DrawBatch::After(&vkModel);
+        };
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        vkBatch(&g_charModel, 0);
+        vkBatch(&other, 0);
+        vkBatch(&g_charModel, 2);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        const hs::PassCounts& pass = hs::LastPass();
+        Check(pass.resolved && pass.entries == 1 && pass.roots == 1 && pass.models == 3 && pass.seen == 2 && pass.kept == 0 &&
+                  pass.drawn == 0 && !pass.composited,
+              "the pass counts the object's model found, the batches drawn, the object's two, and none kept");
+        Check(pass.refusal.find("kept no record") != std::string::npos && api.drawn() == 0,
+              "a batch the renderer kept no record of is refused with its reason, and drawn() says none was drawn");
+        hs::Present(); // the summary's second begins; its line comes a second later
+        hs::Present();
+        Check(api.clear(target) == WXL_OK && wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0),
+              "the last highlight cleared, the client's flag is the mods' again");
+        hs::UseVulkanTarget(nullptr);
+        hs::Clear();
+#else
+        namespace hl = wxl::core::gx::d3d9::highlight;
+        namespace hd = wxl::core::binding::x86::highlight_draw;
+
+        // The engine the renderer reads: a D3D9 device with the batch's bindings and its vertex
+        // program, and the shadow of the vertex constants with a bone in c31.
+        static Block engine(WXL_TYPE_SIZE("CGxDeviceD3d"));
+        static Block shader(WXL_TYPE_SIZE("CGxShader"));
+        static Block states(WXL_TYPE_SIZE("CGxStateBom") * 100);
+        static int   decl = 0, index = 0, stream = 0, program = 0;
+        engine.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_api"), hd::kApiD3d9);
+        engine.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_context"), 1);
+        engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &decl);
+        engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &index);
+        engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), &stream);
+        engine.Put<uint32_t>(WXL_FIELD("CGxDevice", "m_hwRenderStates.m_count"), 100);
+        engine.Put<void*>(WXL_FIELD("CGxDevice", "m_hwRenderStates.m_data"), states.At());
+        states.Put<void*>(hd::kRsVertexShader * WXL_TYPE_SIZE("CGxStateBom"), shader.At());
+        shader.Put<void*>(WXL_FIELD("CGxShader", "m_apiSpecific"), &program);
+        static std::vector<uint8_t> shadow(hd::kShadowSize, 0);
+        float* rows = reinterpret_cast<float*>(shadow.data());
+        for (uint32_t i = 0; i < hd::kRows * 4; ++i) rows[i] = FLT_MAX;
+        for (uint32_t i = 28; i < 34; ++i) rows[4 * i] = static_cast<float>(i);
+        static int32_t shaders = 1;
+        static Block   texture(WXL_TYPE_SIZE("CGxTex"));
+        static int     d3dTexture = 0;
+        texture.Put<void*>(WXL_FIELD("CGxTex", "m_apiSpecificData"), &d3dTexture);
+        states.Put<void*>(hd::kRsTexture0 * WXL_TYPE_SIZE("CGxStateBom"), texture.At());
+
+        Check(api.set(target, 0xFF0000u, 2.0f, 8.0f, 0.5f) == WXL_E_UNSUPPORTED && api.supported() == WXL_FALSE,
+              "with no device to draw on, a highlight is refused as unsupported");
+
+        RecordingDevice device;
+        hl::Source      source;
+        source.device        = [] { return static_cast<const void*>(engine.At()); };
+        source.vertexShadow  = shadow.data();
+        source.enableShaders = &shaders;
+        hl::SetSource(source);
+        hl::UseDevice(&device);
+        Check(api.supported() == WXL_TRUE && api.unsupported_reason().size == 0, "a device of shader model 3 draws them");
+        Check(api.set(0xDEAD, 0xFF0000u, 2.0f, 8.0f, 0.5f) == WXL_E_NOT_FOUND &&
+                  api.set(target, 0xFF0000u, -1.0f, 0.0f, 0.0f) == WXL_E_INVALID &&
+                  api.set(target, 0xFF0000u, std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f) == WXL_E_INVALID,
+              "an object gone is not found; a width below 0 or no number is refused");
+        Check(api.set(target, 0xFFE03020u, 40.0f, 8.0f, 0.5f) == WXL_OK, "an object is highlighted");
+        Check(wxl_core_listening[WXL_EV_ModelBatchDrawn] != 0, "and the seam that keeps its batches is wanted, no mod listening or not");
+
+        // A world pass: one batch of the object's model and one of another, then the world's end.
+        int world = 0, render = 0, other = 0;
+        auto drawBatch = [&](void* root, uint32_t blend) {
+            g_gxDraw                 = wxl_model_batch_args{};
+            g_gxDraw.root_model      = root;
+            g_gxDraw.primitive_type  = 4;
+            g_gxDraw.base_vertex     = 12;
+            g_gxDraw.start_index     = 300;
+            g_gxDraw.primitive_count = 40;
+            g_gxDraw.blend_mode      = blend;
+            g_gxDraw.viewport_width  = 1600;
+            g_gxDraw.viewport_height = 900;
+            g_gxDraw.viewport_max_z  = 1.0f;
+            g_gxDrew                 = true;
+            wxl::seam::M2::DrawBatch::After(&render);
+        };
+        // What the game has bound when the world ends, which the interface goes on drawing with:
+        // the engine's copy says another declaration, index buffer and stream than the batch's, and
+        // the device holds them; c0-c3 hold a matrix the engine set in an earlier frame (its copy
+        // has FLT_MAX there), c28-c33 what it set this frame.
+        static int laterDecl = 0, laterIndex = 0, laterStream = 0;
+        auto gameBindings = [&] {
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &laterDecl);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &laterIndex);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), &laterStream);
+            engine.Put<uint32_t>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamStride"), 24);
+            device.declaration = reinterpret_cast<IDirect3DVertexDeclaration9*>(&laterDecl);
+            device.indices     = reinterpret_cast<IDirect3DIndexBuffer9*>(&laterIndex);
+            device.streams[0]  = reinterpret_cast<IDirect3DVertexBuffer9*>(&laterStream);
+            for (int r = 0; r < 4; ++r) device.vertexConstants[r][0] = 0.5f + static_cast<float>(r);
+            for (uint32_t r = 28; r < 34; ++r) device.vertexConstants[r][0] = rows[4 * r];
+            device.vertexConstants[250][0] = 0.0f;
+        };
+        auto bindingsBack = [&] {
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentVertexDecl"), &decl);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dCurrentIndexBuf"), &index);
+            engine.Put<void*>(WXL_FIELD("CGxDeviceD3d", "m_d3dVertexStreamBuf"), &stream);
+        };
+        const int invalidated = g_gxInvalidated;
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        drawBatch(&g_charModel, 0);
+        drawBatch(&other, 0);
+        drawBatch(&g_charModel, 2); // translucent: not the silhouette
+        rows[4 * 31] = 999.0f;      // the engine moves on to other models' bones
+        gameBindings();
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+
+        Check(api.drawn() == 1 && device.draws.size() == 4, "the object's one opaque batch is drawn again, then three passes");
+        {
+            const wxl::core::services::highlight::PassCounts& pass = wxl::core::services::highlight::LastPass();
+            Check(pass.resolved && pass.roots == 1 && pass.models == 3 && pass.seen == 2 && pass.kept == 1 && pass.drawn == 1 &&
+                      pass.composited && pass.refusal.empty(),
+                  "the pass counts the batches drawn, the object's two, the opaque one kept and drawn, and the composite");
+        }
+        if (device.draws.size() == 4)
+        {
+            const RecordingDevice::Drawn& mask = device.draws[0];
+            Check(mask.indexed && mask.baseVertex == 12 && mask.startIndex == 300 && mask.primitives == 40 &&
+                      mask.vs == reinterpret_cast<IDirect3DVertexShader9*>(&program) && mask.bone == 31.0f,
+                  "with the game's numbers, its vertex program and the constants it had at its draw");
+            Check(mask.target0 != device.scene && mask.target1 != nullptr && mask.depth == device.depth &&
+                      mask.zEnable == D3DZB_TRUE && mask.zWrite == FALSE && mask.blend == FALSE,
+                  "into two masks, tested against the scene's depth and never writing it");
+            Check(std::fabs(mask.color - 0xE0 / 255.0f) < 1e-5f, "in the highlight's colour");
+            Check(mask.alpha < 0.0f && mask.texture0 == reinterpret_cast<IDirect3DBaseTexture9*>(&d3dTexture),
+                  "an opaque batch keeps every texel of its first texture");
+            Check(device.draws[1].target0 != device.scene && device.draws[2].target0 != device.scene &&
+                      device.draws[1].depth == nullptr && !device.draws[1].indexed,
+                  "the glow is blurred across and down, with no depth buffer");
+            const RecordingDevice::Drawn& composite = device.draws[3];
+            Check(composite.target0 == device.scene && composite.target1 == nullptr && composite.blend == TRUE &&
+                      composite.zEnable == D3DZB_FALSE,
+                  "and the outline and the glow are blended onto the scene");
+            Check(std::fabs(device.pixelConstants[200][2] - WXL_HIGHLIGHT_MAX_OUTLINE * 900.0f / 1080.0f) < 1e-3f,
+                  "an outline wider than 16 pixels is 16 at 1080 lines, scaled to the render's 900");
+        }
+        Check(device.declaration == reinterpret_cast<IDirect3DVertexDeclaration9*>(&laterDecl) &&
+                  device.indices == reinterpret_cast<IDirect3DIndexBuffer9*>(&laterIndex) &&
+                  device.streams[0] == reinterpret_cast<IDirect3DVertexBuffer9*>(&laterStream) && device.streams[1] == nullptr,
+              "the declaration, index buffer and streams the engine believes bound are bound again (the interface "
+              "draws with them without binding them anew)");
+        bool constantsKept = device.vertexConstants[250][0] != 0.0f;
+        for (int r = 0; r < 4; ++r) constantsKept = constantsKept && device.vertexConstants[r][0] == 0.5f + static_cast<float>(r);
+        for (uint32_t r = 28; r < 34; ++r) constantsKept = constantsKept && device.vertexConstants[r][0] == rows[4 * r];
+        Check(constantsKept, "the vertex registers the batches overwrote hold the engine's values again, those it set in an "
+                             "earlier frame were never touched, the quad's own register is above the game's");
+        Check(device.targets[0] == device.scene && device.targets[1] == nullptr && device.boundDepth == device.depth &&
+                  device.textures[0] == nullptr && device.textures[2] == nullptr && device.State(D3DRS_ZENABLE) == D3DZB_TRUE &&
+                  device.State(D3DRS_COLORWRITEENABLE1) == 0xF && g_gxInvalidated == static_cast<int>(invalidated) + 1,
+              "the scene's target and depth are put back, the passes' textures let go, and the game told to send its state");
+        Check(device.released == 2, "and the scene's target and depth are let go");
+        Check(device.resolves.empty(), "a scene without multisampling needs no resolve");
+
+        // Multisampling: masks of the depth's kind, resolved into the textures the passes read.
+        device.samples = D3DMULTISAMPLE_4_SAMPLES;
+        device.draws.clear();
+        bindingsBack();
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 224);
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        drawBatch(&g_charModel, 1);
+        states.Put<int32_t>(hd::kRsAlphaRef * WXL_TYPE_SIZE("CGxStateBom"), 0);
+        gameBindings();
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(device.resolves.size() == 2 && device.draws.size() == 4 && device.draws[0].target0 == device.resolves[0].first,
+              "a multisampled depth gets multisampled masks, resolved after the batches");
+        Check(device.draws.size() == 4 && std::fabs(device.draws[0].alpha - 224.0f / 255.0f) < 1e-5f,
+              "an alpha-tested batch (hair, a mane, leaves) keeps only the texels its test keeps");
+
+        // A vertex program of shader model 2 is paired with the mask program of model 2.
+        static int program2 = 0;
+        shader.Put<void*>(WXL_FIELD("CGxShader", "m_apiSpecific"), &program2);
+        device.programVersion = 0xFFFE0200u;
+        device.draws.clear();
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        drawBatch(&g_charModel, 0);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(device.draws.size() == 4 && device.draws[0].ps != device.draws[3].ps &&
+                  std::fabs(device.draws[0].color - 0xE0 / 255.0f) < 1e-5f,
+              "a vertex program of model 2 is drawn with the mask of model 2, its colour in c30");
+        device.programVersion = 0xFFFE0300u;
+        shader.Put<void*>(WXL_FIELD("CGxShader", "m_apiSpecific"), &program);
+
+        // Nothing highlighted in view: nothing is kept or drawn.
+        device.draws.clear();
+        wxl::seam::WorldFrame::RenderWorld::Before(&world);
+        drawBatch(&other, 0);
+        wxl::seam::WorldFrame::RenderWorld::After(&world);
+        Check(device.draws.empty() && api.drawn() == 0, "a pass without the object in view draws nothing");
+
+        // The device lost: what was made on it goes.
+        const int before = device.released;
+        wxl::seam::Gx::ReleaseD3dResources::Before(&device, 1);
+        Check(device.released > before + 6, "the device lost takes the masks, the glow's targets and the programs with it");
+
+        // Ownership and limits.
+        Check(api.clear(target) == WXL_OK && api.clear(target) == WXL_E_NOT_FOUND, "a highlight is cleared once");
+        api.set(target, 0x00FF00u, 2.0f, 0.0f, 0.0f);
+        wxl::core::services::highlight::ForgetMod(0);
+        Check(api.clear(target) == WXL_E_NOT_FOUND, "a mod's highlights go with it");
+        api.set(target, 0x00FF00u, 2.0f, 0.0f, 0.0f);
+        api.clear_all();
+        Check(api.clear(target) == WXL_E_NOT_FOUND, "ClearAll takes off the calling mod's");
+
+        // A device without shader model 3 says so.
+        device.caps.PixelShaderVersion = D3DPS_VERSION(2, 0);
+        hl::UseDevice(&device);
+        const wxl_str why = api.unsupported_reason();
+        Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("shader model 3.0") != std::string_view::npos &&
+                  api.set(target, 0xFF0000u, 2.0f, 0.0f, 0.0f) == WXL_E_UNSUPPORTED,
+              "a device of shader model 2 draws none, and says why");
+        shaders = 0;
+        device.caps.PixelShaderVersion = D3DPS_VERSION(3, 0);
+        hl::UseDevice(&device);
+        Check(api.supported() == WXL_FALSE, "nor does a client drawing without its shaders");
+        shaders = 1;
+
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.set(target, 0xFF0000u, 2.0f, 0.0f, 0.0f); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a highlight is refused");
+        wxl::core::services::highlight::Clear();
+        Check(wxl_core_listening[WXL_EV_ModelBatchDrawn] == (modsListen ? 1 : 0), "no highlight left, the client's flag is the mods' again");
+        hl::UseDevice(nullptr);
+        hl::SetSource(hl::Source{});
+#endif
+        wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+    }
+
+    // --- wxl.draw: shapes kept and drawn, through a device that records them ----------------------
+
+    /// A Direct3D 9 device that records wxl.draw's pass: its states, its constants, its vertices.
+    struct DrawDevice final : wxl::core::gx::d3d9::Device
+    {
+        D3DCAPS9                              caps{};
+        char                                  objects[8]{};
+        int                                   made = 0, released = 0;
+        std::map<int, DWORD>                  states;
+        float                                 constants[256][4]{};
+        D3DVIEWPORT9                          viewport{};
+        IDirect3DVertexDeclaration9*          declaration = nullptr;
+        std::vector<wxl::gx::shapes::Vertex>  vertices;
+        struct Run
+        {
+            UINT  vertices;
+            DWORD zEnable, colorWrite, blend;
+            DWORD source = 0, destination = 0;
+            const void* pixel = nullptr;
+            const void* texture = nullptr;
+            float       surface[6][4] = {};
+            size_t      first = 0;
+            DWORD       zFunc = 0;
+            float       alpha = 1.0f; ///< c245.z: the run's opacity multiplier
+        };
+        std::vector<Run>             runs;
+        const void*                  pixel = nullptr;
+        const void*                  texture0 = nullptr;
+        float                        pixelConstants[256][4]{};
+        std::map<int, DWORD>         sampler0;
+
+        DrawDevice()
+        {
+            caps.PixelShaderVersion  = D3DPS_VERSION(3, 0);
+            caps.VertexShaderVersion = D3DVS_VERSION(3, 0);
+            caps.DeclTypes           = D3DDTCAPS_UBYTE4;
+            caps.MaxPrimitiveCount   = 0xFFFFF;
+        }
+        template <class T>
+        T* Make()
+        {
+            ++made;
+            return reinterpret_cast<T*>(&objects[made % 8]);
+        }
+        HRESULT Caps(D3DCAPS9& out) override { out = caps; return S_OK; }
+        HRESULT GetRenderTarget(DWORD, IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT SetRenderTarget(DWORD, IDirect3DSurface9*) override { return S_OK; }
+        HRESULT GetDepthStencil(IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT SetDepthStencil(IDirect3DSurface9*) override { return S_OK; }
+        HRESULT SurfaceDesc(IDirect3DSurface9*, D3DSURFACE_DESC& out) override { out = D3DSURFACE_DESC{}; return S_OK; }
+        HRESULT TextureSurface(IDirect3DTexture9*, IDirect3DSurface9** out) override { *out = nullptr; return S_OK; }
+        HRESULT Clear(DWORD, D3DCOLOR) override { return S_OK; }
+        HRESULT StretchRect(IDirect3DSurface9*, IDirect3DSurface9*) override { return S_OK; }
+        HRESULT CreateRenderTarget(UINT, UINT, D3DFORMAT, D3DMULTISAMPLE_TYPE, DWORD, IDirect3DSurface9** out) override
+        {
+            *out = nullptr;
+            return E_FAIL;
+        }
+        HRESULT CreateTargetTexture(UINT, UINT, D3DFORMAT, IDirect3DTexture9** out) override { *out = nullptr; return E_FAIL; }
+        HRESULT CreateVertexShader(const DWORD* code, IDirect3DVertexShader9** out) override
+        {
+            *out = code && code[0] == 0xFFFE0300u ? Make<IDirect3DVertexShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreatePixelShader(const DWORD* code, IDirect3DPixelShader9** out) override
+        {
+            *out = code && code[0] == 0xFFFF0300u ? Make<IDirect3DPixelShader9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        HRESULT CreateDeclaration(const D3DVERTEXELEMENT9* elements, IDirect3DVertexDeclaration9** out) override
+        {
+            // Stride 32: position, the other end, the colour, the corner's bytes.
+            const bool shape = elements && elements[0].Offset == 0 && elements[1].Offset == 12 && elements[2].Type == D3DDECLTYPE_D3DCOLOR &&
+                               elements[3].Offset == 28 && elements[3].Type == D3DDECLTYPE_UBYTE4 && elements[4].Stream == 0xFF;
+            *out = shape ? Make<IDirect3DVertexDeclaration9>() : nullptr;
+            return *out ? S_OK : E_FAIL;
+        }
+        void  Release(IUnknown* object) override { released += object ? 1 : 0; }
+        DWORD VertexShaderVersion(IDirect3DVertexShader9*) override { return 0xFFFE0300u; }
+        void  SetViewport(const D3DVIEWPORT9& v) override { viewport = v; }
+        void  SetRenderState(D3DRENDERSTATETYPE state, DWORD value) override { states[state] = value; }
+        void  SetSamplerState(DWORD s, D3DSAMPLERSTATETYPE state, DWORD value) override
+        {
+            if (s == 0) sampler0[state] = value;
+        }
+        void  SetTexture(DWORD s, IDirect3DBaseTexture9* t) override
+        {
+            if (s == 0) texture0 = t;
+        }
+        void  SetDeclaration(IDirect3DVertexDeclaration9* d) override { declaration = d; }
+        void  SetStreamSource(UINT, IDirect3DVertexBuffer9*, UINT, UINT) override {}
+        void  SetIndices(IDirect3DIndexBuffer9*) override {}
+        void  SetVertexShader(IDirect3DVertexShader9*) override {}
+        void  SetPixelShader(IDirect3DPixelShader9* p) override { pixel = p; }
+        void  SetVertexConstants(UINT first, const float* values, UINT count) override { std::memcpy(constants[first], values, count * 16); }
+        void  SetPixelConstants(UINT first, const float* values, UINT count) override { std::memcpy(pixelConstants[first], values, count * 16); }
+        DWORD State(D3DRENDERSTATETYPE s) { return states.count(s) ? states[s] : 0xDEADu; }
+        void  DrawIndexed(D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT) override {}
+        void  DrawUp(D3DPRIMITIVETYPE type, UINT primitives, const void* data, UINT stride) override
+        {
+            if (type != D3DPT_TRIANGLELIST || stride != sizeof(wxl::gx::shapes::Vertex)) return;
+            const auto* v = static_cast<const wxl::gx::shapes::Vertex*>(data);
+            Run run{primitives * 3, State(D3DRS_ZENABLE), State(D3DRS_COLORWRITEENABLE), State(D3DRS_ALPHABLENDENABLE),
+                    State(D3DRS_SRCBLEND), State(D3DRS_DESTBLEND), pixel, texture0};
+            std::memcpy(run.surface, pixelConstants[200], sizeof run.surface);
+            run.zFunc = State(D3DRS_ZFUNC);
+            run.alpha = constants[245][2];
+            run.first = vertices.size();
+            vertices.insert(vertices.end(), v, v + primitives * 3);
+            runs.push_back(run);
+        }
+    };
+
+    /// A flat ground at z 5 everywhere, every chunk loaded.
+    struct FlatGround final : wxl::gx::shapes::Ground
+    {
+        float heights[145];
+        FlatGround() { std::fill(std::begin(heights), std::end(heights), 5.0f); }
+        bool Present() override { return true; }
+        bool Chunk(int32_t, int32_t, const float*& h, uint16_t& holes) override
+        {
+            h     = heights;
+            holes = 0;
+            return true;
+        }
+    };
+
+    void CheckDraw()
+    {
+        namespace draw = wxl::core::services::draw;
+        namespace d9   = wxl::core::gx::d3d9::shapes;
+        const wxl_draw_api& api = wxl::core::services::DrawApi();
+        DrawDevice device;
+        FlatGround ground;
+        d9::UseDevice(&device);
+        draw::UseGround(&ground);
+        g_fakeWorldView = true;
+        Check(api.supported() == WXL_TRUE && api.unsupported_reason().size == 0, "a device of shader model 3 draws shapes");
+
+        wxl_draw_shape circle{};
+        circle.struct_size = sizeof circle;
+        circle.kind        = WXL_DRAW_CIRCLE;
+        circle.center      = wxl_vec3{110.0f, 210.0f, 0.0f};
+        circle.radius      = 3.0f;
+        wxl_draw_style style{};
+        style.struct_size = sizeof style;
+        style.color       = 0xFF8000u;
+        style.alpha       = 1.0f;
+        style.fill_alpha  = 0.5f;
+        style.width       = 2.0f;
+        Check(api.draw(&circle, &style) == WXL_OK, "an immediate circle is taken");
+
+        wxl_draw_shape box{};
+        box.struct_size = sizeof box;
+        box.kind        = WXL_DRAW_BOX;
+        box.center      = wxl_vec3{120.0f, 200.0f, 2.0f};
+        box.size        = wxl_vec3{2.0f, 2.0f, 2.0f};
+        wxl_draw_style top = style;
+        top.depth          = WXL_DRAW_DEPTH_ON_TOP;
+        top.fill_alpha     = 0.0f;
+        const wxl_handle kept = api.add(&box, &top, 0.0f);
+        Check(kept != WXL_HANDLE_NONE, "a box is kept");
+
+        const uint32_t invalidated = g_gxInvalidated;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        wxl_draw_stats stats{};
+        stats.struct_size = sizeof stats;
+        Check(api.stats(&stats) == WXL_OK && stats.drawn == 2 && stats.immediate == 1 && stats.shapes == 1,
+              "the world's liquids drawn: both shapes go onto it");
+        Check(stats.vertices == device.vertices.size() && stats.vertices > 0, "every vertex the frame wrote reached the device");
+        Check(device.runs.size() == 2 && device.runs[0].zEnable == D3DZB_TRUE && device.runs[1].zEnable == D3DZB_FALSE,
+              "two runs: against the depth, then on top");
+        Check(device.runs[0].colorWrite == 7u && device.runs[0].blend == TRUE, "blended, the scene's alpha left as it is");
+        Check(device.State(D3DRS_ZENABLE) == D3DZB_TRUE && g_gxInvalidated == static_cast<int>(invalidated) + 1,
+              "what the engine leaves set is put back, and its state sent again");
+        Check(device.viewport.Width == 1600 && device.viewport.Height == 900 && device.viewport.MaxZ == 1.0f,
+              "the viewport is the world's, from its box and the window");
+        Check(std::fabs(device.constants[244][0] - 1600.0f) < 1e-3f && std::fabs(device.constants[244][2] - (900.0f / 1080.0f) / 16.0f) < 1e-6f &&
+                  std::fabs(device.constants[240][0] - 2.0f / 1600.0f) < 1e-9f,
+              "c240 to c245: the view's columns, the screen and the width's scale");
+        bool laid = !device.vertices.empty(), fromEye = true;
+        for (const auto& v : device.vertices)
+            if (v.side == 1 && v.flags & 1) laid = laid && std::fabs(v.pos[2] - 5.0f) < 1e-4f;
+        fromEye = std::fabs(device.vertices[0].pos[0] - 10.0f) < 3.5f && std::fabs(device.vertices[0].pos[1] - 10.0f) < 3.5f;
+        Check(laid && fromEye, "the circle's fill lies on the ground, its vertices taken from the eye");
+        uint32_t fills = 0, fillAlpha = 0;
+        for (const auto& v : device.vertices)
+            if (v.side == 1 && (v.color & 0xFFFFFFu) == 0xFF8000u)
+            {
+                ++fills;
+                fillAlpha = v.color >> 24;
+            }
+        Check(fills > 0 && fillAlpha == 128, "the fill is drawn in the colour at its own opacity");
+
+        // The immediate shape is gone after its frame; the kept one stays.
+        device.vertices.clear();
+        device.runs.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.immediate == 0 && stats.drawn == 1 && device.runs.size() == 1, "an immediate shape is drawn by one frame only");
+
+        // Changing a kept shape.
+        Check(api.move(kept, wxl_vec3{130.0f, 200.0f, 2.0f}, 0.5f) == WXL_OK && api.set_style(kept, &style) == WXL_OK,
+              "a kept shape moves and takes a new look");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.rebuilt == 1, "a moved shape is built again once");
+        Check(api.set_duration(kept, 0.0f) == WXL_OK && api.update(kept, &circle) == WXL_OK, "it becomes a circle");
+        api.remove(kept);
+        Check(api.move(kept, circle.center, 0.0f) == WXL_E_NOT_FOUND, "a removed shape is not found");
+
+        // Refusals.
+        wxl_draw_shape bad = circle;
+        bad.radius         = 0.0f;
+        Check(api.draw(&bad, nullptr) == WXL_E_INVALID, "a circle of no radius is refused");
+        bad.radius = 300.0f;
+        Check(api.add(&bad, nullptr, 0.0f) == WXL_HANDLE_NONE, "a circle past the extent is not kept");
+        wxl_draw_style unsized = style;
+        unsized.struct_size    = 0;
+        Check(api.draw(&circle, &unsized) == WXL_E_INVALID, "a style without its struct_size is refused");
+        wxl_draw_style weird = style;
+        weird.depth          = 7;
+        Check(api.draw(&circle, &weird) == WXL_E_INVALID, "a depth that is none is refused");
+        Check(api.add(&circle, nullptr, -1.0f) == WXL_HANDLE_NONE, "a negative duration is refused");
+        uint32_t taken = 0;
+        wxl_draw_shape small = circle;
+        small.flags          = WXL_DRAW_FLAT;
+        small.radius         = 0.5f;
+        for (uint32_t i = 0; i < WXL_DRAW_MAX_IMMEDIATE + 1; ++i) taken += api.draw(&small, nullptr) == WXL_OK ? 1 : 0;
+        Check(taken == WXL_DRAW_MAX_IMMEDIATE, "a frame takes WXL_DRAW_MAX_IMMEDIATE immediate shapes of a mod, no more");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.draw(&small, nullptr) == WXL_OK, "the next frame takes them again");
+
+        // A duration runs out.
+        const wxl_handle brief = api.add(&circle, &style, 0.001f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.set_style(brief, &style) == WXL_E_NOT_FOUND, "a shape whose duration ran out is gone");
+
+        // Attached to an object: follows it, goes when it leaves view.
+        FakeObject boar;
+        boar.guid     = 0x7D1;
+        boar.typeId   = WXL_OBJECT_UNIT;
+        boar.position = wxl_vec3{140.0f, 220.0f, 5.0f};
+        wxl::seam::ObjectMgr::InitObject::After(&boar, nullptr, 100u);
+        const wxl_handle target = wxl::core::objects::HandleOf(&boar);
+        wxl_draw_shape   ring   = circle;
+        ring.kind               = WXL_DRAW_RING;
+        ring.center             = wxl_vec3{0.0f, 0.0f, 0.0f};
+        ring.inner              = 2.0f;
+        const wxl_handle mark   = api.add(&ring, &style, 0.0f);
+        Check(api.attach(mark, target, WXL_DRAW_ATTACH_TURN) == WXL_OK, "a ring is attached to a unit");
+        Check(api.attach(mark, target, 0x80) == WXL_E_INVALID, "an unknown flag is refused");
+        api.attach(mark, target, WXL_DRAW_ATTACH_TURN);
+        device.vertices.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        double cx = 0.0, cy = 0.0;
+        uint32_t n = 0;
+        for (const auto& v : device.vertices)
+            if (v.side == 1)
+            {
+                cx += v.pos[0];
+                cy += v.pos[1];
+                ++n;
+            }
+        Check(n > 0 && std::fabs(cx / n - 40.0) < 0.5 && std::fabs(cy / n - 20.0) < 0.5, "it is drawn around the unit");
+        boar.position.x += 3.0f;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.rebuilt == 1, "it is built again where the unit went");
+        Check(api.detach(mark) == WXL_OK && api.attach(mark, target, 0) == WXL_OK, "it is let go of, and attached again");
+        wxl::seam::ObjectMgr::ObjDelete::Before(&boar);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(api.detach(mark) == WXL_E_NOT_FOUND, "the unit gone, its shape is gone");
+
+        // The frame's budget: shapes past it are left out, counted.
+        wxl_draw_shape ball{};
+        ball.struct_size = sizeof ball;
+        ball.kind        = WXL_DRAW_SPHERE;
+        ball.center      = wxl_vec3{600.0f, 200.0f, 2.0f};
+        ball.radius      = 200.0f;
+        wxl_draw_style solid = style;
+        solid.alpha          = 0.0f;
+        solid.fill_alpha     = 0.3f;
+        uint32_t balls = 0;
+        while (balls < 200 && api.draw(&ball, &solid) == WXL_OK) ++balls;
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        std::printf("  %u spheres of 200 yd: %u drawn, %u left out, %u vertices, %.0f us\n", balls, stats.drawn, stats.left_out,
+                    stats.vertices, stats.build_microseconds);
+        Check(stats.left_out > 0 && stats.vertices > WXL_DRAW_MAX_FRAME_VERTICES / 8 && stats.vertices <= WXL_DRAW_MAX_FRAME_VERTICES,
+              "past the frame's vertices, shapes are left out; the others drawn, their faces turned to the eye");
+        ball.center = wxl_vec3{110.0f, 200.0f, 2.0f};
+        device.vertices.clear();
+        Check(api.draw(&ball, &solid) == WXL_OK, "a sphere around the eye is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        Check(!device.vertices.empty(), "from inside a volume, its inside is drawn");
+
+        // Ownership: a mod's shapes go with it; off the main thread nothing is taken.
+        const wxl_handle mine = api.add(&circle, &style, 0.0f);
+        draw::ForgetMod(0);
+        Check(api.remove != nullptr && api.set_duration(mine, 1.0f) == WXL_E_NOT_FOUND, "a mod's shapes go with it");
+        wxl_result fromThread = WXL_OK;
+        std::thread([&] { fromThread = api.draw(&circle, &style); }).join();
+        Check(fromThread == WXL_E_INVALID, "off the main thread a shape is refused");
+
+        // abi 0.1.38: a textured inside multiplied into the ground, feathered; its texture opened
+        // once, readied on the device each frame, let go of after the shapes that used it.
+        draw::Clear();
+        device.vertices.clear();
+        device.runs.clear();
+        const size_t   openedBefore = g_openedTextures.size();
+        const int      closedBefore = g_texturesClosed;
+        wxl_draw_style stain        = style;
+        stain.alpha          = 0.0f;
+        stain.fill_alpha     = 0.8f;
+        stain.texture        = "SPELLS\\CrackedGround.blp";
+        stain.blend          = WXL_DRAW_BLEND_MODULATE;
+        stain.uv             = WXL_DRAW_UV_WORLD;
+        stain.uv_size_x      = 4.0f;
+        stain.feather        = 0.5f;
+        stain.flags          = WXL_DRAW_STYLE_FILL_COLOR;
+        stain.fill_color     = 0x806040u;
+        Check(api.draw(&circle, &stain) == WXL_OK, "a textured circle is taken");
+        const wxl_handle kept2 = api.add(&circle, &stain, 0.0f);
+        Check(kept2 != WXL_HANDLE_NONE && g_openedTextures.size() == openedBefore + 1, "its texture is opened once for both shapes");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.textured == 2 && stats.textures == 1 && stats.textures_loading == 0, "both insides drawn as surfaces of one texture");
+        const DrawDevice::Run* surfaceRun = nullptr;
+        for (const auto& run : device.runs)
+            if (run.texture == g_fakeD3dTexture) surfaceRun = &run;
+        Check(surfaceRun && surfaceRun->source == D3DBLEND_DESTCOLOR && surfaceRun->destination == D3DBLEND_ZERO,
+              "MODULATE multiplies the scene (DESTCOLOR, ZERO) with the device's texture on sampler 0");
+        Check(surfaceRun && surfaceRun->surface[3][3] == 0.5f && surfaceRun->surface[5][1] == 1.0f && surfaceRun->surface[2][2] == 1.0f &&
+                  surfaceRun->surface[2][3] == 1.0f && surfaceRun->surface[3][1] == 3.0f,
+              "c200 to c205 carry its feather, its blend, its repeat and its radius");
+        Check(device.sampler0[D3DSAMP_ADDRESSU] == D3DTADDRESS_WRAP && device.sampler0[D3DSAMP_MIPFILTER] == D3DTEXF_LINEAR,
+              "WORLD repeats the picture, mipmapped");
+        Check(device.texture0 == nullptr, "the texture is unbound after the shapes");
+        bool inPlane = surfaceRun != nullptr, tinted = surfaceRun != nullptr;
+        for (size_t i = 0; surfaceRun && i < surfaceRun->vertices; ++i)
+        {
+            const auto& v = device.vertices[surfaceRun->first + i];
+            inPlane = inPlane && v.other[0] * v.other[0] + v.other[1] * v.other[1] <= 9.0f + 1e-3f && (v.side & 3) == 1;
+            tinted  = tinted && (v.color & 0xFFFFFFu) == 0x806040u && (v.color >> 24) == 204u;
+        }
+        Check(inPlane && tinted, "its corners carry the circle's plane, in the fill's own colour and opacity");
+        // A texture still loading: the inside waits, the lines do not.
+        wxl_draw_style loading = stain;
+        loading.texture        = "Textures\\Loading.blp";
+        loading.alpha          = 1.0f;
+        device.runs.clear();
+        Check(api.draw(&circle, &loading) == WXL_OK, "a texture not yet loaded is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.textures == 2 && stats.textured == 1 && stats.drawn == 2, "its inside is left out of the frame, its outline drawn");
+        // Let go of: the immediate one at once, the kept one when removed; closed a while later.
+        api.remove(kept2);
+        wxl::seam::Gx::ScenePresent::Before();
+        Check(g_texturesClosed == closedBefore, "a texture lingers a few seconds after its last shape");
+        // Refusals of abi 0.1.38's fields.
+        wxl_draw_style badStyle = stain;
+        badStyle.blend          = 7;
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a blend that is none is refused");
+        badStyle         = stain;
+        badStyle.texture = "Textures\\Missing.blp";
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a texture the client makes none of is refused");
+        badStyle             = stain;
+        badStyle.radial_fade = 2.0f;
+        Check(api.draw(&circle, &badStyle) == WXL_E_INVALID, "a radial fade past 1 is refused");
+        // The sizes of abi 0.1.36 are still taken, as the look they had.
+        wxl_draw_style old = style;
+        old.struct_size    = WXL_DRAW_STYLE_SIZE_0136;
+        old.texture        = "Textures\\Missing.blp"; // past its size: not read
+        wxl_draw_shape oldShape = circle;
+        oldShape.struct_size    = WXL_DRAW_SHAPE_SIZE_0136;
+        Check(api.draw(&oldShape, &old) == WXL_OK, "a shape and a style of abi 0.1.36 are taken, the fields past them not read");
+
+        // Lines along, soft, shadowed: one more copy of the segments, under the lines, moved.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        const std::vector<wxl_vec3> path = {{100, 200, 0}, {110, 200, 0}, {110, 210, 0}};
+        const std::vector<float>    fades = {0.0f, 1.0f, 1.0f};
+        wxl_draw_shape              line{};
+        line.struct_size  = sizeof line;
+        line.kind         = WXL_DRAW_LINE;
+        line.points       = path.data();
+        line.point_count  = 3;
+        line.point_alphas = fades.data();
+        wxl_draw_style gold = style;
+        gold.color           = 0xE0B040u;
+        gold.softness        = 1.0f;
+        gold.shadow_alpha    = 0.5f;
+        gold.shadow_x        = 1.5f;
+        gold.shadow_y        = 1.5f;
+        gold.shadow_softness = 1.0f;
+        Check(api.draw(&line, &gold) == WXL_OK, "a soft gold line with a shadow is taken");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        size_t shadows = 0, lines = 0, faded = 0;
+        for (const auto& v : device.vertices)
+        {
+            const bool moved = (v.side >> 2) == 3 && (v.end >> 1) == 3;
+            shadows += moved && (v.color & 0xFFFFFFu) == 0 ? 1 : 0;
+            lines += !moved && (v.color & 0xFFFFFFu) == 0xE0B040u && (v.flags >> 2) == 4 ? 1 : 0;
+            faded += (v.color & 0xFFFFFFu) == 0xE0B040u && (v.color >> 24) == 0 ? 1 : 0;
+        }
+        Check(stats.shadows == 1 && shadows == 12 && lines == 12, "its shadow is its segments once more, 1.5 pixels right and down, black");
+        Check(faded == 3, "the line starts transparent at its first point");
+        Check(!device.vertices.empty() && (device.vertices[0].color & 0xFFFFFFu) == 0, "the shadow is drawn before the line");
+
+        // abi 0.1.39: a textured box seen through the ground, its faces each a surface; the same
+        // immediate shape given again is not built again; abi 0.1.38's style still taken.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        wxl_draw_shape crate{};
+        crate.struct_size = sizeof crate;
+        crate.kind        = WXL_DRAW_BOX;
+        crate.center      = wxl_vec3{112.0f, 204.0f, 4.0f};
+        crate.size        = wxl_vec3{2.0f, 2.0f, 4.0f};
+        wxl_draw_style xray = stain;
+        xray.alpha          = 1.0f;
+        xray.blend          = WXL_DRAW_BLEND_ALPHA;
+        xray.uv             = WXL_DRAW_UV_TILE;
+        xray.uv_offset_x    = 0.25f;
+        xray.occluded_alpha = 0.35f;
+        Check(api.draw(&crate, &xray) == WXL_OK && api.draw(&crate, &xray) == WXL_OK, "a textured box seen through the ground, twice");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.occluded == 2 && stats.textured == 2, "both drawn where the scene hides them too, their faces as surfaces");
+        size_t faceRuns = 0, behindRuns = 0, behindFaces = 0;
+        bool   order = true;
+        for (size_t i = 0; i < device.runs.size(); ++i)
+        {
+            const auto& run = device.runs[i];
+            const bool  face = run.texture == g_fakeD3dTexture && (device.vertices[run.first].side & 3) == 1; // a surface: textured triangles
+            faceRuns += face && run.zFunc == D3DCMP_LESSEQUAL ? 1 : 0;
+            if (run.zFunc == D3DCMP_GREATER)
+            {
+                ++behindRuns;
+                behindFaces += face ? 1 : 0;
+                order = order && std::fabs(run.alpha - 0.35f) < 1e-6f;
+            }
+            else
+                order = order && run.alpha == 1.0f;
+        }
+        Check(faceRuns >= 2 && faceRuns <= 6 && behindFaces == faceRuns, "a box shows at most three faces each, every one drawn behind the scene too");
+        Check(behindRuns > 0 && order, "the hidden part at 0.35 of its opacity (GREATER), the seen part as usual");
+        Check(device.State(D3DRS_ZFUNC) == D3DCMP_LESSEQUAL, "the depth test is put back");
+        bool facePlane = false;
+        for (const auto& run : device.runs)
+            if (run.texture == g_fakeD3dTexture && run.vertices && (device.vertices[run.first].side & 3) == 1)
+            {
+                const auto& v = device.vertices[run.first];
+                facePlane = std::fabs(v.other[0]) <= 2.0f + 1e-3f && std::fabs(v.other[1]) <= 1.0f + 1e-3f && (v.side & 3) == 1 &&
+                            run.surface[0][2] != 0.0f && run.surface[3][0] == 1.0f;
+            }
+        Check(facePlane, "a face's corners carry its frame, its numbers its offset and its box");
+        // The same immediate shapes again: not built again; a moved one is.
+        Check(api.draw(&crate, &xray) == WXL_OK && api.draw(&circle, &xray) == WXL_OK, "the box again, and a circle where the other box was");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.reused == 1, "a shape given as the frame before is drawn without being built again");
+        wxl_draw_style older = xray;
+        older.struct_size    = WXL_DRAW_STYLE_SIZE_0138;
+        Check(api.draw(&crate, &older) == WXL_OK, "a style of abi 0.1.38 is taken, occluded_alpha not read");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.occluded == 0 && stats.textured == 1, "and draws only what is seen");
+        wxl_draw_style badXray = xray;
+        badXray.occluded_alpha = 1.5f;
+        Check(api.draw(&crate, &badXray) == WXL_E_INVALID, "an occluded opacity past 1 is refused");
+
+        // abi 0.1.40: particles. A burst thrown and forgotten, a kept emitter at a rate, both
+        // simulated each frame and drawn in a run of their own; budgets, refusals, ownership.
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        device.vertices.clear();
+        device.runs.clear();
+        wxl_draw_emitter clods{};
+        clods.struct_size = sizeof clods;
+        clods.spawn       = WXL_DRAW_SPAWN_POINT;
+        clods.center      = wxl_vec3{110.0f, 210.0f, 5.5f};
+        clods.burst       = 20;
+        clods.spread      = 0.6f;
+        clods.speed_min   = 3.0f;
+        clods.speed_max   = 5.0f;
+        clods.life_min    = clods.life_max = 0.5f;
+        clods.size_min    = clods.size_max = 0.2f;
+        clods.gravity     = 19.29f;
+        clods.ground      = WXL_DRAW_GROUND_BOUNCE;
+        clods.restitution = 0.4f;
+        wxl_draw_particles earth{};
+        earth.struct_size = sizeof earth;
+        earth.texture     = "SPELLS\\CrackedGround.blp";
+        earth.flags       = WXL_DRAW_PARTICLES_MASK;
+        earth.softness    = 0.2f;
+        earth.key_count   = 2;
+        earth.keys[0]     = wxl_draw_particle_key{0.0f, 1.0f, 0x806040u, 1.0f};
+        earth.keys[1]     = wxl_draw_particle_key{1.0f, 0.5f, 0x806040u, 0.0f};
+        Check(api.emit(&clods, &earth) == WXL_OK, "a burst of clods is thrown");
+        wxl_draw_emitter puff = clods;
+        puff.burst            = 0;
+        puff.rate             = 120.0f;
+        puff.ground           = WXL_DRAW_GROUND_NONE;
+        puff.gravity          = 0.0f;
+        wxl_draw_particles dust{};
+        dust.struct_size    = sizeof dust;
+        dust.blend          = WXL_DRAW_BLEND_ADD;
+        dust.occluded_alpha = 0.3f;
+        const wxl_handle fountain = api.add_emitter(&puff, &dust);
+        Check(fountain != WXL_HANDLE_NONE, "a kept emitter at a rate");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == 20 && stats.emitters == 2 && stats.particles_culled == 0, "the burst alive, both emitters held");
+        size_t particleRuns = 0, particleBehind = 0, sixes = 0;
+        for (const auto& run : device.runs)
+            if (run.vertices && device.vertices[run.first].side == 1 && run.vertices % 6 == 0 && run.surface[2][3] == 1.0f && run.surface[5][2] == 1.0f)
+            {
+                ++particleRuns;
+                sixes += run.vertices / 6;
+            }
+        Check(particleRuns == 1 && sixes == 20 && stats.particle_draws >= 1, "the clods drawn as one run of masked pictures, six corners each");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        device.runs.clear();
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        for (const auto& run : device.runs) particleBehind += run.zFunc == D3DCMP_GREATER && run.alpha > 0.29f && run.alpha < 0.31f ? 1 : 0;
+        Check(stats.particles > 20 && stats.particles_emitted > 0 && particleBehind == 1, "the rate throws more, and its dust is drawn behind the scene too");
+        Check(api.burst(fountain, 10) == WXL_OK && api.place(fountain, wxl_vec3{120.0f, 200.0f, 6.0f}, 0.0f) == WXL_OK &&
+                  api.update_emitter(fountain, &puff) == WXL_OK && api.set_emitter_style(fountain, &earth) == WXL_OK,
+              "Burst, Place, UpdateEmitter and SetEmitterStyle reach the emitter");
+        // Their lives run out: the thrown burst goes with them; the kept one stays until stopped.
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        for (int i = 0; i < 8; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            wxl::seam::WorldScene::RenderLiquidPass::After();
+        }
+        api.stats(&stats);
+        Check(stats.emitters == 1, "a thrown burst goes once its particles have lived");
+        api.stop(fountain);
+        Check(api.burst(fountain, 1) == WXL_E_NOT_FOUND, "a stopped emitter is not found");
+        for (int i = 0; i < 8; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            wxl::seam::WorldScene::RenderLiquidPass::After();
+        }
+        api.stats(&stats);
+        Check(stats.emitters == 0 && stats.particles == 0, "its particles live out their lives, then it goes");
+        // Budgets and refusals.
+        wxl_draw_emitter big = clods;
+        big.burst            = WXL_DRAW_MAX_BURST + 1;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a burst past WXL_DRAW_MAX_BURST is refused");
+        big.burst = 0;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a burst of nothing is refused");
+        big.burst    = 10;
+        big.life_min = 0.0f;
+        Check(api.emit(&big, nullptr) == WXL_E_INVALID, "a life of 0 is refused");
+        wxl_draw_particles badLook = earth;
+        badLook.key_count          = 2;
+        badLook.keys[1].t          = -1.0f;
+        Check(api.emit(&clods, &badLook) == WXL_E_INVALID, "keys out of order are refused");
+        big          = clods;
+        big.burst    = WXL_DRAW_MAX_BURST;
+        big.life_min = big.life_max = 30.0f;
+        for (int i = 0; i < 5; ++i) api.emit(&big, nullptr);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == WXL_DRAW_MAX_MOD_PARTICLES && stats.particles_culled == 5 * WXL_DRAW_MAX_BURST - WXL_DRAW_MAX_MOD_PARTICLES,
+              "past a mod's particles, the rest are not thrown and are counted");
+        draw::ForgetMod(0);
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        Check(stats.particles == 0 && stats.emitters == 0, "a mod's emitters and particles go with it");
+
+        // Beams: a quad strip turned to the eye each frame; soft or textured, a surface.
+        device.vertices.clear();
+        device.runs.clear();
+        const std::vector<wxl_vec3> ends = {{108.0f, 205.0f, 5.0f}, {110.0f, 207.0f, 15.0f}};
+        wxl_draw_shape ray{};
+        ray.struct_size = sizeof ray;
+        ray.kind        = WXL_DRAW_BEAM;
+        ray.points      = ends.data();
+        ray.point_count = 2;
+        ray.size        = wxl_vec3{1.5f, 0.5f, 0.0f};
+        wxl_draw_style light = style;
+        light.alpha          = 0.0f;
+        light.fill_alpha     = 0.8f;
+        light.feather        = 1.0f;
+        light.blend          = WXL_DRAW_BLEND_ADD;
+        light.occluded_alpha = 0.25f;
+        const wxl_handle kept3 = api.add(&ray, &light, 0.0f);
+        Check(kept3 != WXL_HANDLE_NONE && api.draw(&ray, &light) == WXL_OK, "a soft beam, kept and immediate");
+        wxl::seam::WorldScene::RenderLiquidPass::After();
+        api.stats(&stats);
+        size_t beamRuns = 0, beamBehind = 0;
+        for (const auto& run : device.runs)
+            if (run.vertices == 48 && run.surface[4][2] == 1.0f && run.surface[3][3] == 1.0f)
+            {
+                beamRuns += run.zFunc == D3DCMP_LESSEQUAL ? 1 : 0;
+                beamBehind += run.zFunc == D3DCMP_GREATER ? 1 : 0;
+            }
+        Check(beamRuns == 2 && beamBehind == 2 && stats.textured == 2, "each a surface of 48 corners, soft to its sides, drawn behind the scene too");
+        wxl_draw_shape oneEnd = ray;
+        oneEnd.point_count    = 1;
+        Check(api.draw(&oneEnd, &light) == WXL_E_INVALID, "a beam of one point is refused");
+        api.remove(kept3);
+
+        // A device without shader model 3 says so.
+        device.caps.VertexShaderVersion = D3DVS_VERSION(2, 0);
+        d9::UseDevice(&device);
+        const wxl_str why = api.unsupported_reason();
+        Check(api.supported() == WXL_FALSE && std::string_view(why.data, why.size).find("shader model 3.0") != std::string_view::npos &&
+                  api.draw(&circle, &style) == WXL_E_UNSUPPORTED,
+              "a device of shader model 2 draws none, and says why");
+
+        draw::Clear();
+        d9::UseDevice(nullptr);
+        draw::UseGround(nullptr);
+        g_fakeWorldView = false;
+    }
 }
 
 // Core.cpp's flag per event, which the harness keeps as the runtime does: a hot seam's body reads
@@ -9597,6 +16656,7 @@ int main(int argc, char** argv)
     // Unbuffered, so the last line printed before a crash is never held back in a buffer.
     setvbuf(stdout, nullptr, _IONBF, 0);
 
+
     wxl::core::binding::Bind(FakeInit());
 
     wxl::host::HostConfig config;
@@ -9606,11 +16666,7 @@ int main(int argc, char** argv)
     config.services.push_back(wxl::host::PublishedService{
         WXL_SCRIPT_SERVICE, WXL_SCRIPT_SERVICE_VERSION, &wxl::core::services::ScriptApi()});
     g_host              = std::make_unique<wxl::host::ModHost>(std::move(config));
-    g_host->SetListenHandler(
-        [](void*, wxl_event event, bool listening) {
-            if (static_cast<uint32_t>(event) < static_cast<uint32_t>(WXL_EV_COUNT)) wxl_core_listening[event] = listening ? 1 : 0;
-        },
-        nullptr);
+    g_host->SetListenHandler([](void*, wxl_event event, bool listening) { wxl::core::listening::ModsListen(event, listening); }, nullptr);
 
     printf("seam harness: %zu seam(s), %zu raisable event(s), %zu binding row(s) left unbound by the fake\n",
            wxl::core::seams::Table().size(), wxl::core::seams::RaisedEvents().size(),
@@ -9640,14 +16696,26 @@ int main(int argc, char** argv)
     CheckCode();
     CheckFrameScript();
     CheckNetClient();
+    CheckNetOpcodes();
     CheckNetConnection();
     CheckClientError();
     CheckClientDestroy();
     CheckInput();
+    CheckInputService();
+    CheckCamera();
+    CheckWorldTrace();
+    CheckMouseLookBlock();
+    CheckPose();
+    CheckAnimation();
+    CheckSelectionCircle();
+    CheckTexture();
+    CheckHighlight();
+    CheckImGuiService();
     CheckStorage();
     CheckSound();
     CheckStorageService();
     CheckAssetPipeline();
+    CheckAssetBricks();
     CheckDataService();
     CheckRender();
     CheckSpell();
@@ -9661,6 +16729,19 @@ int main(int argc, char** argv)
     CheckScriptError();
     CheckWorldZoneMouseoverClick();
     CheckConsoleVar();
+    CheckCVarService();
+    CheckTerrainService();
+    CheckTerrainLayers();
+    CheckTerrainLayerExtras();
+    CheckTerrainLayerLimit();
+    CheckSplitTiles();
+    CheckRetailLiquids();
+    CheckRetailWdl();
+    CheckMissingTiles();
+    CheckTerrainExtraLayers();
+    CheckShaderCode();
+    CheckDraw();
+    CheckInterfaceSignature();
     CheckPlayerMoveMoneyLevel();
     CheckGlue();
     CheckChat();
@@ -9677,15 +16758,21 @@ int main(int argc, char** argv)
     CheckProfile();
 #endif
     CheckModelBatch();
+    CheckRenderService();
     CheckAppearance();
     CheckM2Service();
+    CheckAnimateGates();
+    CheckDrops();
+    CheckM2World();
     CheckModelStages();
     CheckX64Only();
 #if defined(_M_IX86)
     CheckThiscallShim();
+    CheckGxAdapterX86();
     CheckCallX86();
     CheckModelCallsX86();
     CheckModelDrawX86();
+    CheckHighlightDrawX86();
     CheckOneSidedShim();
     CheckThiscallGate();
     CheckGetUpdateObjectDetour();
@@ -9697,7 +16784,9 @@ int main(int argc, char** argv)
     CheckFindFileDetour();
     CheckValidatorDetour();
     CheckGameplayDetours();
+    CheckInterfaceSignatureDetour();
 #endif
+    CheckEngineService();
     CheckPointTable();
     CheckPointDispatch();
     CheckEveryPoint();
@@ -9705,6 +16794,7 @@ int main(int argc, char** argv)
     CheckPointPrologues();
     CheckPointDetours();
     CheckPointSides();
+    CheckDeinlined();
 #endif
 
     printf("\n%d failure(s)\n", g_failures);

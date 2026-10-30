@@ -1,0 +1,5 @@
+SPIRV-Tools vulkan-sdk-1.4.357.0 (https://github.com/KhronosGroup/SPIRV-Tools, commit 9a49b0883b9b635689a85b5647dbfcb223268151),
+Apache-2.0 (LICENSE). Kept: CMakeLists.txt, source/, include/, tools/, utils/, external/CMakeLists.txt, cmake/, examples/,
+CHANGES, unmodified; test/ keeps only its CMakeLists.txt (which stops at once when SPIRV_SKIP_TESTS is on), the rest of the
+tests and the CI files are left out. Built for the tests only (tests/vk/): spirv-val holds every shader the renderer makes
+to the Vulkan 1.3 rules. Reads SPIRV-Headers from deps/spirv-headers.

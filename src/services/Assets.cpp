@@ -56,6 +56,12 @@ namespace
     /// Whether a provider answered "not yet" on this thread since the last ClearPending.
     thread_local bool t_pending = false;
 
+    /// Whether the thread is inside a mod's wxl.storage call.
+    thread_local bool t_asking = false;
+
+    /// Where the thread's last lookup found its name.
+    thread_local wxl::core::services::assets::Resolution t_resolution;
+
     char Lower(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
 
     /// A name as the client compares it: any case, backslashes.
@@ -864,6 +870,25 @@ namespace wxl::core::services::assets
     }
 
     Mode Current() { return t_mode; }
+
+    bool ModAsking() { return t_asking; }
+
+    AskingScope::AskingScope() : previous_(t_asking) { t_asking = true; }
+    AskingScope::~AskingScope() { t_asking = previous_; }
+
+    void ClearResolution() { t_resolution = Resolution{}; }
+
+    void NoteResolution(const Resolution& resolution) { t_resolution = resolution; }
+
+    const Resolution& LastResolution() { return t_resolution; }
+
+    uint32_t SourceLayer(uint32_t id, std::string* mod)
+    {
+        const SourcePtr source = ById(id);
+        if (!source) return WXL_FILE_LAYER_NONE;
+        if (mod) *mod = ModName(source->mod);
+        return source->served ? WXL_FILE_LAYER_SERVED : WXL_FILE_LAYER_PROVIDER;
+    }
 
     void ClearPending() { t_pending = false; }
 

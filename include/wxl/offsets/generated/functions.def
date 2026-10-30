@@ -12,7 +12,7 @@
 //
 // This table is data, not an interface. Include it from ONE translation unit only, with
 // WXL_OFFSET_FUNCTION defined to append to a lookup table (name -> address, address -> name). Never
-// include it from a header: it is 26078 rows.
+// include it from a header: it is 26079 rows.
 //
 // Columns:
 //   name     the qualified C++ name as written in the fork (enclosing namespaces and classes

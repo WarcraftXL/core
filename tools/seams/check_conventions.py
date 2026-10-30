@@ -50,8 +50,9 @@ WITNESS_ROW = re.compile(r"\bWXL_SEAM_WITNESS\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*([^
 class Row:
     """One WXL_SEAM row, as the ABI sees it."""
 
-    def __init__(self, domain, name, spec, returns, convention, params, origin, gated):
+    def __init__(self, domain, name, spec, returns, convention, params, origin, gated, shape=""):
         self.domain = domain
+        self.shape = shape            # "", "_BEFORE", "_AFTER" or "_GATE": the sides the body has
         self.name = name
         self.spec = spec              # the symbol column, "name" or "name@0x<address>"
         self.returns = returns
@@ -127,7 +128,7 @@ def read_rows(seams_dir, problems):
             inner = params.strip()[1:-1].strip()
             decls = [] if not inner else table.split_top_level(inner)
             rows.append(Row(domain, name, spec.strip().strip('"'), returns, convention,
-                            decls, origin, gated))
+                            decls, origin, gated, match.group(1) or ""))
         for match in WITNESS_ROW.finditer(text):
             origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
             witnesses.append(("%s.%s" % (match.group(1), match.group(2)), match.group(3), origin))
@@ -171,6 +172,465 @@ def read_point_rows(path, problems):
         rows.append(Row("Point", ident, "%s@%s" % (name.strip().strip('"'), address.strip()), returns,
                         convention, decls, origin, False))
     return rows
+
+
+PARENT_ROW = re.compile(r"\bWXL_POINT_X86_PARENT\s*\(")
+
+
+def read_parent_rows(path, problems):
+    """Every WXL_POINT_X86_PARENT row of the point table, as a row named Parent.<Ident>: a function
+    whose body the runtime replaces with its recompilation (src/deinlined/). A parent that is a
+    point of its own is its Point row already and is left out here."""
+    if not path.is_file():
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    points = set()
+    for match in POINT_ROW.finditer(text):
+        close = table.balanced(text, match.end() - 1)
+        if close > 0:
+            points.add(table.split_top_level(text[match.end():close - 1])[1].strip().strip('"'))
+    rows = []
+    for match in PARENT_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = table.split_top_level(text[open_at + 1:close - 1])
+        if len(columns) != 7:
+            problems.append("%s: a WXL_POINT_X86_PARENT row without its seven columns" % path.name)
+            continue
+        ident, name, address, _length, convention, returns, params = columns
+        name = name.strip().strip('"')
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        inner = params.strip()[1:-1].strip()
+        decls = [] if not inner else table.split_top_level(inner)
+        row = Row("Parent", ident.strip(), "%s@%s" % (name.split("(")[0], address.strip()), returns,
+                  convention.strip(), decls, origin, False)
+        row.listed = name in points
+        rows.append(row)
+    return rows
+
+
+# --- The recompiled bodies (src/deinlined/<Parent>.gen.cpp) -----------------------------------
+#
+# extract.py writes each parent's body with Wow.exe's functions and globals it uses at their
+# addresses, in its `namespace stock`. Every function there is a row checked like the seams'
+# (named Deinlined.<shim>, once per address), and the body as a whole is held to Wow.exe's own:
+# what it calls and reads, Wow.exe's parent calls and reads (check_bodies).
+
+SHIM = re.compile(r"^\s*inline const auto (\w+) = reinterpret_cast<(.+?)\((__\w+)\*\)\((.*)\)>"
+                  r"\((0x[0-9A-Fa-f]{8})\); // (\S+)", re.M)
+GLOBAL = re.compile(r"^\s*inline (.+?)& (\w+) = \*reinterpret_cast<.+?\*>\((0x[0-9A-Fa-f]{8})\);", re.M)
+STRING = re.compile(r"reinterpret_cast<const char\*>\((0x[0-9A-Fa-f]{8})\)")
+
+
+def split_types(text):
+    """A parameter list split at its top-level commas, template brackets kept whole."""
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        if c in "<(":
+            depth += 1
+        elif c in ">)":
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append(text[start:i].strip())
+            start = i + 1
+    if text[start:].strip():
+        out.append(text[start:].strip())
+    return out
+
+
+class Body:
+    """One recompiled parent body: the parent row, and the stock functions, globals and strings
+    it names."""
+
+    def __init__(self, parent, path):
+        self.parent = parent          # its Parent or Point row
+        self.path = path
+        self.shims = []               # (ident, address, name, conv, ret, [param types])
+        self.data = []                # (name, address): globals and strings
+
+
+def read_bodies(directory, parents, problems):
+    """The body of each parent row, read from <directory>/<Ident>.gen.cpp."""
+    bodies = []
+    for parent in parents:
+        path = directory / ("%s.gen.cpp" % parent.name)
+        if not path.is_file():
+            problems.append("%s (%s): its recompiled body %s is missing" % (parent.point, parent.origin, path.name))
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        body = Body(parent, path)
+        for m in SHIM.finditer(text):
+            body.shims.append((m.group(1), int(m.group(5), 16), m.group(6), m.group(3)[2:], m.group(2).strip(),
+                               split_types(m.group(4))))
+        for m in GLOBAL.finditer(text):
+            body.data.append((m.group(2), int(m.group(3), 16)))
+        for m in STRING.finditer(text):
+            body.data.append(("the string at %s" % m.group(1), int(m.group(1), 16)))
+        bodies.append(body)
+    return bodies
+
+
+def body_rows(bodies, functions):
+    """A row per stock function the bodies call, once per address: its convention as the body
+    calls it (a thiscall member is written __fastcall with a dummy EDX)."""
+    rows, seen = [], set()
+    for body in bodies:
+        origin = body.path.name
+        for ident, address, name, conv, ret, params in body.shims:
+            if address in seen:
+                continue
+            seen.add(address)
+            if conv == "fastcall" and len(params) >= 2 and params[1] == "void*" and "::" in name:
+                conv, params = "thiscall", [params[0]] + params[2:]
+            names = sorted(n for n, at in functions.by_name.items() if address in at)
+            symbol = name if name in names else (names[0] if names else name)
+            rows.append(Row("Deinlined", re.sub(r"_\d+$", "", ident) if ident.endswith("_2") else ident,
+                            "%s@0x%08X" % (symbol, address), ret, conv, params, origin, False))
+    return rows
+
+
+def bare_return(binary, address):
+    """Whether the function at `address` is a lone `ret`: an empty function of the release
+    client (DebugLog), which a recompiled body leaves out."""
+    insns = disassemble(binary, address, address + 4)
+    return bool(insns) and insns[0].mn == "ret"
+
+
+def check_bodies(binary, functions, bodies, problems):
+    """Each recompiled body against Wow.exe's own parent: every function it calls is one the stock
+    parent calls, every function the stock parent calls is one it calls (or an empty one), and
+    every global and string it names is one the stock parent reads or writes."""
+    for body in bodies:
+        parent = body.parent
+        resolved, trouble = functions.resolve(parent.spec)
+        if resolved is None:
+            problems.append("%s (%s): its symbol `%s` does not resolve: %s"
+                            % (parent.point, parent.origin, parent.spec, trouble))
+            continue
+        address, extent = resolved
+        insns = trim_tables(disassemble(binary, address, address + extent), address, address + extent)
+        calls = {branch_target(i) for i in insns if i.mn == "call"} - {None}
+        named = set()
+        for insn in insns:
+            named.update(int(h, 16) for h in re.findall(r"0x[0-9a-f]{6,8}", insn.ops))
+        mine = {at for _, at, _, _, _, _ in body.shims}
+        where = "%s (%s)" % (body.path.name, parent.point)
+        for ident, at, name, _, _, _ in body.shims:
+            if at not in calls:
+                problems.append("%s: calls %s at 0x%08X (%s), which Wow.exe's own body at 0x%08X does not call"
+                                % (where, name, at, ident, address))
+        for at in sorted(calls - mine):
+            if not bare_return(binary, at):
+                problems.append("%s: Wow.exe's own body at 0x%08X calls 0x%08X, which the recompiled one "
+                                "does not call (and which is not an empty function)" % (where, address, at))
+        for name, at in body.data:
+            if at not in named:
+                problems.append("%s: names %s at 0x%08X, which Wow.exe's own body at 0x%08X never reaches"
+                                % (where, name, at, address))
+
+
+CALL_ROW = re.compile(r"\bWXL_BINDING_CALL_X86\s*\(")
+
+
+def read_call_rows(path, problems):
+    """Every WXL_BINDING_CALL_X86 row: a client function the x86 binding calls by hand, read as a
+    row named <domain>.<name>."""
+    if not path.is_file():
+        problems.append("the binding's call table is missing: %s" % path)
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    rows = []
+    for match in CALL_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = table.split_top_level(text[open_at + 1:close - 1])
+        if len(columns) != 6:
+            problems.append("%s: a WXL_BINDING_CALL_X86 row without its six columns" % path.name)
+            continue
+        domain, name, spec, returns, convention, params = columns
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        inner = params.strip()[1:-1].strip()
+        decls = [] if not inner else table.split_top_level(inner)
+        rows.append(Row(domain.strip(), name.strip(), spec.strip().strip('"'), returns, convention.strip(),
+                        decls, origin, False))
+    return rows
+
+
+# --- The calls the runtime takes out (include/wxl/tuning/drops_x86.def) ------------------------
+
+DROP_ROW = re.compile(r"^\s*WXL_DROP_CALL_X86\s*\(", re.M)
+
+
+class Drop:
+    def __init__(self, setting, caller, at, callee, name, origin):
+        self.setting, self.caller, self.at, self.callee, self.name, self.origin = (
+            setting, caller, at, callee, name, origin)
+
+
+def read_drop_rows(path, problems):
+    """Every WXL_DROP_CALL_X86 row: a call the runtime writes a NOP over."""
+    if not path.is_file():
+        problems.append("the dropped calls' table is missing: %s" % path)
+        return []
+    text = table.strip_cxx(path.read_text(encoding="utf-8", errors="replace"), keep_strings=True)
+    rows = []
+    for match in DROP_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = [c.strip() for c in table.split_top_level(text[open_at + 1:close - 1])]
+        if len(columns) != 5:
+            problems.append("%s: a WXL_DROP_CALL_X86 row without its five columns" % path.name)
+            continue
+        setting, caller, at, callee, name = columns
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        try:
+            rows.append(Drop(setting, caller.strip('"'), int(at, 0), int(callee, 0), name.strip('"'), origin))
+        except ValueError:
+            problems.append("%s: an address that does not read: %s, %s" % (origin, at, callee))
+    return rows
+
+
+def check_drops(binary, functions, drops, problems):
+    """Each dropped call: a five-byte `call` to the row's callee inside the row's caller, a callee
+    whose every `ret` pops nothing (so the caller's own cleanup stays balanced without it), and no
+    path after the call reading EAX before it writes it (its answer is dropped)."""
+    for drop in drops:
+        where = "drop %s (%s) at 0x%08X" % (drop.caller, drop.origin, drop.at)
+        found, why = functions.resolve(drop.caller)
+        if not found:
+            problems.append("%s: %s" % (where, why))
+            continue
+        start, extent = found
+        if not start <= drop.at < start + extent:
+            problems.append("%s: outside %s (0x%08X-0x%08X)" % (where, drop.caller, start, start + extent))
+            continue
+        insns = trim_tables(disassemble(binary, start, start + extent), start, start + extent)
+        insn = next((i for i in insns if i.addr == drop.at), None)
+        if insn is None or insn.mn != "call" or insn.size != 5 or branch_target(insn) != drop.callee:
+            problems.append("%s: not a five-byte call to 0x%08X (%s)"
+                            % (where, drop.callee, insn.text if insn else "no instruction starts there"))
+            continue
+        body = disassemble(binary, drop.callee, drop.callee + 0x100)
+        cut = next((n for n, i in enumerate(body) if i.mn == "int3"), len(body))
+        rets = [i for i in body[:cut] if i.mn in ("ret", "retn")]
+        if not rets or any(i.operands for i in rets):
+            problems.append("%s: %s (0x%08X) does not leave the stack to its caller: %s"
+                            % (where, drop.name, drop.callee,
+                               ", ".join(i.text for i in rets) or "no ret before its padding"))
+            continue
+        verdict = site_uses_eax(binary, functions, drop.at)
+        if verdict != "dead":
+            problems.append("%s: the code after the call %s EAX, the answer it would drop"
+                            % (where, "reads" if verdict == "reads" else "may read"))
+
+
+# --- The D3D9 devices' vtable slots (include/wxl/gx/slots.def) --------------------------------
+
+SLOT_ROW = re.compile(r"^\s*WXL_GX_SLOT\s*\(", re.M)
+VTABLE_ROW = re.compile(r'^\s*WXL_GX_VTABLE\s*\(\s*(\w+)\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*(\d+)\s*,\s*"([^"]+)"\s*\)', re.M)
+SLOT_APIS = ("d3d9", "d3d9ex")
+
+# The stock CGxDevice's size on x86: a member at or past it belongs to a device of one API.
+CGXDEVICE_SIZE = 0x3968
+
+
+class Slot:
+    """One WXL_GX_SLOT row: a slot of both D3D9 vtables."""
+
+    def __init__(self, index, name, returns, params, pops, kind, symbols, entries, origin):
+        self.index = index
+        self.name = name
+        self.returns = returns
+        self.params = params
+        self.pops = pops
+        self.kind = kind
+        self.symbols = symbols        # api -> symbol column ("" when the fork tags nothing there)
+        self.entries = entries        # api -> the entry's address, as the row writes it
+        self.origin = origin
+
+    def row(self, api):
+        """The row's function in one vtable, as a seam row check_row reads."""
+        return Row("Slot", "%s.%s" % (self.name, api), self.symbols[api], self.returns, "thiscall",
+                   self.params, self.origin, False)
+
+
+def read_slot_rows(path, problems):
+    """The vtables and the slots of slots.def."""
+    if not path.is_file():
+        problems.append("the slot table is missing: %s" % path)
+        return [], []
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    text = table.strip_cxx(raw, keep_strings=True)
+    vtables = [(m.group(1), int(m.group(2), 16), int(m.group(3)), m.group(4)) for m in VTABLE_ROW.finditer(text)]
+    slots = []
+    for match in SLOT_ROW.finditer(text):
+        open_at = match.end() - 1
+        close = table.balanced(text, open_at)
+        if close < 0:
+            continue
+        columns = [c.strip() for c in table.split_top_level(text[open_at + 1:close - 1])]
+        if len(columns) == 8 and columns[0] == "index":
+            continue                  # the shape's own #define
+        origin = "%s:%d" % (path.name, text.count("\n", 0, match.start()) + 1)
+        if len(columns) != 10:
+            problems.append("%s: a WXL_GX_SLOT row without its ten columns" % origin)
+            continue
+        index, name, returns, params, pops, kind, d3d9, d3d9_at, d3d9ex, d3d9ex_at = columns
+        inner = params[1:-1].strip()
+        slots.append(Slot(int(index), name, returns, [] if not inner else table.split_top_level(inner),
+                          int(pops), kind, {"d3d9": d3d9.strip('"'), "d3d9ex": d3d9ex.strip('"')},
+                          {"d3d9": int(d3d9_at, 16), "d3d9ex": int(d3d9ex_at, 16)}, origin))
+    return vtables, slots
+
+
+MEMBER = re.compile(r"\[\s*(e[abcd]x|e[sd]i)\s*\+\s*(0x[0-9A-Fa-f]+|\d+)\s*\]")
+
+
+def reaches_past_cgxdevice(insns):
+    """The instructions that address memory at CGxDevice's size or more from a register other than
+    the stack's: a member of a device of one API (D3D9's start right after CGxDevice's)."""
+    out = []
+    for insn in insns:
+        for match in MEMBER.finditer(insn.ops):
+            if int(match.group(2), 0) >= CGXDEVICE_SIZE:
+                out.append(insn)
+                break
+    return out
+
+
+def check_slots(binary, functions, vtables, slots, max_callers, problems):
+    """Every slot against both vtables of Wow.exe: the entry the row names is the one there, a slot
+    the runtime takes over is __thiscall and pops what the row says, an empty body is `ret n`, and
+    a slot it keeps reaches no member past CGxDevice's. The findings of the functions' rows."""
+    findings = []
+    image = getattr(binary, "image", None)
+    tables = {}
+    for api, address, count, factory in vtables:
+        # The factory: the runtime's detour on it reads its answer, the new device.
+        finding = check_row(binary, functions, Row("Slot", "Factory.%s" % api, factory, "void*", "cdecl", [],
+                                                   "slots.def", False), max_callers)
+        findings.append(finding)
+        if image is None:
+            problems.append("slots.def: the vtables are read from Wow.exe's bytes, which only the local "
+                            "backend has")
+            return findings
+        data = image_read(image, address, 4 * count)
+        if data is None:
+            problems.append("slots.def: the %s vtable at 0x%08X is outside Wow.exe's sections" % (api, address))
+            continue
+        tables[api] = struct.unpack("<%dI" % count, data)
+    if len(slots) != max((c for _, _, c, _ in vtables), default=0):
+        problems.append("slots.def: %d slot rows for %s" % (len(slots), ", ".join("%d %s slots" % (c, a) for a, _, c, _ in vtables)))
+    for slot in slots:
+        expected = 4 * (len(slot.params) - 1)
+        if slot.pops != expected:
+            problems.append("Slot.%s (%s): its parameters fill %d byte(s) of stack, but it pops %d"
+                            % (slot.name, slot.origin, expected, slot.pops))
+        if slot.kind == "keep" and slot.entries["d3d9"] != slot.entries["d3d9ex"]:
+            problems.append("Slot.%s (%s): kept, but the two devices hold different functions there"
+                            % (slot.name, slot.origin))
+        for api in SLOT_APIS:
+            if api not in tables:
+                continue
+            at = slot.entries[api]
+            held = tables[api][slot.index]
+            if held != at:
+                problems.append("Slot.%s (%s): the %s vtable holds 0x%08X at slot %d, not 0x%08X"
+                                % (slot.name, slot.origin, api, held, slot.index, at))
+                continue
+            symbol = slot.symbols[api]
+            if symbol:
+                resolved, trouble = functions.resolve(symbol)
+                if resolved is None:
+                    problems.append("Slot.%s (%s): %s" % (slot.name, slot.origin, trouble))
+                    continue
+                if resolved[0] != at:
+                    problems.append("Slot.%s (%s): %s is 0x%08X, not the 0x%08X the row writes"
+                                    % (slot.name, slot.origin, symbol, resolved[0], at))
+                    continue
+                findings.append(read_slot(binary, functions, slot, api, at, resolved[1]))
+                if slot.kind == "keep" and not symbol.startswith("CGxDevice::"):
+                    extent = resolved[1]
+                    insns = trim_tables(disassemble(binary, at, at + extent), at, at + extent)
+                    past = reaches_past_cgxdevice(insns)
+                    if past:
+                        problems.append("Slot.%s (%s): kept, but %s reaches past CGxDevice's members at %s"
+                                        % (slot.name, slot.origin, symbol,
+                                           ", ".join("0x%08X (%s)" % (i.addr, i.text) for i in past[:3])))
+                    for insn in insns:
+                        target = branch_target(insn) if insn.mn == "call" else None
+                        owner = functions.containing(target) if target is not None else None
+                        names = [n for n, hits in functions.by_name.items() if owner and owner[0] in hits]
+                        if any(n.startswith(("CGxDeviceD3d::", "CGxDeviceD3d9Ex::")) for n in names):
+                            problems.append("Slot.%s (%s): kept, but %s calls %s at 0x%08X"
+                                            % (slot.name, slot.origin, symbol, names[0], insn.addr))
+            elif slot.name == "Destructor":
+                # The D3D9Ex device's deleting destructor, untagged: read from its own code.
+                insns = disassemble(binary, at, at + 0x40)
+                rets = [i for i in insns if i.mn in ("ret", "retn")]
+                pops = int(rets[0].ops, 0) if rets and IMMEDIATE.match(rets[0].ops.strip()) else 0
+                if not rets or pops != slot.pops:
+                    problems.append("Slot.%s (%s): the %s destructor at 0x%08X pops %s, the row %d"
+                                    % (slot.name, slot.origin, api, at, pops if rets else "nothing read", slot.pops))
+            else:
+                code = image_read(image, at, 3)
+                pops = 0 if code and code[0] == 0xC3 else (struct.unpack_from("<H", code, 1)[0]
+                                                           if code and code[0] == 0xC2 else None)
+                if pops != slot.pops:
+                    problems.append("Slot.%s (%s): the untagged %s entry 0x%08X is not an empty body popping %d"
+                                    % (slot.name, slot.origin, api, at, slot.pops))
+    return findings
+
+
+def read_slot(binary, functions, slot, api, address, extent):
+    """One slot's function, read as a vtable calls it: `this` in ECX (read, or handed on to what it
+    calls in ECX), the rest on the stack, popped by the callee. A body that ends in a jump to
+    another function (a base class's, an empty one's) is read through to it."""
+    finding = Finding(slot.row(api))
+    finding.address = address
+    insns = trim_tables(disassemble(binary, address, address + extent), address, address + extent)
+    callee = read_callee(insns)
+    through = None
+    if not callee.rets and insns and insns[-1].mn == "jmp" and branch_target(insns[-1]) is not None:
+        through = branch_target(insns[-1])
+        target_extent = functions.starting_at(through)
+        if target_extent:
+            callee = read_callee(trim_tables(disassemble(binary, through, through + target_extent), through,
+                                             through + target_extent))
+            finding.notes.append("it jumps to 0x%08X, read in its place" % through)
+    finding.callee = callee
+    finding.notes.extend(callee.notes)
+    finding.convention = "thiscall"
+    where = "0x%08X" % address + (" (through 0x%08X)" % through if through else "")
+    if [r for r in callee.reg_args if r != "ecx"]:
+        finding.problems.append("Slot.%s.%s (%s): %s reads %s before it writes them: not a member a vtable calls"
+                                % (slot.name, api, slot.origin, where,
+                                   ", ".join(r.upper() for r in callee.reg_args if r != "ecx")))
+    if callee.cleans is None:
+        finding.problems.append("Slot.%s.%s (%s): who cleans the stack at %s is not settled%s"
+                                % (slot.name, api, slot.origin, where, evidence(callee, [])))
+    elif callee.cleans != slot.pops:
+        finding.problems.append("Slot.%s.%s (%s): %s pops %d byte(s), the row %d%s"
+                                % (slot.name, api, slot.origin, where, callee.cleans, slot.pops, evidence(callee, [])))
+    if callee.stack_dwords > len(slot.params) - 1:
+        finding.problems.append("Slot.%s.%s (%s): %s reads %d stack dword(s), more than the row's %d"
+                                % (slot.name, api, slot.origin, where, callee.stack_dwords, len(slot.params) - 1))
+    return finding
+
+
+def image_read(image, address, size):
+    """`size` bytes of the image at a virtual address, or None outside its sections."""
+    for section in image.sections:
+        if section.holds(address) and address + size <= section.va + section.size:
+            body = image.contents(section)
+            return body[address - section.va:address - section.va + size]
+    return None
 
 
 # --- The offsets table ------------------------------------------------------------------------
@@ -740,6 +1200,7 @@ class Callee:
         self.rets = []                # (address, bytes the ret pops)
         self.notes = []
         self.unsettled = None         # why who cleans is undetermined, when it is
+        self.prologue_end = None      # the first instruction past the entry run
 
     @property
     def stack_dwords(self):
@@ -774,6 +1235,104 @@ class Callee:
         return "cdecl"
 
 
+def fills_pushed_slot(insns, position):
+    """Whether the dword a `push reg` at `position` puts on the stack is only room for a value
+    stored there afterwards: MSVC passes a float argument as `push ecx` then `fstp dword ptr
+    [esp]`, whatever ecx held. True when a store to [esp] comes before anything else moves the
+    stack or reads it."""
+    for insn in insns[position + 1:]:
+        ops = insn.operands
+        target = ops[0].replace(" ", "") if ops else ""
+        if insn.mn in ("fstp", "fst", "mov") and target.endswith("[esp]"):
+            return True
+        if insn.mn in ("push", "pop", "call", "ret", "retn") or "esp" in insn.ops or insn.mn.startswith("j"):
+            return False
+    return False
+
+
+def effects(insns, position, saved):
+    """The registers the instruction at `position` reads and writes. A memory operand reads the
+    registers that address it whatever the mnemonic does with the value."""
+    insn = insns[position]
+    ops = insn.operands
+    first = ops[0] if ops else ""
+    reads, writes = set(), set()
+    for index, operand in enumerate(ops):
+        found, memory = registers(operand)
+        if memory:
+            reads |= found
+        elif index == 0 and insn.mn in WRITE_FIRST:
+            writes |= found
+        elif index == 0 and insn.mn in READ_WRITE_FIRST:
+            reads |= found
+            writes |= found
+        elif index == 0 and insn.mn.startswith("set"):
+            writes |= found
+        elif index == 0 and insn.mn.startswith("cmov"):
+            reads |= found
+            writes |= found
+        else:
+            reads |= found
+    if insn.mn == "lea" and len(ops) > 1:
+        # lea computes an address: its bracket registers are read, its first operand written.
+        reads |= registers(ops[1])[0]
+        writes |= registers(ops[0])[0]
+        reads -= writes
+    if writes_without_reading(insn, ops):
+        # The first operand's old value does not reach the result; a memory source of
+        # `imul r, [m], imm` is still read.
+        reads = registers(ops[1])[0] if len(ops) == 3 else set()
+        writes = registers(ops[0])[0]
+    if insn.mn == "push" and first in saved:
+        reads -= {first}          # a save, however late the compiler placed it
+    if insn.mn == "push" and first in VOLATILE and fills_pushed_slot(insns, position):
+        reads -= {first}          # four bytes of argument space, the value stored after
+    return reads, writes
+
+
+def path_reads(insns, start, saved):
+    """The registers read before they are written along some path through the function, from the
+    instruction at `start` (past the entry run), following its branches: a register one branch
+    writes and returns may still be read, unwritten, after the branch that skips it. Each as the
+    address of its first such read. A call writes the volatile registers: one read after it says
+    nothing about how the function was entered."""
+    at = {insn.addr: index for index, insn in enumerate(insns)}
+    tracked = frozenset(PARENT.values()) - {"esp", "ebp"}
+    unwritten = {}                    # position -> the registers no path to it has written yet
+    found = {}
+    todo = [(start, tracked)]
+    while todo:
+        position, state = todo.pop()
+        while position < len(insns):
+            before = unwritten.get(position)
+            if before is not None and state <= before:
+                break                     # nothing new reaches here
+            state = state | before if before is not None else state
+            unwritten[position] = state
+            insn = insns[position]
+            if insn.mn in ("ret", "retn", "retf"):
+                break
+            if not (insn.mn == "nop" or (insn.mn == "mov" and len(insn.operands) == 2
+                                         and insn.operands[0] == insn.operands[1])):
+                reads, writes = effects(insns, position, saved)
+                for reg in reads & state:
+                    found.setdefault(reg, insn.addr)
+                state = state - writes
+                if insn.mn == "call":
+                    state = state - set(VOLATILE)
+            if insn.mn.startswith("j"):
+                target = branch_target(insn)
+                if insn.mn == "jmp":
+                    if target is None or target not in at:
+                        break             # a tail jump, or a table: what follows is not this path
+                    position = at[target]
+                    continue
+                if target is not None and target in at:
+                    todo.append((at[target], state))
+            position += 1
+    return found
+
+
 def read_callee(insns):
     """Register arguments, stack arguments and stack cleanup, from the function's own code."""
     facts = Callee()
@@ -786,7 +1345,7 @@ def read_callee(insns):
 
     written, seen_call, esp = set(), False, 0
     prologue = True
-    for insn in insns:
+    for position, insn in enumerate(insns):
         ops = insn.operands
         first = ops[0] if ops else ""
 
@@ -825,37 +1384,9 @@ def read_callee(insns):
         if insn.mn == "nop" or (insn.mn == "mov" and len(ops) == 2 and ops[0] == ops[1]):
             continue              # `mov edi, edi` is the padding MSVC aligns a function with
 
-        # Reads and writes, operand by operand. A memory operand reads the registers that
-        # address it whatever the mnemonic does with the value.
-        reads, writes = set(), set()
-        for index, operand in enumerate(ops):
-            found, memory = registers(operand)
-            if memory:
-                reads |= found
-            elif index == 0 and insn.mn in WRITE_FIRST:
-                writes |= found
-            elif index == 0 and insn.mn in READ_WRITE_FIRST:
-                reads |= found
-                writes |= found
-            elif index == 0 and insn.mn.startswith("set"):
-                writes |= found
-            elif index == 0 and insn.mn.startswith("cmov"):
-                reads |= found
-                writes |= found
-            else:
-                reads |= found
-        if insn.mn == "lea" and len(ops) > 1:
-            # lea computes an address: its bracket registers are read, its first operand written.
-            reads |= registers(ops[1])[0]
-            writes |= registers(ops[0])[0]
-            reads -= writes
-        if writes_without_reading(insn, ops):
-            # The first operand's old value does not reach the result; a memory source of
-            # `imul r, [m], imm` is still read.
-            reads = registers(ops[1])[0] if len(ops) == 3 else set()
-            writes = registers(ops[0])[0]
-        if insn.mn == "push" and first in saved:
-            reads -= {first}          # a save, however late the compiler placed it
+        if facts.prologue_end is None:
+            facts.prologue_end = position
+        reads, writes = effects(insns, position, saved)
 
         for reg in reads - written - {"esp", "ebp"}:
             # After a call, eax, ecx and edx hold whatever the callee left: reading one there
@@ -886,6 +1417,16 @@ def read_callee(insns):
 
         if insn.mn == "call":
             seen_call = True
+
+    # The straight-line read misses a register one branch writes before it returns while another
+    # reads it unwritten (CGxDevice::ITexWHDStartEnd writes ECX on its early return and reads
+    # this->m_baseMipLevel through it at 0x006A5FAE): the branches are followed too.
+    for reg, addr in sorted(path_reads(insns, facts.prologue_end or 0, saved).items(), key=lambda item: item[1]):
+        if reg not in facts.reg_args:
+            facts.reg_args.append(reg)
+            facts.reg_at[reg] = addr
+            facts.notes.append("%s is read unwritten at 0x%08X on a branch the straight-line read passes "
+                               "after a write" % (reg.upper(), addr))
 
     if not facts.rets and facts.stack_dwords:
         facts.unsettled = ("no `ret` was decoded inside its extent, so who cleans its %d stack "
@@ -1278,6 +1819,126 @@ def check_row(binary, functions, row, max_callers):
     return finding
 
 
+# --- Whether a function answers anything --------------------------------------------------------
+
+EAX_PARTS = ("eax", "ax", "al", "ah")
+EAX_WORD = re.compile(r"\b(eax|ax|al|ah)\b")
+# Instructions whose first operand, a register, is only written.
+PURE_WRITES = ("mov", "lea", "movzx", "movsx", "pop") + tuple("set" + c for c in (
+    "a", "ae", "b", "be", "c", "e", "g", "ge", "l", "le", "na", "nae", "nb", "nbe", "nc", "ne", "ng",
+    "nge", "nl", "nle", "no", "np", "ns", "nz", "o", "p", "pe", "po", "s", "z"))
+
+
+def eax_after(insn):
+    """What one instruction does with EAX: "reads", "writes" (without reading it first) or None."""
+    ops = insn.operands
+    if insn.mn == "call":
+        return "reads" if any(EAX_WORD.search(op) for op in ops) else "writes"
+    if insn.mn in ("cdq", "cwde", "cbw", "stosd", "stosb", "stosw"):
+        return "reads"
+    if insn.mn in PURE_WRITES and ops and ops[0] in EAX_PARTS:
+        # `mov eax, [eax + 4]` reads before it writes; a partial register keeps the rest.
+        if any(EAX_WORD.search(op) for op in ops[1:]) or ops[0] != "eax":
+            return "reads"
+        return "writes"
+    if insn.mn in ("xor", "sub", "sbb") and len(ops) == 2 and ops[0] == ops[1] == "eax":
+        return "writes"
+    if any(EAX_WORD.search(op) for op in ops):
+        return "reads"
+    return None
+
+
+def site_uses_eax(binary, functions, call_addr, budget=300):
+    """Whether the code after a call reads EAX before writing it, on any path within the caller:
+    "reads", "dead" (every path writes it first, or calls again), or "unknown" (a path leaves the
+    caller, jumps through a register, or the walk runs out)."""
+    extent = functions.containing(call_addr)
+    if extent is None:
+        return "unknown"
+    start, size = extent
+    insns = trim_tables(disassemble(binary, start, start + size), start, start + size)
+    at = {insn.addr: i for i, insn in enumerate(insns)}
+    if call_addr not in at:
+        return "unknown"
+    pending, seen, steps = [at[call_addr] + 1], set(), 0
+    verdict = "dead"
+    while pending:
+        i = pending.pop()
+        while True:
+            if i >= len(insns) or i in seen:
+                break
+            seen.add(i)
+            steps += 1
+            if steps > budget:
+                return "unknown"
+            insn = insns[i]
+            effect = eax_after(insn)
+            if effect == "reads":
+                return "reads"
+            if effect == "writes":
+                break
+            if insn.mn in ("ret", "retn"):
+                verdict = "unknown"
+                break
+            if insn.mn.startswith("j"):
+                target = branch_target(insn)
+                if target is None or target not in at:
+                    verdict = "unknown"
+                    break
+                if insn.mn == "jmp":
+                    i = at[target]
+                    continue
+                pending.append(at[target])
+            i += 1
+    return verdict
+
+
+def after_reads_result(bodies_dir, row):
+    """Whether the seam's After body uses its first parameter, the function's answer: False for an
+    unnamed one or one only cast to void; True when the body cannot be found (assume it does)."""
+    path = bodies_dir / ("%s.cpp" % row.domain)
+    if not path.is_file():
+        return True
+    text = path.read_text(encoding="utf-8", errors="replace")
+    block = re.search(r"namespace\s+wxl::seam::%s::%s\s*\{" % (row.domain, row.name), text)
+    if not block:
+        return True
+    after = re.compile(r"\bAfter\s*\(([^)]*)\)\s*\{").search(text, block.end())
+    if not after:
+        return True
+    first = after.group(1).split(",")[0].strip()
+    name = re.search(r"(\w+)\s*$", first)
+    if not name or name.group(1) in ("void", "int32_t", "uint32_t") or first.endswith("*"):
+        return False
+    close = table.balanced(text, after.end() - 1)
+    body = text[after.end():close if close > 0 else len(text)]
+    uses = [m for m in re.finditer(r"\b%s\b" % re.escape(name.group(1)), body)
+            if not re.match(r"\s*\)\s*;", body[m.end():]) or not body[:m.start()].rstrip().endswith("(void)")]
+    return bool(uses)
+
+
+def check_result(binary, functions, row, finding, bodies_dir=None):
+    """A seam row whose After is handed the function's answer: the function must give one. A
+    function of the stock client that answers nothing leaves in EAX whatever its last call did,
+    and an After reading that as a pointer reads garbage. The callers say which: a function no
+    caller reads EAX after (every path after every call writes it first) answers nothing."""
+    if row.shape not in ("", "_AFTER") or finding.address is None or row.point.startswith("Point."):
+        return
+    if row.origin.startswith("calls_x86") or (bodies_dir is not None and not after_reads_result(bodies_dir, row)):
+        return
+    returns = row.returns.strip()
+    if returns == "void" or any(word in returns for word in ("float", "double")):
+        return
+    sites = callers_of(binary, finding.address)
+    uses = [site_uses_eax(binary, functions, site) for site in sites]
+    if uses and all(use == "dead" for use in uses):
+        finding.problems.append(
+            "%s (%s): the row answers %s, which its After is handed, but no caller of 0x%08X reads "
+            "EAX after it (%s): the function answers nothing. Declare it void and find what the "
+            "After needs another way" % (row.point, row.origin, returns, finding.address,
+                                        ", ".join("0x%08X" % site for site in sites)))
+
+
 def evidence(callee, sites):
     """The addresses a verdict was read from, so the claim can be checked rather than believed."""
     parts = []
@@ -1364,6 +2025,19 @@ def main(argv=None):
     parser.add_argument("--points", type=Path, default=None,
                         help="the generated x86 point table, whose rows are checked like the seams'; "
                              "default core's own, read when --seams is core's own too")
+    parser.add_argument("--calls", type=Path, default=None,
+                        help="the x86 binding's table of the client functions it calls, whose rows are "
+                             "checked like the seams'; default core's own, read when --seams is core's own")
+    parser.add_argument("--deinlined", type=Path, default=None,
+                        help="the runtime's recompiled parent bodies, whose stock calls are checked like the "
+                             "seams' and whose calls and globals are held to Wow.exe's own parents; default "
+                             "core's own src/deinlined, read when --seams is core's own")
+    parser.add_argument("--slots", type=Path, default=None,
+                        help="the D3D9 devices' vtable slots the Vulkan renderer takes over (include/wxl/gx/slots.def); "
+                             "default core's own, read when --seams is core's own")
+    parser.add_argument("--drops", type=Path, default=None,
+                        help="the calls the x86 runtime takes out (include/wxl/tuning/drops_x86.def); default "
+                             "core's own, read when --seams is core's own")
     parser.add_argument("--thunks", type=Path, default=core / "src" / "seams" / "RegparmX86.cpp",
                         help="the hand-written regparm thunks")
     parser.add_argument("--backend", choices=("local", "mcp"), default="local",
@@ -1397,6 +2071,30 @@ def main(argv=None):
         points = core / "include" / "wxl" / "points" / "x86.def"
     point_rows = read_point_rows(points.resolve(), problems) if points else []
     rows += point_rows
+    parent_rows = read_parent_rows(points.resolve(), problems) if points else []
+    rows += [row for row in parent_rows if not row.listed]
+    deinlined = args.deinlined
+    if deinlined is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        deinlined = core / "src" / "deinlined"
+    bodies = []
+    if deinlined and parent_rows:
+        by_name = {row.name: row for row in point_rows}
+        parents = [by_name.get(row.name, row) for row in parent_rows]
+        bodies = read_bodies(deinlined.resolve(), parents, problems)
+    calls = args.calls
+    if calls is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        calls = core / "include" / "wxl" / "core" / "binding" / "calls_x86.def"
+    rows += read_call_rows(calls.resolve(), problems) if calls else []
+    slots_path = args.slots
+    if slots_path is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        slots_path = core / "include" / "wxl" / "gx" / "slots.def"
+    vtables, slots = read_slot_rows(slots_path.resolve(), problems) if slots_path else ([], [])
+    drops_path = args.drops
+    if drops_path is None and args.seams.resolve() == (core / "include" / "wxl" / "seams").resolve():
+        drops_path = core / "include" / "wxl" / "tuning" / "drops_x86.def"
+    drops = read_drop_rows(drops_path.resolve(), problems) if drops_path and not args.point else []
+    if args.point:
+        slots = [s for s in slots if "Slot.%s" % s.name in set(args.point)]
     if not rows:
         print("check_conventions: no seam row was read from %s" % args.seams, file=sys.stderr)
         for problem in problems:
@@ -1405,7 +2103,7 @@ def main(argv=None):
     if args.point:
         wanted = set(args.point)
         rows = [row for row in rows if row.point in wanted]
-        missing = wanted - {row.point for row in rows}
+        missing = wanted - {row.point for row in rows} - {"Slot.%s" % s.name for s in slots}
         if missing:
             print("check_conventions: no such row: %s" % ", ".join(sorted(missing)),
                   file=sys.stderr)
@@ -1416,6 +2114,8 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     functions = Functions.load(args.offsets.resolve())
+    shim_rows = body_rows(bodies, functions)
+    rows += shim_rows
 
     thunks = read_thunks(args.thunks.resolve(), problems)
 
@@ -1425,7 +2125,15 @@ def main(argv=None):
     try:
         binary = open_binary(args)
         for row in rows:
-            findings.append(check_row(binary, functions, row, args.max_callers))
+            finding = check_row(binary, functions, row, args.max_callers)
+            check_result(binary, functions, row, finding, args.thunks.parent)
+            findings.append(finding)
+        if bodies and not args.point:
+            check_bodies(binary, functions, bodies, problems)
+        if slots:
+            findings.extend(check_slots(binary, functions, vtables, slots, args.max_callers, problems))
+        if drops:
+            check_drops(binary, functions, drops, problems)
     except Unusable as trouble:
         hint = binary.hint if binary else (McpBinary.hint if args.backend == "mcp"
                                            else LocalBinary.hint)
@@ -1465,10 +2173,13 @@ def main(argv=None):
         return 1
 
     if not args.json:
-        print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d regparm thunk(s), %d "
-              "witness(es), %s, %d undetermined point(s), %.1fs)"
-              % (len(rows), len(point_rows), len(thunks), sum(len(r.witnesses) for r in rows), binary.describe(),
-                 notes, elapsed))
+        print("check_conventions: %d row(s) agree with Wow.exe 12340 (%d of them points, %d recompiled body(ies) "
+              "calling %d stock function(s) as Wow.exe's own do, %d D3D9 vtable slot(s) (%d taken by the Vulkan front, "
+              "%d kept), %d regparm thunk(s), %d dropped call(s), %d witness(es), %s, %d undetermined point(s), %.1fs)"
+              % (len(rows), len(point_rows), len(bodies), len(shim_rows), len(slots),
+                 sum(1 for s in slots if s.kind == "front"), sum(1 for s in slots if s.kind == "keep"), len(thunks),
+                 len(drops),
+                 sum(len(r.witnesses) for r in rows), binary.describe(), notes, elapsed))
     return 0
 
 

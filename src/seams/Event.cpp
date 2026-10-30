@@ -7,6 +7,8 @@
 
 #include "runtime/Core.hpp"
 #include "runtime/Stages.hpp"
+#include "services/Hashes.hpp"
+#include "services/RelayService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -23,6 +25,11 @@ namespace wxl::seam::Event::DispatchUpdate
 
         wxl::host::ModHost* host = wxl::core::Host();
         if (!host) return;
+
+        // What other threads and other mods left for the main thread: hashes done, relayed
+        // requests, answers and cancellations.
+        wxl::core::services::hashes::Pump();
+        wxl::core::services::relay::Pump();
 
         wxl_update_args args{};
         args.delta = elapsed_sec;

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "gx/d3d9/Highlight.hpp"
+
 namespace wxl::core::binding::x86
 {
     /**
@@ -15,4 +17,8 @@ namespace wxl::core::binding::x86
      * any other thread.
      */
     void Prepare();
+
+    /// Where wxl.highlight's renderer reads the stock client's device, the vertex program's
+    /// constants and whether the client draws with shaders.
+    gx::d3d9::highlight::Source HighlightSource();
 }

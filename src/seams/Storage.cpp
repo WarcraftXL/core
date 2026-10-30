@@ -17,7 +17,10 @@
 #include "wxl/host/mod_host.hpp"
 
 #include <cstdint>
+#include <cctype>
 #include <cstring>
+#include <string>
+
 
 namespace
 {
@@ -33,6 +36,28 @@ namespace
 
     /// The name a folder of the search path answers a lookup with, held as long as g_redirect.
     thread_local char g_resolved[512];
+
+    /// The name an override puts in place of the one asked, held as long as g_redirect.
+    thread_local char g_override[512];
+
+    /// What an existence check looks up in place of the name asked, held as long as the check.
+    thread_local char g_findName[512];
+
+    /// The name the client asked for, when the gates had it looked up as another: what
+    /// FileMissing reports. Valid while `t_askedFor` is the name FindFile was handed.
+    thread_local char        t_asked[512];
+    thread_local const char* t_askedFor = nullptr;
+
+    void NoteAsked(const char* asked, const char* lookedUp)
+    {
+        if (asked == lookedUp || std::strlen(asked) >= sizeof t_asked)
+        {
+            t_askedFor = nullptr;
+            return;
+        }
+        std::memcpy(t_asked, asked, std::strlen(asked) + 1);
+        t_askedFor = lookedUp;
+    }
 
     namespace assets  = wxl::core::services::assets;
     namespace storage = wxl::core::services::storage;
@@ -86,10 +111,15 @@ namespace wxl::seam::Storage::OpenFile
             return false;
         }
 
+        // A mod's override of the name: what is opened in its place, then redirected as any name.
+        const char* const asked   = *name;
+        const char*       current = asked;
+        if (wxl::core::services::storage::Overridden(asked, g_override, sizeof g_override)) current = g_override;
+
         // A mod's redirect, from the table: what the client opens unless a handler answers.
-        const char* const asked = *name;
-        g_redirect[0]            = 0;
-        wxl::core::services::storage::Redirected(asked, g_redirect, sizeof g_redirect);
+        g_redirect[0] = 0;
+        wxl::core::services::storage::Redirected(current, g_redirect, sizeof g_redirect);
+        if (!g_redirect[0] && current != asked) std::memcpy(g_redirect, current, std::strlen(current) + 1);
 
         wxl::host::ModHost* host = wxl::core::Host();
         if (host && host->Listening(WXL_EV_FileOpen))
@@ -102,16 +132,16 @@ namespace wxl::seam::Storage::OpenFile
             host->Raise(WXL_EV_FileOpen, &args);
         }
 
-        // Nobody answered: the client opens what it asked for, found where FindFile says.
-        if (!g_redirect[0]) return false;
-
         // A handler that writes past the end of the buffer would leave it unterminated; the
         // last byte is forced rather than trusting what came back.
         g_redirect[sizeof g_redirect - 1] = 0;
-        WLOG_DEBUG(wxl::core::kTag, "file %s redirected to %s", asked, g_redirect);
+        const char* opened = g_redirect[0] ? g_redirect : asked;
+        if (g_redirect[0]) WLOG_DEBUG(wxl::core::kTag, "file %s redirected to %s", asked, g_redirect);
+
 
         // The one thing only a gate can do: what the client opens is not what it asked for.
-        *name = g_redirect;
+        NoteAsked(asked, opened);
+        *name = opened;
         return false;
     }
 }
@@ -125,6 +155,19 @@ namespace wxl::seam::Storage::FindFile
         if (!name || !IsClientName(*name)) return false;
         const assets::Mode mode = assets::Current();
         if (mode == assets::Mode::ClientOnly) return false;
+        assets::ClearPending();
+
+        // An existence check -- no archive asked back, which only SFile::OpenEx asks -- has not
+        // been through the open's gate: an override is looked at here.
+        const bool exists = !archive || !*archive;
+        if (exists && mode == assets::Mode::Normal && !storage::Listing())
+        {
+            const char* asked   = *name;
+            const char* current = asked;
+            if (storage::Overridden(current, g_findName, sizeof g_findName)) current = g_findName;
+            NoteAsked(asked, current);
+            *name = current;
+        }
         if (!storage::AnyFolder() && !assets::Active()) return false;
 
         // The sources by priority: the best folder, then a provider or served bytes above it.
@@ -156,6 +199,10 @@ namespace wxl::seam::Storage::FindFile
         {
             if (!path || !*path || !size || !assets::LayerPath(source.id, *name, *path, *size)) return false;
             WLOG_DEBUG(wxl::core::kTag, "file %s served by a mod's source", *name);
+            assets::Resolution found;
+            found.layer  = assets::SourceLayer(source.id, nullptr);
+            found.source = source.id;
+            assets::NoteResolution(found);
             if (type && *type) **type = 0; // SFILE_PLAIN: opened with Blizzard::File::Open(path)
             if (archive && *archive) **archive = nullptr;
             *result = 1;
@@ -165,6 +212,79 @@ namespace wxl::seam::Storage::FindFile
         WLOG_DEBUG(wxl::core::kTag, "file %s found in a search path folder: %s", *name, g_resolved);
         *name = g_resolved;
         return false;
+    }
+}
+
+namespace
+{
+    /// What a file is for, by its extension.
+    uint32_t KindOf(const std::string& name)
+    {
+        const size_t slash = name.find_last_of("\\/");
+        const size_t dot   = name.rfind('.');
+        if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return WXL_ASSET_OTHER;
+        std::string extension;
+        for (size_t i = dot + 1; i < name.size(); ++i)
+            extension += static_cast<char>(std::tolower(static_cast<unsigned char>(name[i])));
+        static const struct
+        {
+            const char* extension;
+            uint32_t    kind;
+        } kKinds[] = {
+            {"m2", WXL_ASSET_MODEL},      {"mdx", WXL_ASSET_MODEL},      {"mdl", WXL_ASSET_MODEL},
+            {"skin", WXL_ASSET_SKIN},     {"anim", WXL_ASSET_ANIMATION}, {"blp", WXL_ASSET_TEXTURE},
+            {"tga", WXL_ASSET_TEXTURE},   {"adt", WXL_ASSET_TERRAIN},    {"wdt", WXL_ASSET_TERRAIN},
+            {"wdl", WXL_ASSET_TERRAIN},   {"wmo", WXL_ASSET_MAP_OBJECT}, {"wav", WXL_ASSET_SOUND},
+            {"mp3", WXL_ASSET_SOUND},     {"ogg", WXL_ASSET_SOUND},      {"dbc", WXL_ASSET_DATABASE},
+            {"db2", WXL_ASSET_DATABASE},  {"lua", WXL_ASSET_INTERFACE},  {"xml", WXL_ASSET_INTERFACE},
+            {"toc", WXL_ASSET_INTERFACE}, {"bls", WXL_ASSET_SHADER},     {"ttf", WXL_ASSET_FONT},
+            {"avi", WXL_ASSET_MOVIE},
+        };
+        for (const auto& known : kKinds)
+            if (extension == known.extension) return known.kind;
+        return WXL_ASSET_OTHER;
+    }
+}
+
+namespace wxl::seam::Storage::FindFileResult
+{
+    void WXL_CALL After(int32_t result, const char* name, char* path, uint32_t size, uint32_t flags, uint32_t* type,
+                        void** archive)
+    {
+        (void)size;
+        (void)flags;
+        const assets::Mode mode = assets::Current();
+        if (mode == assets::Mode::ClientOnly || storage::Listing() || !name) return;
+
+        // The answer is in al alone: the rest of eax is whatever the function left there.
+        if (static_cast<uint8_t>(result) != 0)
+        {
+            // Where it was found, for hash_file: a folder of the search path is a name the gate
+            // rewrote; an archive's file is SFILE_OLD_SFILE (3); a plain one is on the disk.
+            assets::Resolution found;
+            if (name == g_resolved) found.layer = WXL_FILE_LAYER_FOLDER;
+            else if (type && *type == 3) found.layer = WXL_FILE_LAYER_ARCHIVE;
+            else found.layer = WXL_FILE_LAYER_DISK;
+            found.archive = found.layer == WXL_FILE_LAYER_ARCHIVE && archive ? *archive : nullptr;
+            if (found.layer != WXL_FILE_LAYER_ARCHIVE && path) found.path = path;
+            if (found.layer == WXL_FILE_LAYER_FOLDER) found.path = name;
+            assets::NoteResolution(found);
+            return;
+        }
+
+        // Found nowhere. The client asked, not the runtime and not a mod through wxl.storage.
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (mode != assets::Mode::Normal || assets::ModAsking() || !host || !host->Listening(WXL_EV_FileMissing)) return;
+
+        const std::string asked = t_askedFor == name ? std::string(t_asked) : std::string(name);
+
+        wxl_file_missing_args args{};
+        args.path    = wxl_str{asked.c_str(), static_cast<uint32_t>(asked.size())};
+        args.kind    = KindOf(asked);
+        args.open    = archive ? WXL_TRUE : WXL_FALSE;
+        args.pending = assets::PendingSeen() ? WXL_TRUE : WXL_FALSE;
+        args.loader  = host->OnMainThread() ? WXL_FALSE : WXL_TRUE;
+        host->Raise(WXL_EV_FileMissing, &args);
     }
 }
 

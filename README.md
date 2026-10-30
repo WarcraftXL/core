@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Client](https://img.shields.io/badge/client-3.3.5a%20(12340)-orange.svg)](#-installing)
-[![ABI](https://img.shields.io/badge/ABI-0.1.20-blue.svg)](https://github.com/WarcraftXL/sdk)
+[![ABI](https://img.shields.io/badge/ABI-0.1.46-blue.svg)](https://github.com/WarcraftXL/sdk)
 [![Targets](https://img.shields.io/badge/targets-x86%20%7C%20x64-lightgrey.svg)](#-overview)
 
 </div>
@@ -90,8 +90,9 @@ build/dist/
     bin/x86/WarcraftXL.dll
     bin/x86/wxl-core-patcher.exe
     bin/x64/WarcraftXL.dll
-    Mods/wxl.glue-unlock/{mod.json,bin/x86/glue-unlock.dll}
+    Mods/wxl.glue-unlock/{mod.json,bin/x86/glue-unlock.dll,bin/x64/glue-unlock.dll}
     Mods/wxl.named-archives/{mod.json,bin/x86/named-archives.dll}
+    Mods/wxl.modern-adt/{mod.json,modern-adt.ini,bin/x86/modern-adt.dll,bin/x64/modern-adt.dll}
     Mods/wxl.lua/{mod.json,LICENSE-LuaJIT.txt,bin/x86/wxl-lua.dll,bin/x64/wxl-lua.dll}
 ```
 
@@ -141,6 +142,29 @@ exec wine "$@"
 
 The SDK's suites run the same way; its README says how to give them LuaJIT.
 
+ctest's `vk` runs the Vulkan renderer's lower modules on the machine's driver: the device floor
+and choice, VMA, a submission and a bounded wait, an image cleared and read back, the present pass,
+and the engine's draws (every texture format, the blend modes, the alpha test, the scissor, culling,
+depth, fixed function's stages, lighting, fog and clip plane, the interface's programs, pools and
+textures written again inside a frame, mips, cubes, a texture target, a copy from the scene, an
+occlusion query) read back and compared with what D3D9 shows; the translator of the client's DX9
+programs against a reference interpreter of D3D9's instruction set; and frame captures made up in
+the client's format drawn again and compared with their D3D9 pictures. Under Wine it
+runs through winevulkan on the host's driver (Mesa's lavapipe on a machine without a GPU, 32-bit
+lavapipe for x86). Wine with no display behind it lists `VK_KHR_win32_surface` but refuses it at
+`vkCreateInstance`, so the test then goes on headless and says so. A machine without a Vulkan 1.3
+device skips it. The same program builds natively for Linux, from the same module rules, where it
+also holds every program the renderer makes to `spirv-val` (SPIRV-Tools, built there only), and
+`wxl-vk-replay <capture folder>` draws a real capture again and writes what it drew, the D3D9
+picture and their difference beside it, and `wxl-vk-corpus <folder>` translates every record of a
+shader corpus extracted from the client's archives (`<folder>/<Vertex|Pixel>/<profile>/<name>.bls`),
+holds each to `spirv-val`, and with `--device` makes each a module and a pipeline on the driver
+(ctest runs it when `WXL_VK_CORPUS` names the folder):
+
+```sh
+cmake -S tests/vk -B build-vk -G Ninja && cmake --build build-vk && ctest --test-dir build-vk
+```
+
 ## 📦 Installing
 
 ### Into the stock client (32-bit)
@@ -160,6 +184,28 @@ The SDK's suites run the same way; its README says how to give them LuaJIT.
    beside it, and `WarcraftXL.ini` sets its level (the SDK's `docs/the-log.md`) and turns the
    Tracy profiler on, off by default (`[profile]`, the SDK's `docs/profiling.md`).
    `python3 tools/read_logs.py <game folder>` summarises the last launches.
+6. Optionally, Vulkan: `[gx] api = vulkan` in `WarcraftXL.ini` draws the stock client through the
+   runtime's Vulkan renderer in place of Direct3D 9, and logs which GPU it took and what it
+   offers. When the machine has none (no 32-bit loader or driver, a driver below Vulkan 1.3, a
+   missing feature) one line says what is missing and the client renders through D3D9 as before.
+   `validation = 1` turns Vulkan's validation layer on where it is installed; `gpu = <index
+   or a part of the name>` picks the device on a machine with several; `frames_in_flight = 1..3`
+   (2), `present_filter = linear|nearest` (linear) and `async_pipelines = 0|1` (1: a draw whose
+   pipeline is still compiling is left out rather than waited for) serve both clients, as do
+   `vk_prewarm = 0|1` (1: the programs and pipelines of earlier launches made when the device
+   starts), `vk_rebar = 0|1` (1: the per-frame rings in the GPU's mapped device-local memory, and
+   on the 64-bit client the static pools written in place there, where the GPU has such memory) and
+   `vk_gpu_times = 0|1` (1: each pass timed on the GPU). At exit, on every device, the log says how
+   the frames came (percentiles, hitches and, under Vulkan, their causes, the uploads per frame,
+   the main thread's time per draw and the GPU's per pass); `/console gxStats <label>` in the chat
+   box writes the same lines for the stretch since the previous one.
+7. `[engine]` in `WarcraftXL.ini` holds the client work the runtime does its own way, each with
+   the same result as the client's, each on by default and logged at start: `animate_threads =
+   auto|0|2..16` (auto: as many threads as processors, at most 8) animates the scene's models on
+   that many threads, the main thread among them, when the client animates on threads
+   (`M2UseThreads`), where the client uses two; 0 leaves the client's two. `trim_alloc = 0|1`
+   (stock client only) takes out the heap size query `SMemAlloc` and `SMemFree` make and whose
+   answer they drop.
 
 A client already patched by an earlier WarcraftXL only needs the trampoline added; the patcher
 detects that and says `upgraded`. Without the trampoline the runtime still works, on its own
@@ -176,13 +222,33 @@ Its functions call the seams' entry points from
 [`include/wxl/seams/seams.h`](include/wxl/seams/seams.h). Mods are read from `Mods/` beside the
 executable, with `bin/x64/` binaries.
 
+Its Vulkan device, `CGxDeviceVk`, is an adapter over this runtime's renderer, reached through the
+table of [`include/wxl/core/gx_vk.h`](include/wxl/core/gx_vk.h). It is chosen by `gxApi Vulkan`,
+`-vulkan`, or `WarcraftXL.ini`'s `[gx] api = vulkan`, which also takes a D3D9Ex request
+(`[gx] api = d3d9` takes any Vulkan request back to D3D9). The client then renders through Vulkan:
+its window, the swapchain, the frame's clear, the world and the game's interface, the textures the
+engine draws into (the minimap, portraits, full-screen effects), Dear ImGui and the pointer. The
+client's shaders are its own records translated from DX9 bytecode to SPIR-V on the player's
+machine, once each (kept in `WarcraftXL\cache\vk\`, with the pipelines compiled); a record the
+translator refuses leaves its draws out, counted. The pipelines are compiled on worker threads
+(linked at once from parts where the driver has graphics pipeline libraries); until one is ready,
+a draw into the frame that needs it is left out rather than waited for, which
+`[gx] async_pipelines = 0` turns into a wait. The pipelines drawn are kept beside the cache and
+compiled ahead at the next launch. `gxMultisample` gives a multisampled frame, resolved for the
+screen, the copies of the full-screen effects and the readbacks; the screenshot key and the
+portraits read the frame back as D3D9 does. A machine or a window Vulkan cannot serve keeps
+D3D9, with one line in the log. D3D9 stays the
+default. The console commands `gxVkSimulateLoss` (the device's loss and return, under Vulkan) and
+`gxCapture` (the next frame of the D3D9 device recorded to `WarcraftXL\captures\` in the format of
+[`include/wxl/core/gx_capture.h`](include/wxl/core/gx_capture.h)) are for testing the renderer.
+
 ## 🔌 What this runtime publishes
 
 What a mod can reach **today**, by build:
 
 | | x86 | x64 |
 |---|---|---|
-| `wxl.point` (engine points) | yes: each point of `include/wxl/points/points.txt` with an x86 body, a SafetyHook detour armed at its first handler and removed at its last, its first bytes checked by Zydis; Before, Replace and After | yes: each point, a `WXL_POINT_<n>` line at the head of its function in the fork, one byte tested while unattached; the `// INLINED` ones too |
+| `wxl.point` (engine points) | yes: each point of `include/wxl/points/points.txt` with an x86 body, a SafetyHook detour armed at its first handler and removed at its last, its first bytes checked by Zydis; Before, Replace and After. A point Wow.exe inlined (a `deinlined` line) runs in the recompiled bodies of the functions it was inlined into (`src/deinlined/`), which take those functions' places while the point has handlers | yes: each point, a `WXL_POINT_<n>` line at the head of its function in the fork, one byte tested while unattached; the `// INLINED` ones too |
 | `wxl.hook` (named points) | yes: the seams and the points of `src/hook/Points.def`, detourable | no: a seam is a call the client makes, not a function a detour can replace |
 | `wxl.hook.raw` (raw addresses) | yes | never: no fixed addresses in a program we compile |
 | `wxl.patch` (byte patches) | yes | never: nothing to patch in a program we compile |
@@ -193,9 +259,26 @@ What a mod can reach **today**, by build:
 | `wxl.profile` | yes: zones, plots, messages and frame sets on the Tracy profiler's timeline, beside the runtime's own zones for every event and mod handler (`WXL_PROFILE`) | the same, and zones in the client's main loop |
 | `wxl.footprint` | yes: Storm's allocations by source file while a mod counts them (detours of `SMemAlloc`, `SMemFree`, `SMemReAlloc`), the device's textures and buffers by pool, the sound and script heaps, each archive's tables, each client database, the address space; `MemoryPressure` | the same, from seam calls in the client's allocator |
 | `wxl.m2file` (parsed model files) | yes: arrays read and pointed as addresses, memory anywhere, the shadow pass's bone animation; the loader's stages as `ModelParsed`, `SkinProfileParsed`, `ModelSequenceLoad` | the same, arrays as offsets from themselves and memory within 1 GB of them |
-| `wxl.m2` (models) | yes: an object's model, `ItemDisplayInfo` rows, race prefixes, models made, hung (to follow the parent's bones or on one key bone too), shown, textured, kept on the interface's copies; `AppearanceChanged` | the same, through the binding |
-| `wxl.gx` (the D3D9 device) | yes: the device and a state invalidation; `ModelBatchDrawn` after every model batch, its numbers rebuilt from the skin section and the device's buffers and viewport | the same, the numbers as the device recorded them |
-| `wxl.net`, `wxl.ui` | not yet; their events are raised, the service tables are not published | the same |
+| `wxl.m2` (models) | yes: an object's model, `ItemDisplayInfo` rows, race prefixes, models made, hung (to follow the parent's bones or on one key bone too), shown, textured, kept on the interface's copies; `AppearanceChanged`; models of the world placed as the client places its spell effects (a static map entity, `CMap::ObjectCreateStatic`), animated, faded, the ground under a point; bone watchers after `M2.AnimateMT` | the same, through the binding |
+| `wxl.gx` (the device) | yes: the API it runs on (version 2), the D3D9 device and a state invalidation; `ModelBatchDrawn` after every model batch, its numbers rebuilt from the skin section and the device's buffers and viewport, no `batch` | the same, the numbers as the device recorded them; on Vulkan the numbers in D3D9's terms, the viewport the renderer drew with, `batch` the renderer's record of the draw, and an invalidation that makes the renderer bind its own state again |
+| `wxl.render` (passes, images, buffers, pipelines) | no: `supported` false with its reason (Direct3D 9); `RenderPoint` raised at its four points all the same | on Vulkan: images (multisampled ones resolved at a pass's end), buffers read by address, pipelines of the mod's SPIR-V (graphics, full-screen, a batch program behind the client's own vertex program), passes between the engine's renderings at each `RenderPoint`, batches kept and drawn again, the scene's colour and depth copied for sampling, the client's shaders replaced by name (`src/gx/vk/render/`, `src/services/RenderService.cpp`) |
+| `wxl.vk` (the device, raw) | no | on Vulkan: the instance, devices, queue, the loader's entry, the frame's command buffer inside a point, the render service's and the frame's images and buffers, the frames' numbers |
+| `wxl.engine` (engine layouts) | yes: each type of the SDK's engine headers, its x86 layout hash | yes: its x64 hash, which the client's build holds its own types to |
+| `wxl.camera` (the world camera) | yes: its position, facing rows (through the parent's rotation on a vehicle or a transport), field of view and pivot read at measured offsets; a mod's view written at the end of `CGCamera::UpdateCallback`, after `CameraUpdate`, its roll turning the facing's up row (which the view matrix and the pick are built from) | the same, through the binding |
+| `wxl.input` (the pointer) | yes: held at the centre of the window, or at the point a mod chose, by `ClipCursor`, hidden through the device's `CursorSetVisible` while the game's own pointer state is left on; `MouseMotion` from raw input, `MouseWheel` from `WM_MOUSEWHEEL` at the window procedure's gate | the same |
+| `wxl.world` (the world's geometry) | yes: `World::Intersect` | the same |
+| `wxl.input`'s block of the mouse look | yes: gates on `CGInputControl::SetControlBit` and `UnsetControlBit` keep the look bits from the game, and a short click is done through `CGWorldFrame::PerformDefaultAction` | the same, gates in the fork |
+| `wxl.pose` (heads) | yes: after `CGUnit_C::PreAnimate`, the head key bone's procedural transform (`CM2Model::SetBoneFlags`, `SetBoneProceduralTransform`) | the same |
+| `wxl.imgui` (Dear ImGui, ImPlot) | yes: one context, drawn at the present with the D3D9 device (the SDK's copy and its Win32 and DX9 backends), the window's messages fed at the window procedure's gate | the same |
+| `wxl.highlight` (outline and glow) | yes: the batches of a highlighted object kept at `M2.DrawBatch` (bindings, vertex program, first texture and alpha test, and constants read from the engine's copy, the device being pure), drawn again after the world into two masks against the scene's depth with the game's alpha test, the device's bindings and registers put back as the engine believes them, the glow blurred at half size and the outline found in a full-screen pass, with programs compiled at build time (`src/gx/d3d9/`) | on Vulkan: the same passes made of `wxl.render`'s pieces (`src/gx/vk/render/Highlight.cpp`): the renderer's records of the batches kept at `M2.DrawBatch`, drawn again with a batch program into two masks of the scene's samples against its depth, resolved, blurred at half size, and the full-screen outline and glow, GLSL compiled at build time; on D3D9 `supported` false with its reason |
+| `wxl.selectioncircle` (the game's circles) | yes: around each drawer of a circle (the target's, a corpse's, the pet's target's, the move marker's) a mod's texture is put in `CGObject_C::s_selectionTexture`, and `ProjectTex::Render2d`'s gate skips a hidden circle or points the projection at a scaled box and another colour; textures made with the client's `CreateTexture` | the same, the calls in the fork |
+| `wxl.texture` (SVG and PNG made into textures) | yes: an SVG rasterized (nanosvg) or a PNG decoded (stb_image) at the size asked, its groups restyled, written as an uncompressed BLP2 with its mips and served under `Interface\WXL\...` by a provider of the runtime's own, which every loader reads through the client's file stack; `WxlTexture` in both script contexts of the interface | the same |
+| `wxl.cvar` (console variables) | yes: made with the client's own `CVar::Register`, their flags written as the client's bits, a callback of the runtime's (`OsValidateFunctionPointer` lets it through) holding ranges and read-only variables; registrations made before `CVar::Initialize` reads Config.wtf are made at its start, the account's and the character's made again after `CVar::DeleteAccountCVars` and `DeleteCharacterCVars`; `WxlRegisterCVar` in both script contexts of the interface | the same, the calls in the fork |
+| `wxl.terrain` (the ground) | yes: the chunks' own heights and normals written in place, then `CMapChunk::CreateBounds`, `CMapRenderChunk::AddBatch`, the chunk's vertex buffer marked empty, `CDetailDoodad::FreeInst`, the movement's cached facets forgotten (`s_queryBox`), `CMovement_C::OnFallLocal` for a player standing on lowered ground, and a player under raised ground lifted onto it (`CMovement_C::m_position.z`, then `OnFallLocal` to land) unless the line of sight meets something above | the same, the calls in the fork |
+| `wxl.animation` (animations on units) | yes: `CGUnit_C::PlayBaseAnimation` as an emote is played, followed after each `CGUnit_C::PreAnimate` (`GetCurrentTorsoAnimId`), handed back with `UpdateBaseAnimation`, its speed by `SetKeyBoneSequenceSpeed` | the same, the calls in the fork |
+| `wxl.draw` (shapes in the world) | yes: shapes built into geometry in world coordinates (`src/gx/shapes/`; ground shapes cut along the terrain's own triangles and laid on their heights), drawn after the liquids through the game's D3D9 device with programs compiled at build time (`src/gx/d3d9/Shapes.cpp`), or through the Vulkan renderer when it draws (`src/gx/vk/render/Shapes.cpp`); `WxlDraw` in both script contexts of the interface | the same; on either device, chosen when it draws |
+| `wxl.net` (opcodes of a mod's own) | yes: claimed numbers taken at the `NetClient.ProcessMessage` gate, before the client's dispatch (which drops everything from 0x51F on), and handed to the mod's handler, a compressed number inflated first (u32 size and zlib, stb's inflater); sent as the client sends its own, a `CDataStore` over the opcode and the body (`CDataStore::CDataStore(data, size)`) handed to `ClientServices::Send2`; the send gate opened by the mod's first message on a connection, closed at `HandleConnect` and `HandleDisconnect`; the session's acceptance read from the client's own `SMSG_AUTH_RESPONSE` (`src/services/NetService.cpp`) | the same, the send through the binding |
+| `wxl.ui` | not yet; the service table is not published | the same |
 | events raised | the ones the seam table derives (below) | the same list |
 | lifecycle stages | `EARLY`, `STORAGE`, `GRAPHICS`, `SCRIPT`, `READY`, `SHUTDOWN`, then the unload | the same |
 
@@ -290,29 +373,41 @@ source. Everything else observes.
 | `Unit.OnAuraAdded`, `Unit.OnAuraRemoved` | `CGUnit_C::OnAuraAdded/OnAuraRemoved(uint32_t index, uint8_t a3, void* aura, int32_t spell_id)` | `UnitAuraChanged` after |
 | `Player.UpdateInventoryComponent` | `CGPlayer_C::UpdateInventoryComponent(int32_t slot, const void* old_item)` | `EquipmentChanged` after, when the item id moved |
 | `GameUI.SendTarget`, `GameUI.ClearTarget` | `CGGameUI::SendTarget(uint64_t guid)`, `CGGameUI::ClearTarget(uint64_t guid, int32_t a2)` | `TargetChanged` after, once per change of `m_lockedTarget` |
-| `MapArea.PrepareChunk` | `CMapArea::PrepareChunk(int32_t chunk_x, int32_t chunk_y)` | `TerrainChunkBuild` before |
+| `MapArea.PrepareChunk` | `CMapArea::PrepareChunk(int32_t chunk_x, int32_t chunk_y)`, which answers nothing on the stock client | `TerrainChunkBuild` before; after, the chunk read from the tile's slot, `wxl.terrain` writes its edits back into it and `TerrainChunkLoaded` is raised |
+| `MapChunk.Purge` | `CMapChunk::Purge()`, a chunk freed | `TerrainChunkUnloaded` before, while a mod listens |
 | `FrameScript.Initialize` | `FrameScript_Initialize(int32_t profile)` | nothing: after, notes the new context and which one CGGameUI's state implies |
 | `FrameScript.Destroy` | `FrameScript_Destroy()` | `ScriptVmClosing` before, naming the context `CreateEvents` announced; nothing for a context never announced |
 | `FrameScript.CreateEvents` | `FrameScript_CreateEvents(const char** names, uint32_t count)` | `ScriptVmReady` after, the first time in a context, with the new `lua_State*`; the installed table is handed to `wxl.script`, which reissues it with the declared events appended |
-| `NetClient.ProcessMessage` (gated) | `NetClient::ProcessMessage(uint32_t time_received, CDataStore* message, int32_t)` | `MessageReceived` at the gate; suppressing it hides the message from the client entirely, which is how a mod serves an opcode the client does not know |
+| `NetClient.ProcessMessage` (gated) | `NetClient::ProcessMessage(uint32_t time_received, CDataStore* message, int32_t)` | `MessageReceived` at the gate; suppressing it hides the message from the client entirely; then a number a mod claimed through `wxl.net` goes to that mod's handler and no further |
 | `NetClient.Send` (gated) | `NetClient::Send(CDataStore* message)` | `MessageSent` at the gate; suppressing it stops the message being sent |
-| `NetClient.HandleConnect` | `NetClient::HandleConnect()` | `Connected` after, once the client holds itself connected |
-| `NetClient.HandleDisconnect` | `NetClient::HandleDisconnect()` | `Disconnected` before, while the connection is still the one being lost |
-| `Input.WindowProc` (gated) | `OsWindowProc(void* window, uint32_t message, uintptr_t wparam, intptr_t lparam)` | `Input` at the gate; writing `handled` answers 0 and the client's own procedure never sees the message |
+| `NetClient.HandleConnect` | `NetClient::HandleConnect()` | `Connected` after, once the client holds itself connected; `wxl.net` counts a new connection, every send gate closed |
+| `NetClient.HandleDisconnect` | `NetClient::HandleDisconnect()` | `Disconnected` before, while the connection is still the one being lost; then `wxl.net` forgets it |
+| `Input.WindowProc` (gated) | `OsWindowProc(void* window, uint32_t message, uintptr_t wparam, intptr_t lparam)` | `Input` at the gate; writing `handled` answers 0 and the client's own procedure never sees the message. A message left to the client then raises `MouseMotion` (`WM_INPUT`, a raw mouse report) or `MouseWheel` (`WM_MOUSEWHEEL`, which a handler keeps from the client the same way) |
 | `Storage.OpenFile` (gated) | `SFile::OpenEx(SArchive*, const char* name, uint32_t flags, SFileImpl** result)` | `FileOpen` at the gate, `redirect` holding what a mod's `wxl.storage` redirect answers; a path written into `redirect` is what the client opens instead, then a folder of the search path that wins the name |
 | `Storage.OpenEx` | the same `SFile::OpenEx`, observed: on x86 a second link of the same chain, nearer the function than the gate | `FileOpened` after, at every return, with the name opened, whether a file came back and its size; nothing is read while nobody listens |
 | `Storage.FindFile` (gated) | `System_SFile2::FindFile(name, path, size, flags, type, archive)`, where every name the client opens or looks for is resolved | nothing: a folder of the search path, a provider or served bytes that win the name answer it, and a kind some mod transforms is opened through the runtime's file layer |
+| `Storage.FindFileResult` | the same function, observed after it: where the name was found, or that it was found nowhere | `FileMissing`, when no layer has the name the client opened or looked for |
 | `Sound.PlaySoundKit` (gated) | `SI2::PlaySoundKit(int32_t kit, ...)` | `SoundPlay` at the gate; suppressing it keeps the sound from starting. Both of the client's overloads of this name end here, so a sound named by path arrives with the id its name resolved to |
 | `Client.Destroy` | `WowClientDestroy()` | nothing, but it is where `WXL_STAGE_SHUTDOWN` and the unload run: the last moment at which a mod can be told anything |
 | `ConsoleDevice.Initialize` | `ConsoleDeviceInitialize(const char* title, bool, bool)` | nothing, but its return is `WXL_STAGE_GRAPHICS`: the device is made after the first database is read and before the script context exists, which is the order the stages promise |
 | `Scrn.OnPaint` | `OnPaint(const void* data, void* param)`, the paint handler | `FrameBegin` before, only when the device has a context and the window can be seen -- the test the paint makes itself |
-| `Gx.ScenePresent` | `GxScenePresent()` | `FrameEnd` before, for the frame `Scrn.OnPaint` opened and only for it: the loading screen presents frames of its own, which raise nothing. The last draw list is flushed after it. About once a second while a mod watches the address space, `MemoryPressure` before, when its largest free block just fell under the threshold |
+| `Gx.ScenePresent` | `GxScenePresent()` | `FrameEnd` before, for the frame `Scrn.OnPaint` opened and only for it: the loading screen presents frames of its own, which raise nothing; for that frame, `RenderPoint` (`after_ui`) first, the interface drawn. The last draw list is flushed after it. About once a second while a mod watches the address space, `MemoryPressure` before, when its largest free block just fell under the threshold |
 | `SimpleTop.OnLayerRender` | `CSimpleTop::OnLayerRender()` | `UiRenderEnd` after: every stratum of the interface is drawn, the world inside it |
-| `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world |
-| `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it |
+| `InputControl.SetControlBit` (gated) | `CGInputControl::SetControlBit(uint32_t bit, uint32_t time)` | while a mod blocks the mouse look, its look bits are kept from the game and the press noted |
+| `InputControl.UnsetControlBit` (gated) | `CGInputControl::UnsetControlBit(uint32_t bit, uint32_t time, int32_t keep_smoothing)` | the release of a look bit kept out, with the default action of a short click |
+| `Unit.PreAnimate` | `CGUnit_C::PreAnimate(void* frame)` | After applies the head turns of `wxl.pose`, follows `wxl.animation`'s plays on the unit and raises `UnitAnimationEnded`, and lifts the active player onto ground `wxl.terrain` raised |
+| `Unit.RenderTargetSelection`, `Unit.RenderPetTargetSelection`, `Unit.RenderAutoTrackCursor`, `Corpse.RenderTargetSelection` | `CGUnit_C::RenderTargetSelection()`, `RenderPetTargetSelection()`, `RenderAutoTrackCursor()`, `CGCorpse_C::RenderTargetSelection()`: the circles under the target, the pet's target and the move marker | nothing: before, `wxl.selectioncircle` picks the look of the circle that comes and puts a mod's texture in the game's place; after, the game's goes back |
+| `ProjectTex.Render2d` (gated) | `ProjectTex::Render2d(box, color, matrix, fade, a5, a6, polygon_offset)`, a texture projected onto the ground | nothing: inside a circle, one a mod hid is not drawn, and one it restyled is drawn with a scaled box and its colour; elsewhere (a spell's cursor, a trajectory) one load |
+| `Camera.UpdateCallback` | `CGCamera::UpdateCallback(const void* data, void* param)` | Before puts back the field of view `wxl.camera` changed; After raises `CameraUpdate` for the world camera, then writes the view a mod set |
+| `WorldFrame.RenderWorld` | `CGWorldFrame::RenderWorld(void* world_frame)` | `WorldRenderBegin` before, `WorldRenderEnd` after. Run from inside the interface's batches, before anything of the interface over it; not reached where there is no world. Before, `wxl.highlight` starts keeping its objects' batches; after, before `WorldRenderEnd`, it draws them, then `RenderPoint` (`after_world`) |
+| `WorldScene.RenderDetailDoodads` | `CWorldScene::RenderDetailDoodads()`, the ground clutter after the opaque models | `RenderPoint` (`after_opaque_world`) after, inside a frame, while a mod listens |
+| `WorldScene.RenderLiquidPass` | `CWorldScene::RenderLiquidPass()`, the liquids | after: `wxl.draw`'s shapes go onto the world; `RenderPoint` (`after_liquids`), inside a frame, while a mod listens |
+| `WorldFrame.PerformDefaultAction` (gated) | `CGWorldFrame::PerformDefaultAction(MOUSEBUTTON button)` | `WorldClickRequest` with what the click met (a name plate, a model, the ground, a map object, nothing) and whether a spell waits for its target; a mod that refuses it keeps the game from acting on the click |
+| `Gx.ReleaseD3dResources` | `CGxDeviceD3d::IReleaseD3dResources(int32_t)` | `SwapchainLost` before, with the size about to go: at both of the D3D9 device's resets, and when it is destroyed. A client on another device does not reach it. Dear ImGui's and `wxl.highlight`'s device objects go first |
 | `Gx.NotifyOnDeviceRestored` | `CGxDevice::NotifyOnDeviceRestored()` | `SwapchainRestored` before, with the size the device came back at |
-| `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound. The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens |
-| `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton; one load while none is |
+| `M2.DrawBatch` | `CM2SceneRender::DrawBatch()`, one plain batch of a model | `ModelBatchDrawn` after, with the numbers of the device's draw and everything it was drawn with still bound (on Vulkan, `batch`: the renderer's record of the draw, for `wxl.render`). The stock client keeps no record of its draw: x86 rebuilds the numbers from the skin section the renderer still points at and the device's buffers and viewport. One flag is read while nobody listens; two more while nothing is highlighted, else a batch of a highlighted object is kept for `wxl.highlight` |
+| `M2.AnimateMT`, `M2.AnimateMTSimple` | `CM2Model::AnimateMT(...)` and `AnimateMTSimple(...)`, a model's bones posed for the frame, on the animate threads | nothing: after, a model `wxl.m2` hung to follow its parent's bones, or on one key bone, is posed from the parent's skeleton, then the bone watchers get the pose; one load while none is |
+| `M2.BeginThread`, `M2.WaitThread` (gated) | `CM2Cache::BeginThread(func, param)` and `WaitThread()`, the model cache's animate worker woken and waited for by `CM2Scene::Animate` | nothing: with `[engine] animate_threads`, BeginThread's gate animates every model of the scene's animate list on the runtime's threads (each once, with the floating point state of the thread the client would have run it on) and hides the list from the client's own loop; WaitThread's puts it back. Not taken with the setting at 0, for another function, or without the threads |
 | `M2Shared.Initialize` | `CM2Shared::Initialize()`, a parsed model made ready | `ModelParsed` before, ahead of its skin profile's choice and its textures |
 | `M2Shared.InitializeSkinProfile` | `CM2Shared::InitializeSkinProfile()`, a parsed skin profile sized for drawing | `SkinProfileParsed` before, with the model's header and the skin's |
 | `M2Shared.FinishLoadingLowPrioritySequence` | `CM2Shared::FinishLoadingLowPrioritySequence(uint32_t sequence_index, uint8_t* buffer, uint32_t size)`, an external sequence file parsed against its model | `ModelSequenceLoad` before, with the sequence's unparsed bytes |
@@ -320,7 +415,7 @@ source. Everything else observes.
 | `Component.RemoveItem` | `CCharacterComponent::RemoveItem(slot)` | `AppearanceChanged` (removed) before, while the display is still on the slot |
 | `Component.FreeComponent` | `CCharacterComponent::FreeComponent(component)`, an appearance given back | `AppearanceChanged` (freed) before |
 | `Component.RemoveVisuals` | `CCharacterComponent::RemoveVisuals(model)`, which strips the attachments of the copies the interface draws | nothing: the models `wxl.m2` hung on the stripped points, and copies of them, are hung back after |
-| `Spell.Packet_Group_30` | `Packet_Group_30(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_SPELL_START` and `SMSG_SPELL_GO` | `SpellCastStart` or `SpellCastGo` before, by the opcode, read off the message before the client parses it: the caster, the object target, the cast time or the hit and miss counts |
+| `Spell.Packet_Group_30` | `Packet_Group_30(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_SPELL_START` and `SMSG_SPELL_GO` | `SpellCastStart` or `SpellCastGo` before, by the opcode, read off the message before the client parses it: the caster, the object target, the source and destination points with their transports, the cast time or the hit and miss counts |
 | `Spell.Packet_SMSG_SPELL_FAILURE` | `Packet_SMSG_SPELL_FAILURE(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)` | `SpellCastInterrupted` before, for any caster in view, with the reason the server sent |
 | `Spell.SpellFailed` | `Spell_C_SpellFailed(PendingSpellCast* cast, const SpellRec* spell, int32_t reason, int32_t misc1, int32_t misc2, bool reset_cooldown)` | `SpellCastFailed` before: the local player's cast refused by the server or by the client's own checks |
 | `Spell.CastSpell` (gated) | `Spell_C_CastSpell(CGUnit_C* caster, int32_t spell_id, const CGItem_C* item, uint64_t target, PendingSpellCast* cast, bool confirmed)` | `SpellCastRequest` at the gate; refusing it answers false and nothing is sent |
@@ -344,6 +439,9 @@ source. Everything else observes.
 | `GameUI.HandleObjectTrackChange` | `CGGameUI::HandleObjectTrackChange(uint64_t guid, uint64_t prev_guid)` | `MouseoverChanged` before, once per change of the object under the mouse |
 | `GameUI.HandleTerrainClick`, `GameUI.HandleSpriteClick` | `CGGameUI::HandleTerrainClick(const CTerrainClickEvent*)`, `CGGameUI::HandleSpriteClick(const CSpriteClickEvent*)`, the two ends of a click the world frame resolved | `WorldClick` before: the hit point and the game object for the terrain, the object and its position for a model |
 | `ConsoleVar.InternalSet` | `CVar::InternalSet(const char* value, bool set_value, bool set_reset, bool set_default, bool set_needs_save)`, where every set of a console variable ends | `CVarChanged` before, when the call will change the value |
+| `ConsoleVar.Initialize` | `CVar::Initialize(const char* file_name)`, which reads Config.wtf | nothing raised; before: `wxl.cvar`'s waiting registrations made; after: their latches set |
+| `ConsoleVar.DeleteCharacterCVars` | `CVar::DeleteCharacterCVars()`, when the player leaves the world | nothing raised; after: the mods' character variables made again |
+| `ConsoleVar.DeleteAccountCVars` | `CVar::DeleteAccountCVars()`, when an account logs in | nothing raised; after: the mods' account variables made again |
 | `Unit.SendMovementUpdate` | `CGUnit_C::SendMovementUpdate(uint32_t time, uint32_t msg_id, float value, uint32_t index, uint64_t transport, uint8_t seat)` (the six-argument overload, at 0x0071F0C0), where every movement message of the local player is built and sent | `PlayerMoveStart` before for a start, a jump, an ascent or a descent, `PlayerMoveStop` for a stop or a landing |
 | `Player.OnUpdateMoney` | `OnUpdateMoney(uint64_t guid, uint32_t offset, uint32_t count, const void* value, void* param)`, the mirror handler of `PLAYER_FIELD_COINAGE` | `PlayerMoneyChanged` before, with the previous value the mirror hands over and the one the field holds |
 | `Player.Packet_Group_9` | `Packet_Group_9(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the handler of `SMSG_LEVEL_UP_INFO` among the local player's other messages | `PlayerLevelUp` before, for that opcode |
@@ -366,7 +464,7 @@ source. Everything else observes.
 | `M2Shared.LoadSucceededCallback` | `CM2Shared::LoadSucceededCallback(void* param)`, the end of a model file's read, before `FinishLoading` parses it | `ModelLoad` before, with the path and the bytes; bytes a handler answers are copied into a buffer of the client's allocator and parsed instead |
 | `MapObj.Load` | `CMapObj::Load()`, which walks a map object's root once it is read | `MapObjectLoad` before, with the path and the root's bytes |
 | `MapObj.CreateGroup` | `CMapObjGroup::Create()`, which walks a map object's group once its file is read | `MapObjectGroupLoad` before, with the root's name, the group's number and its bytes |
-| `MapArea.AsyncCallback` | `CMapArea::AsyncCallback(void* param)`, the end of a terrain tile's read, before its chunks are walked | `TerrainTileLoad` before, with the tile's name, its place on the grid and its bytes |
+| `MapArea.AsyncCallback` | `CMapArea::AsyncCallback(void* param)`, the end of a terrain tile's read, before its chunks are walked | `TerrainTileLoad` before, with the tile's name, its place on the grid and its bytes; first, an MCNK naming more than the client's 4 texture layers is cut to 4 |
 | `M2Shared.FinishLoadingSkinProfile` | `CM2Shared::FinishLoadingSkinProfile(uint32_t size)`, the end of a skin profile's read, before it is parsed | `SkinProfileLoad` before, with the model's path and the skin's bytes |
 | `Texture.AsyncTextureSuccessCallback` | `AsyncTextureSuccessCallback(CTexture*)`, the end of a texture file's read | nothing itself: notes the texture's name for `BLPFile.Source` |
 | `BLPFile.Open` | `CBLPFile::Open(name, flags)`, a texture file read whole by name | nothing itself: notes the name for `BLPFile.Source` |
@@ -374,6 +472,17 @@ source. Everything else observes.
 | `Gx.IShaderLoad` | `CGxDevice::IShaderLoad(shaders, target, path, name, permutations)`, a shader program loaded by name | `ShaderLoad` before, with the stage, the folder, the name and the permutations |
 | `Sound.CreateWaveData` | `SE2::CreateWaveData(...)`, the sound data a sound plays from, made from a file | `SoundFileLoad` before, with the file, whether it streams and the channel's priority; never while the game's sound is off (`Sound_EnableAllSound` 0), when the client loads no sound |
 | `Map.AllocDoodadDef` | `CMap::AllocDoodadDef()` | nothing itself: after, notes the def it handed out, which tells a placement from a def found in the map's hash |
+| `Map.LoadWdt` | `CMap::LoadWdt()`, the map's WDT header read as the map loads | after: `wxl.terrain` reads the WDT for layer providers, and gives a map flagged 0x80 without 0x4 the 0x4 that has the client read its alpha maps as retail does; a later client's WDT has the tiles its files do not have marked absent |
+| `Map.Unload` | `CMap::Unload()`, the map and its ground unloaded | before: `wxl.terrain` drops every edit and the layers' texture scales, `TerrainEditsCleared` |
+| `MapArea.ProcessIffChunks` | `CMapArea::ProcessIffChunks()`, a tile's file read into its fields | for a root ADT without MCIN (a tile split into `_tex0` and `_obj0`): before, the tile providers asked for its files and the set indexed; after, the area's chunk index, placements, names and texture flags pointed into them and `_tex0`'s textures loaded by `CMapArea::LoadTextures` |
+| `MapChunk.ProcessIffChunks` | `CMapChunk::ProcessIffChunks(bool a3)`, a chunk's sub-chunks walked | after, for a chunk of a split tile: its layers, alpha maps and shadow pointed into its `_tex0` MCNK, its header's layer count (at most 4), alpha size and reference counts set, its 64 holes folded into 16 |
+| `MapChunk.CreateRefs` | `CMapChunk::CreateRefs(area, refs, doodads, map objects)` (gate) | for a chunk of a split tile, taken: the client's own call made for `_obj0`'s MCRW, then its MCRD, references it cannot follow left out; for any tile, placements of a model the client cannot load (an M2 of magic MD21 or past version 264, a WMO root past 17 or absent, which would end the client) left out the same way, one warning per file |
+| `Map.FreeArea` | `CMap::FreeArea(CMapArea*)`, a tile freed after its purge | before: a split tile's files and index let go |
+| `MapLowDetail.Load` | `CMapLowDetail::Load(path, name)`, the map's WDL read into its far terrain (gate) | a WDL of later clients (MAOF past MLDD, MSSN, ...; MAOE between MARE and MAHO), which the client would read MLDD as MAOF from, is taken: MAOF found by its id, the client's own areas made from its MAREs and MAHOs, its map objects (by FileDataID) left out |
+| `MapRenderChunk.CreateLayer` | `CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate)`, a texture layer appended to a render chunk | nothing itself: after, `wxl.terrain` asks the layer providers for the layer's texture scale and keeps it |
+| `MapRenderChunk.RenderSinglePassVertexPixelShader`, `RenderMultiPassVertexPixelShader`, `RenderMultiPassVertexPixelShaderBigAlpha`, `RenderSinglePassPixelShader`, `RenderMultiPassPixelShader`, `RenderMultiPassPixelShaderBigAlpha`, `RenderMultiPassAdditive`, `RenderMultiPassAlpha` | the eight functions that draw a chunk's layers, by vertex program or texture-stage matrix, in one draw or a layer a draw | nothing itself: before and after, which chunk is drawn on which path, for `Gx.D3dDraw` |
+| `Gx.D3dDraw`, `Gx.D3d9ExDraw` | `CGxDeviceD3d::Draw(batch, count)`, `CGxDeviceD3d9Ex::Draw` (vtable slot 42); the Vulkan renderer's `draw_begin` and `draw_end` stand for them | nothing itself: before, a draw of a chunk with a scaled layer gets its texture coordinates scaled through the vertex constants or the stage matrices; after, the client's own come back |
+| `Gx.D3dIShaderCreatePixel`, `Gx.D3dIShaderCreateVertex` (and `Gx.D3d9ExIShaderCreatePixel`, `Vertex`, x64 only: the stock client's 9Ex device runs the D3D9 bodies) | `CGxDeviceD3d::IShaderCreatePixel(CGxShader*)`, `IShaderCreateVertex`: a DX9 program made from its record's bytecode | nothing itself: before, a `wxl.gx` shader provider's answer is put in the record for the call; after, the record's own code comes back. The Vulkan renderer translates the same answer (its backend's `shader_create`) |
 | `Map.CreateDoodadDef`, `Map.CreateDoodadDefAt`, `Map.CreateDoodadDefInMapObj` | the three `CMap::CreateDoodadDef` overloads: a tile's doodad, one the game places at a position, one of a map object's doodad set | `DoodadSpawn` after, for a def the call allocated, with the model's path and the position |
 | `ObjectMgr.FillInPartialObjectData` | `FillInPartialObjectData(CGObject_C*, WOWGUID, CDataStore*, bool, bool)`, where an update block's fields are written | nothing itself: after, notes a tracked object, once per packet |
 | `ObjectMgr.Packet_SMSG_UPDATE_OBJECT` | `Packet_SMSG_UPDATE_OBJECT(void* param, uint32_t msg_id, uint32_t time, CDataStore* msg)`, the compressed form's too | `ObjectUpdate` after, once per object the packet's field writes noted and still tracked, in the packet's order |
@@ -382,6 +491,8 @@ source. Everything else observes.
 | `Storm.SMemReAlloc` | `SMemReAlloc(void* ptr, size_t bytes, const char* filename, int32_t line, uint32_t flags)` | nothing: before, the block leaves the counts; after, what the call left comes back, under the file that moved it |
 | `Storm.SErrDisplayError` | `SErrDisplayError(uint32_t errorcode, const char* filename, int32_t linenumber, const char* description, int32_t recoverable, uint32_t exitcode, uint32_t unknown)`, Storm's error display: every fatal error, assertion and the exception filter's dialog | nothing: before, the error goes to `WarcraftXL.log`, flushed; a fatal one with its stack, the running mod, the last events and the session's end line |
 | `Os.ValidateFunctionPointer` (gated) | `OsValidateFunctionPointer(const void* ptr)`, the check of every C function the client's Lua calls, Lua hook, console command handler and CVar callback | nothing: the gate takes the call for a pointer in the runtime's image or a binary the mod host loaded; any other goes on to the client's check, fatal outside its `.text` |
+| `FrameXML.CheckSignature` (gated) | `FrameXML_CheckSignature(const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest)`, the client's verdict on GlueXML.toc, FrameXML.toc and each add-on's .toc | `InterfaceSignature` with the .toc, the file hashed with it and the client's verdict, while a mod listens: the gate has the client judge, then answers its verdict, or signed for a file a mod accepted (the digest made as the client makes it where the verdict left it unwritten) |
+| `AddOns.DeleteInterfaceFiles` (gated) | `DeleteInterfaceFiles()`, at the login screens' start: loose `Interface\GlueXML`, `Interface\FrameXML` and `Interface\AddOns\Blizzard*` folders renamed to `.old` | `InterfaceCleanupRequest`; a mod that refuses it keeps the folders |
 | `Combat.UnitCombatLogAuraDose`, `Combat.UnitCombatLogAuraRefreshed` | `UnitCombatLogAuraDose(...)`, `UnitCombatLogAuraRefreshed(...)`, the combat log of an aura that stays in its slot | `UnitAuraRefreshed`, with the slot and the count before |
 | `Unit.MountDisplayIDUpdateHandler` | the mirror handler of `UNIT_FIELD_MOUNTDISPLAYID` | `UnitMountChanged` |
 | `Loot.SetObject` | `CGLootInfo::SetObject(CGObject_C*, int32_t coins, LOOT_ACQUIRE)`, the loot window put on an object or on nothing | `LootClosed` for the window it closes, `LootOpened` and a `LootSlot` per item for the new one |
@@ -414,16 +525,18 @@ the ABI and is appended, never renamed or dropped.
 
 ## 🧩 The mods it ships
 
-Two mods that do what a patcher used to do, so the patcher only has to bootstrap. Both are
-32-bit only and both declare `wxl.patch` as required, so any other runtime refuses them cleanly.
+Two mods that do what a patcher used to do, so the patcher only has to bootstrap, and one that reads
+what newer ADT files carry.
 
-| Mod | What it does |
-|---|---|
-| `wxl.glue-unlock` | bypasses the Lua/XML signature check, so custom interface code loads |
-| `wxl.named-archives` | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted |
+| Mod | Clients | What it does |
+|---|---|---|
+| `wxl.glue-unlock` | x86, x64 | answers `InterfaceSignature` and `InterfaceCleanupRequest`: a changed GlueXML, FrameXML or Blizzard add-on is taken as signed and loads (an add-on without a `.sig` stays insecure, as the client judges it), and loose interface folders stay on disk; removed, the client checks as it always has |
+| `wxl.named-archives` | x86 | widens the client's `patch-?.MPQ` scan to `patch-*.MPQ`, so archives and folders with real names are mounted; it requires `wxl.patch`, so another runtime refuses it cleanly |
+| `wxl.modern-adt` | x86, x64 | reads the newer ADT chunks the 3.3.5a client skips and draws with them: a layer's texture scale from `MTXP` or `MTXF` (`[texture_scale]`), retail's height blend from `MTXP`'s heights and each texture's `_h.blp` on maps whose WDT flags it (`[height_blend]`), and up to 8 layers a chunk from each tile's `_tex0.adt` or else its root ADT's own MCNK (`[extra_layers]`), in the single-pass ps_3_0 terrain programs on Direct3D 9 and Vulkan, all in `modern-adt.ini`; requires `wxl.terrain` |
 
-Both read memory before writing: if the bytes are already in the patched state they log
-`already present` and do nothing.
+`wxl.named-archives` reads memory before writing: if the bytes are already in the patched state it
+logs `already present` and does nothing. `wxl.glue-unlock` writes nothing into the client: it
+logs each file it took as signed (debug) and a count when the session ends.
 
 ## 📂 Layout
 
@@ -440,20 +553,54 @@ src/seams/                       the seam bodies, one file per domain (both); th
 src/objects/                     wxl.object over the binding
 src/services/                    wxl.script, wxl.storage, wxl.data (both); wxl.hook, wxl.hook.raw, wxl.patch (x86)
 src/profile/                     the Tracy profiler and wxl.profile (both)
+src/gx/vk/                       the Vulkan renderer, wxl::vk: device, resources, shaders, pipelines,
+                                 frame, present, draw, imgui; no runtime, also built natively for Linux (both)
+src/gx/vk/shaders/               the SPIR-V writer, the translator of the client's DX9 programs (Dx9, Translate,
+                                 Interface) and its cache (Cache)
+src/gx/vk/shaders/glsl/          the renderer's own programs, GLSL compiled to SPIR-V when it is built
+src/gx/vk/gxfront/               the engine's draws read through the engine layouts (Engine.cpp, portable),
+                                 and the Vulkan device behind one engine CGxDevice (Front.cpp, Windows)
+src/gx/vk/render/                wxl.render's images, buffers, pipelines and passes beside the engine's
+                                 draws, and wxl.highlight's passes made of them (portable)
+src/gx/capture/                  a frame capture (include/wxl/core/gx_capture.h) read and drawn again
+src/gx/                          the renderer in the runtime: [gx] api, the table of include/wxl/core/gx_vk.h
+                                 for the recompiled client's CGxDeviceVk, the device on the stock client
 src/points/                      wxl.point: handlers and dispatch (both), the detours (x86), the client's bytes (x64)
+src/deinlined/                   functions of the fork recompiled for x86, in which the de-inlined points are
+                                 real; generated by tools/extract/extract.py --deinlined   (x86)
 src/hook/                        the detour engine and the named points        (x86)
 src/patcher/                     PE import and entry trampoline                (x86)
 src/common/                      the log
 tests/seam_harness.cpp           every seam body against a fake client; --bench times the hot paths
+tests/stock_tests.cpp            src/deinlined/ against a stock Wow.exe's own code, laid at its base    (x86)
+tests/vk/                        the renderer's lower modules on the machine's Vulkan driver; its own
+                                 CMakeLists.txt builds them natively for Linux, with spirv-val,
+                                 wxl-vk-replay and wxl-vk-corpus
 mods/                            the mods above                                (x86)
 deps/minhook/                    MinHook, BSD-2-Clause, unmodified             (x86)
-deps/safetyhook/                 SafetyHook v0.7.0, BSL-1.0, its sources       (x86)
+deps/safetyhook/                 SafetyHook v0.7.0, BSL-1.0, its sources; its near allocator also tries a
+                                 free region's first reservable address           (x86)
 deps/zydis/                      Zydis v4.1.0 and Zycore, MIT, the decoder     (x86)
 tools/points/                    generate_points.py, insert_points.py, their self-test
 deps/tracy/                      Tracy's client 0.14.1, BSD-3-Clause, unmodified
+deps/vulkan-headers/             Vulkan-Headers vulkan-sdk-1.4.357.0, Apache-2.0 OR MIT, the C headers
+deps/volk/                       volk vulkan-sdk-1.4.357.0, MIT, unmodified: the loader, at run time
+deps/vma/                        Vulkan Memory Allocator v3.4.0, MIT, unmodified
+deps/spirv-headers/              SPIRV-Headers vulkan-sdk-1.4.357.0, Khronos (MIT-style), its headers and grammars
+deps/glslang/                    glslang vulkan-sdk-1.4.357.0, BSD-3-Clause and others, built for the build
+                                 machine only: it compiles the renderer's GLSL, nothing of it ships
+deps/spirv-tools/                SPIRV-Tools vulkan-sdk-1.4.357.0, Apache-2.0, built by the tests only (spirv-val)
+deps/nanosvg/                    nanosvg 239e102 (2026-07-10), zlib, unmodified: SVG parsed and rasterized (wxl.texture)
+deps/stb/                        stb_image 2.30 (stb 003501f) and stb_image_write 1.16 (stb f58f558), MIT or public domain, unmodified: PNG decoded (wxl.texture); zlib streams inflated and deflated (wxl.net)
+src/net/                         wxl.net's zlib streams (stb's inflater and deflater)
+src/imaging/                     wxl.texture's pictures: SVG groups restyled, the resampler, the mips, the BLP2 writer
+tests/imaging_tests.cpp          src/imaging/ pixel by pixel
 tools/seams/                     check the seam table against the fork and against Wow.exe
 tools/offsets/, tools/layouts/   regenerate the tables from the decompiled client
 tools/fields/                    regenerate the SDK's update-field table from the decompiled client
+tools/engine/                    the SDK's engine headers from the decompiled client (engine.txt lists the types)
+tools/extract/                   a fork function as C++ for the stock client: a modder's template, or
+                                 the runtime's de-inlined bodies
 ```
 
 ## 🔧 Troubleshooting
@@ -476,7 +623,8 @@ tools/fields/                    regenerate the SDK's update-field table from th
 ## 🤝 Contributors
 
 Tyrallis brought the model services (`wxl.m2file`, `wxl.m2`, `wxl.gx`) and the character
-appearance and model seams they stand on (pull request #1 of sdk, core and client).
+appearance and model seams they stand on (pull request #1 of sdk, core and client), then
+`wxl.m2`'s models of the world, its bone watchers and the cast's ground point (pull requests #4).
 
 ## 📄 License
 
@@ -485,7 +633,8 @@ MIT. See [LICENSE](LICENSE).
 MinHook, under `deps/minhook/`, is BSD-2-Clause and keeps its own license file. Tracy's client,
 under `deps/tracy/`, is BSD-3-Clause and keeps its own license file. SafetyHook, under
 `deps/safetyhook/`, is BSL-1.0, and Zydis with Zycore, under `deps/zydis/`, are MIT; each keeps its
-own license file.
+own license file. nanosvg, under `deps/nanosvg/`, is under the zlib license, and stb_image and stb_image_write, under
+`deps/stb/`, are MIT or public domain; each keeps its license file.
 
 <div align="center">
 

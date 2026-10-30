@@ -261,6 +261,51 @@ namespace
 #endif
     }
 
+    /// The graphics line: the API [gx] asks for, if any, and the Vulkan settings.
+    void Graphics()
+    {
+        using wxl::core::settings::GxApi;
+        if (g_settings.gx_api == GxApi::client)
+        {
+            Line("graphics: the client's own choice of API; [gx] api = vulkan in WarcraftXL.ini tries Vulkan");
+            return;
+        }
+        if (g_settings.gx_api == GxApi::d3d9)
+        {
+            Line("graphics: [gx] api = d3d9: D3D9, a Vulkan request of the client's included");
+            return;
+        }
+        Line("graphics: [gx] api = vulkan: Vulkan is tried when the client makes its device, D3D9 if this machine "
+             "cannot; validation %s, gpu %s, pipelines %s; vk_prewarm %s, vk_rebar %s, vk_gpu_times %s",
+             g_settings.gx_validation ? "on" : "off", g_settings.gx_gpu[0] ? g_settings.gx_gpu : "the best one",
+             g_settings.gx_async ? "compiled on workers, a draw into the scene left out until its pipeline is ready"
+                                 : "compiled when first drawn, the frame waiting",
+             g_settings.gx_prewarm ? "on (the programs and pipelines of earlier launches made at the start)" : "off",
+             g_settings.gx_rebar ? "on (the rings in the GPU's mapped memory where it has some)" : "off",
+             g_settings.gx_gpu_times ? "on (each pass timed on the GPU)" : "off");
+    }
+
+    /// The engine line: the work of the client's the runtime does its own way, each with its setting.
+    void Engine()
+    {
+        const unsigned threads = g_settings.animate_threads;
+        char           animate[96];
+        if (threads == wxl::core::settings::kAnimateAuto)
+            std::snprintf(animate, sizeof animate, "auto (as many threads as processors, at most 8)");
+        else if (!threads)
+            std::snprintf(animate, sizeof animate, "0 (the client's own two threads)");
+        else
+            std::snprintf(animate, sizeof animate, "%u threads", threads);
+        Line("engine: animate_threads %s, when the client animates its models on threads (M2UseThreads); trim_alloc %s",
+             animate,
+#if defined(_M_IX86)
+             g_settings.trim_alloc ? "on (the allocator without the heap size query whose answer it drops)" : "off"
+#else
+             "(the stock client only)"
+#endif
+        );
+    }
+
     void Settings(const wxl::log::SessionFiles& files)
     {
         using wxl::log::LevelName;
@@ -307,6 +352,8 @@ namespace
             Line("log %s; %u earlier log(s) in Logs\\", path, files.kept);
         }
         Profiler();
+        Graphics();
+        Engine();
         if (files.fallback)
             wxl::log::WriteUnfilteredF(Level::Warn, kTag,
                                        "Logs\\WarcraftXL.log is held by another process (a second client from this "

@@ -2,10 +2,14 @@
 // Copyright (c) 2026 WarcraftXL
 //
 // The ConsoleVar domain of the client binding: a console variable, as the ConsoleVar seam
-// reads it. `object` is the CVar* the seam was handed.
+// reads it (`object` is the CVar* the seam was handed), and the calls wxl.cvar makes the client's
+// variables with. Main thread only.
 
 #ifndef WXL_BINDING_FIELD
 #error "define WXL_BINDING_FIELD(name, ret, Type, member, absent) before including consolevar.def"
+#endif
+#ifndef WXL_BINDING
+#error "define WXL_BINDING(name, ret, params, args, absent) before including consolevar.def"
 #endif
 
 // The variable's name: the key of the hash object it is.
@@ -16,6 +20,31 @@ WXL_BINDING_FIELD(cvar_value, const char*, CVar, m_stringValue.m_str, 0)
 
 // Its flags: 1 archived, 2 latched until Update, 4 read-only, ...
 WXL_BINDING_FIELD(cvar_flags, uint32_t, CVar, m_flags, 0)
+
+// The value it was registered with: the coded default; null for a variable only a line of
+// Config.wtf made.
+WXL_BINDING_FIELD(cvar_default, const char*, CVar, m_defaultValue.m_str, 0)
+
+// A set of a latched variable waiting for the next start; null when none waits.
+WXL_BINDING_FIELD(cvar_latched, const char*, CVar, m_latchedValue.m_str, 0)
+
+// The variable of a name, registered or only read from Config.wtf: CVar::Lookup, without case;
+// null when there is none.
+WXL_BINDING(cvar_lookup, void*, (const char* name), (name), 0)
+
+// Registers a variable as the client's code registers its own: CVar::Register(name, help,
+// flags, value, callback, category, setCommand false, arg null, false). An existing variable
+// (a line of Config.wtf) keeps its value and gets the default; a new one starts at it. The
+// callback is called as bool(CVar*, const char* old, const char* value, void* arg) before every
+// set, and refuses it by answering false. The help is kept by pointer for the console.
+WXL_BINDING(cvar_register, void*, (const char* name, const char* help, uint32_t flags, const char* value, void* callback, uint32_t category), (name, help, flags, value, callback, category), 0)
+
+// Sets a value as the console does: CVar::Set(value, true, false, false, true), through the
+// callback and the latch, raising CVarChanged when it changes.
+WXL_BINDING(cvar_set, wxl_bool, (void* cvar, const char* value), (cvar, value), WXL_FALSE)
+
+// Writes the variable's flags.
+WXL_BINDING(cvar_write_flags, void, (void* cvar, uint32_t flags), (cvar, flags), (void)0)
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

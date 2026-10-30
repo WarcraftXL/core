@@ -11,8 +11,8 @@
 // clients, from the skeletons the binding describes.
 //
 // A mod may also place models of its own in the world (spell effects: create_world_model,
-// place_model) and watch the bones the client poses (live physics: watch_bones), on the x64
-// client, whose binding answers those rows.
+// place_model), taken out of it when the player leaves the world, and watch the bones the client
+// poses (live physics: watch_bones), on both clients.
 
 #include "services/M2Service.hpp"
 
@@ -31,8 +31,8 @@
 #include <cstddef>
 #include <cstring>
 #include <shared_mutex>
-#include <string_view>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -170,8 +170,8 @@ namespace
         uint32_t    epoch = 0;
         uint32_t    mask  = 0; // bit per slot of g_bones
     };
-    std::shared_mutex                   g_wantLock;
-    std::unordered_map<void*, FileWant> g_wants;
+    std::shared_mutex                              g_wantLock;
+    ankerl::unordered_dense::map<void*, FileWant> g_wants;
 
     void DropBones(BoneWatcher& watcher)
     {
@@ -523,7 +523,8 @@ namespace
 
     wxl_result WXL_CALL WatchBones(wxl_m2_bones_filter_fn filter, wxl_m2_bones_fn fn, void* user, uint32_t* out_token)
     {
-        if (!fn) return WXL_E_INVALID;
+        static Said said;
+        if (!fn || !OnMainThread("WatchBones", said)) return WXL_E_INVALID;
         for (BoneWatcher& watcher : g_bones)
         {
             if (watcher.live.load()) continue;
@@ -543,6 +544,8 @@ namespace
 
     void WXL_CALL UnwatchBones(uint32_t token)
     {
+        static Said said;
+        if (!token || !OnMainThread("UnwatchBones", said)) return;
         for (BoneWatcher& watcher : g_bones)
             if (watcher.token == token) DropBones(watcher);
     }
@@ -575,8 +578,9 @@ namespace
 
     void* WXL_CALL CreateWorldModel(wxl_str path)
     {
+        static Said       said;
         const std::string file = Text(path);
-        if (file.empty()) return nullptr;
+        if (file.empty() || !OnMainThread("CreateWorldModel", said)) return nullptr;
         void* model = binding::m2_create_world_model(file.c_str());
         if (!model) return nullptr;
         Model record{};
@@ -588,8 +592,11 @@ namespace
 
     wxl_result WXL_CALL PlaceModel(void* model, const wxl_m2_placement* placement)
     {
+        static Said said;
+        if (!OnMainThread("Place", said)) return WXL_E_INVALID;
         Model* known = Known(model);
         if (!known || !placement) return WXL_E_INVALID;
+        if (binding::map_id() < 0) return WXL_E_FAILED;
         SetPose(*known, Pose{});
         const wxl_m2_placement at = Placement(placement);
         if (!binding::m2_place_world(model, &at)) return WXL_E_FAILED;
@@ -599,7 +606,8 @@ namespace
 
     wxl_result WXL_CALL SetModelTransform(void* model, const wxl_m2_placement* placement)
     {
-        if (!Known(model) || !placement) return WXL_E_INVALID;
+        static Said said;
+        if (!OnMainThread("SetTransform", said) || !Known(model) || !placement) return WXL_E_INVALID;
         const wxl_m2_placement at = Placement(placement);
         binding::m2_set_transform(model, &at);
         return WXL_OK;
@@ -607,7 +615,8 @@ namespace
 
     wxl_result WXL_CALL PlayAnimation(void* model, uint32_t anim_id, float speed)
     {
-        if (!Known(model)) return WXL_E_INVALID;
+        static Said said;
+        if (!OnMainThread("PlayAnimation", said) || !Known(model)) return WXL_E_INVALID;
         binding::m2_play_animation(model, anim_id, speed > 0.0f ? speed : 1.0f);
         return WXL_OK;
     }
@@ -619,7 +628,8 @@ namespace
 
     wxl_result WXL_CALL AnimationLength(void* model, uint32_t anim_id, uint32_t* out_ms)
     {
-        if (!model || !out_ms) return WXL_E_INVALID;
+        static Said said;
+        if (!model || !out_ms || !OnMainThread("AnimationLength", said)) return WXL_E_INVALID;
         if (!binding::m2_loaded(model)) return WXL_E_FAILED;
         *out_ms = binding::m2_animation_length(model, anim_id);
         return WXL_OK;
@@ -627,25 +637,40 @@ namespace
 
     void WXL_CALL SetAlpha(void* model, float alpha)
     {
-        if (Known(model)) binding::m2_set_alpha(model, alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha);
+        static Said said;
+        if (OnMainThread("SetAlpha", said) && Known(model)) binding::m2_set_alpha(model, alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha);
     }
 
     void WXL_CALL SetEmitting(void* model, wxl_bool emitting)
     {
-        if (Known(model)) binding::m2_set_emitting(model, emitting);
+        static Said said;
+        if (OnMainThread("SetEmitting", said) && Known(model)) binding::m2_set_emitting(model, emitting);
     }
 
     wxl_result WXL_CALL AttachmentWorld(void* model, uint32_t attachment, wxl_vec3* out)
     {
-        if (!model || !out) return WXL_E_INVALID;
+        static Said said;
+        if (!model || !out || !OnMainThread("AttachmentWorld", said)) return WXL_E_INVALID;
         if (!binding::m2_loaded(model)) return WXL_E_FAILED;
         return binding::m2_attachment_world(model, attachment, out) ? WXL_OK : WXL_E_NOT_FOUND;
     }
 
+    /// The world's geometry the client traces for the ground under its own spell effects:
+    /// terrain, buildings and doodads (the mask World::Intersect is given for them).
+    constexpr uint32_t kGroundTrace = 0x120111;
+
     wxl_result WXL_CALL GroundHeight(const wxl_vec3* at, float up, float down, float* out_z)
     {
-        if (!at || !out_z || up < 0.0f || down < 0.0f) return WXL_E_INVALID;
-        return binding::m2_ground_height(at, up, down, out_z) ? WXL_OK : WXL_E_NOT_FOUND;
+        static Said said;
+        if (!at || !out_z || !(up >= 0.0f) || !(down >= 0.0f) || !OnMainThread("GroundHeight", said))
+            return WXL_E_INVALID;
+        if (binding::map_id() < 0) return WXL_E_NOT_FOUND;
+        const wxl_vec3 start{at->x, at->y, at->z + up};
+        const wxl_vec3 finish{at->x, at->y, at->z - down};
+        wxl_vec3       hit{};
+        if (!binding::world_trace(start, finish, kGroundTrace, &hit)) return WXL_E_NOT_FOUND;
+        *out_z = hit.z;
+        return WXL_OK;
     }
 
     const wxl_m2_api kApi = {
@@ -695,6 +720,16 @@ namespace wxl::core::services
         }
 
         bool HasModels() { return !g_models.empty(); }
+
+        void LeaveWorld()
+        {
+            for (auto& [model, record] : g_models)
+            {
+                if (!record.world) continue;
+                record.world = false;
+                binding::m2_unplace_world(model);
+            }
+        }
 
         void* SourceOf(void* model)
         {

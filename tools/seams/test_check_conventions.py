@@ -155,6 +155,31 @@ TAIL_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (2, "push 5"), (5, "cal
                    (2, "push 1"), (2, "push 2"), (5, "call 0x402000"), (3, "add esp, 0xc"),
                    (1, "pop ebp"), (1, "ret"))
 TAIL_CALL = address_of(0x00402200, TAIL_CALLER, "call 0x402000")
+# MSVC's float argument: `push ecx` makes room, `fstp dword ptr [esp]` fills it; ecx is never
+# read. Without the store, the push reads ecx.
+FLOAT_SLOT = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"), (1, "push ecx"),
+                  (3, "fld dword ptr [ebp + 0xc]"), (3, "fstp dword ptr [esp]"), (3, "add esp, 4"),
+                  (1, "pop ebp"), (1, "ret"))
+PUSHED_ECX = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"), (1, "push ecx"),
+                  (3, "add esp, 4"), (1, "pop ebp"), (1, "ret"))
+
+# A function that answers nothing: its one caller writes EAX before reading it. Another whose
+# caller tests what it answers.
+NO_ANSWER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402100"), (1, "pop ebp"), (1, "ret"))
+NO_ANSWER_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402380"), (3, "mov esi, dword ptr [ebp + 8]"),
+                        (2, "je 0x40240d"), (5, "mov eax, 1"), (1, "pop ebp"), (1, "ret"))
+ANSWERS = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "mov eax, 7"), (1, "pop ebp"), (1, "ret"))
+ANSWER_CALLER = body((1, "push ebp"), (2, "mov ebp, esp"), (5, "call 0x402440"), (2, "test eax, eax"),
+                     (1, "pop ebp"), (1, "ret"))
+
+# A member that writes ECX on an early return and reads `this` through it only past the branch
+# that skips the write, as CGxDevice::ITexWHDStartEnd (0x006A5F1F, 0x006A5FAE): read straight
+# down, ECX looks written before it is read.
+BRANCH_ECX = body((1, "push ebp"), (2, "mov ebp, esp"), (3, "mov eax, dword ptr [ebp + 8]"),
+                  (2, "test eax, eax"), (2, "jne 0x4024d1"), (3, "mov ecx, dword ptr [ebp + 8]"),
+                  (1, "pop ebp"), (3, "ret 4"),
+                  # 0x004024D1
+                  (6, "mov ecx, dword ptr [ecx + 0x350]"), (1, "pop ebp"), (3, "ret 4"))
 
 PROGRAM = {
     0x00401000: CDECL_TWO,
@@ -180,6 +205,13 @@ PROGRAM = {
     0x00402000: TAIL_TWO,
     0x00402100: CDECL_ONE,
     0x00402200: TAIL_CALLER,
+    0x00402300: FLOAT_SLOT,
+    0x00402340: PUSHED_ECX,
+    0x00402380: NO_ANSWER,
+    0x00402400: NO_ANSWER_CALLER,
+    0x00402440: ANSWERS,
+    0x00402480: ANSWER_CALLER,
+    0x004024C0: BRANCH_ECX,
 }
 
 # (name, address, extent)
@@ -194,7 +226,10 @@ SYMBOLS = [("Thing::Plain", 0x00401000, 0x20), ("Thing::Owned", 0x00401100, 0x20
            ("Thing::OrOne", 0x00401CC0, 0x10), ("Thing::Dispatched", 0x00401D00, 0x10),
            ("Thing::Helper", 0x00401E00, 0x10), ("Thing::Dispatcher", 0x00401F00, 0x20),
            ("Thing::Tail", 0x00402000, 0x10), ("Thing::One", 0x00402100, 0x10),
-           ("Thing::TailCaller", 0x00402200, 0x20)]
+           ("Thing::TailCaller", 0x00402200, 0x20), ("Thing::FloatSlot", 0x00402300, 0x20),
+           ("Thing::PushedEcx", 0x00402340, 0x20), ("Thing::NoAnswer", 0x00402380, 0x20),
+           ("Thing::NoAnswerCaller", 0x00402400, 0x20), ("Thing::Answers", 0x00402440, 0x20),
+           ("Thing::AnswerCaller", 0x00402480, 0x20), ("Thing::BranchEcx", 0x004024C0, 0x20)]
 
 
 def flatten():
@@ -272,6 +307,7 @@ DEMO_DEF = '''// The demo domain.
 WXL_SEAM(Demo, Plain, "Thing::Plain", void, cdecl, (int32_t a, int32_t b))
 WXL_SEAM(Demo, Owned, "Thing::Owned", void, stdcall, (int32_t a, int32_t b))
 WXL_SEAM(Demo, Member, "Thing::Member", void, thiscall, (void* self, int32_t a))
+WXL_SEAM(Demo, BranchEcx, "Thing::BranchEcx", void, thiscall, (void* self, int32_t a))
 WXL_SEAM(Demo, Fast, "Thing::Fast", void, regparm, (void* context, int32_t a))
 WXL_SEAM(Demo, Switch, "Thing::Switch", void, regparm, (void* object, const void* create, uint32_t time))
 WXL_SEAM(Demo, AllOnes, "Thing::AllOnes", void, cdecl, (int32_t* out))
@@ -366,6 +402,10 @@ CASES = [
      DEMO_DEF.replace('"Thing::Member", void, thiscall, (void* self, int32_t a)',
                       '"Thing::Member", void, cdecl, (int32_t a)'),
      THUNKS, 1, "declared cdecl, but 0x00401200 is thiscall (ECX) + 1 stack dword(s)", ()),
+    ("a member reading this only past a branch, declared stdcall",
+     DEMO_DEF.replace('"Thing::BranchEcx", void, thiscall, (void* self, int32_t a)',
+                      '"Thing::BranchEcx", void, stdcall, (int32_t a)'),
+     THUNKS, 1, "declared stdcall, but 0x004024C0 is thiscall (ECX) + 1 stack dword(s)", ()),
     ("a stdcall function declared cdecl",
      DEMO_DEF.replace('"Thing::Owned", void, stdcall,', '"Thing::Owned", void, cdecl,'),
      THUNKS, 1, "declared cdecl, but 0x00401100 is stdcall, 2 stack dword(s)", ()),
@@ -429,6 +469,26 @@ CASES = [
     ("`or r, 1` reads the register it sets",
      DEMO_DEF + 'WXL_SEAM(Demo, OrOne, "Thing::OrOne", int32_t, cdecl, ())\n',
      THUNKS, 1, "declared cdecl, but 0x00401CC0 is regparm (EDI) + 0 stack dword(s)", ()),
+    ("a `push ecx` that only makes room for a float stored there is no read of ecx",
+     DEMO_DEF + 'WXL_SEAM(Demo, FloatSlot, "Thing::FloatSlot", void, cdecl, (int32_t a, float b))\n',
+     THUNKS, 0, "agree", ()),
+    ("a `push ecx` whose slot nothing fills reads ecx",
+     DEMO_DEF + 'WXL_SEAM(Demo, PushedEcx, "Thing::PushedEcx", void, cdecl, (int32_t a))\n',
+     THUNKS, 1, "declared cdecl, but 0x00402340 is thiscall (ECX)", ()),
+    # An answer the After is handed: the function must give one. CMapArea::PrepareChunk answers
+    # nothing on the stock client, and an After reading EAX as the chunk read garbage.
+    ("a row answering a pointer for a function no caller reads an answer of",
+     DEMO_DEF + 'WXL_SEAM(Demo, NoAnswer, "Thing::NoAnswer", void*, cdecl, ())\n',
+     THUNKS, 1, "no caller of 0x00402380 reads EAX after it (0x00402403): the function answers nothing", ()),
+    ("the same function declared void",
+     DEMO_DEF + 'WXL_SEAM(Demo, NoAnswer, "Thing::NoAnswer", void, cdecl, ())\n',
+     THUNKS, 0, None, ()),
+    ("a function whose caller tests its answer",
+     DEMO_DEF + 'WXL_SEAM(Demo, Answers, "Thing::Answers", int32_t, cdecl, ())\n',
+     THUNKS, 0, None, ()),
+    ("a Before alone is handed no answer",
+     DEMO_DEF + 'WXL_SEAM_BEFORE(Demo, NoAnswer, "Thing::NoAnswer", void*, cdecl, ())\n',
+     THUNKS, 0, None, ()),
     # A witness: a call site the row declares, read like a found one.
     ("a handler reached only through a pointer, without a witness",
      DEMO_DEF + DISPATCHED, THUNKS, 1,
@@ -457,6 +517,40 @@ CASES = [
     ("the same, declared stdcall",
      DEMO_DEF + TAIL.replace("cdecl", "stdcall") + TAIL_WITNESS, THUNKS, 1,
      "a witness proves a call its caller cleans for, but the row declares stdcall", ()),
+]
+
+
+# A recompiled parent body (src/deinlined/<Parent>.gen.cpp) and the point table's row of its
+# parent: Thing::CallsCleanly, which calls Thing::Plain. The body names what it calls in its
+# `namespace stock`, as extract.py writes it.
+PARENT_X86_DEF = ('WXL_POINT_X86_PARENT(Thing_CallsCleanly, "Thing::CallsCleanly", 0x00401400, 32, cdecl, '
+                  'void, ())\n')
+BODY = '''namespace wxl::core::deinlined
+{
+    namespace stock
+    {
+        inline const auto Thing_Plain = reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain
+    }
+}
+'''
+GLOBAL_LINE = "        inline uint32_t& s_count = *reinterpret_cast<uint32_t*>(0x00D41258);\n"
+
+# (label, body, exit code, text expected)
+BODY_CASES = [
+    ("a recompiled body calling what Wow.exe's own calls", BODY, 0, "1 recompiled body(ies) calling 1"),
+    ("a recompiled body calling a function Wow.exe's own does not",
+     BODY.replace("reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain",
+                  "reinterpret_cast<void(__stdcall*)(int32_t, int32_t)>(0x00401100); // Thing::Owned"),
+     1, "calls Thing::Owned at 0x00401100 (Thing_Plain), which Wow.exe's own body at 0x00401400 does not call"),
+    ("the same body leaving out the call Wow.exe's own makes",
+     BODY.replace("reinterpret_cast<void(__cdecl*)(int32_t, int32_t)>(0x00401000); // Thing::Plain",
+                  "reinterpret_cast<void(__stdcall*)(int32_t, int32_t)>(0x00401100); // Thing::Owned"),
+     1, "Wow.exe's own body at 0x00401400 calls 0x00401000, which the recompiled one does not call"),
+    ("a recompiled body calling Wow.exe's function with another convention",
+     BODY.replace("void(__cdecl*)", "void(__stdcall*)"), 1, "declared stdcall, but 0x00401000 is cdecl"),
+    ("a recompiled body naming a global Wow.exe's own never reaches",
+     BODY.replace("    }\n}", GLOBAL_LINE + "    }\n}", 1), 1,
+     "names s_count at 0x00D41258, which Wow.exe's own body at 0x00401400 never reaches"),
 ]
 
 
@@ -649,6 +743,21 @@ GROUND_TRUTH = {
     "GameUI.SendTarget":               ("0x00518DC0", "cdecl", [], 2),
     "GameUI.ClearTarget":              ("0x005241B0", "cdecl", [], 3),
     "MapArea.PrepareChunk":            ("0x007D6B30", "thiscall", ["ecx"], 2),
+    # CMapChunk::Purge moves ECX to EDI (0x007C3377), reads no stack and ends in a bare `ret`
+    # (0x007C35CE).
+    "MapChunk.Purge":                  ("0x007C3370", "thiscall", ["ecx"], 0),
+    # Split tiles' seams. CMapArea::ProcessIffChunks moves ECX to EDI (0x007D6EF3), reads no stack
+    # and ends in a bare `ret` (0x007D7014); CMapChunk::ProcessIffChunks reads [ecx+0x10c]
+    # (0x007C3A13) and [ebp+8] (0x007C3A3B) and ends `ret 4` (0x007C3B39); CMapChunk::CreateRefs
+    # reads [ebp+8] to [ebp+0x14], moves ECX to EDI (0x007C6170) and ends `ret 0x10` (0x007C647A);
+    # CMap::FreeArea reads [ebp+8] (0x007C00A5) and ends in a bare `ret` (0x007C0103).
+    "MapArea.ProcessIffChunks":        ("0x007D6EF0", "thiscall", ["ecx"], 0),
+    "MapChunk.ProcessIffChunks":       ("0x007C3A10", "thiscall", ["ecx"], 1),
+    "MapChunk.CreateRefs":             ("0x007C6150", "thiscall", ["ecx"], 4),
+    "Map.FreeArea":                    ("0x007C00A0", "cdecl", [], 1),
+    # CMapLowDetail::Load reads [ebp+8] and [ebp+0xc] (0x007CC319, 0x007CC321), moves ECX to EDI
+    # (0x007CC31F) and ends `ret 8` (0x007CC361).
+    "MapLowDetail.Load":               ("0x007CC310", "thiscall", ["ecx"], 2),
     "FrameScript.Initialize":          ("0x00819BB0", "cdecl", [], 1),
     "FrameScript.Destroy":             ("0x0081A9A0", "cdecl", [], 0),
     "FrameScript.CreateEvents":        ("0x0081B5F0", "cdecl", [], 2),
@@ -672,6 +781,11 @@ GROUND_TRUTH = {
     "Gx.NotifyOnDeviceRestored":       ("0x006843B0", "thiscall", ["ecx"], 0),
     "SimpleTop.OnLayerRender":         ("0x00495410", "thiscall", ["ecx"], 0),
     "WorldFrame.RenderWorld":          ("0x004FAF90", "cdecl", [], 1),
+    # The world renderer's points (V6). RenderDetailDoodads opens a frame of its own and reads no
+    # [ebp+N]; RenderLiquidPass has no frame, reads nothing on the stack and ends in a tail `jmp`
+    # to CMap::RenderWaterRipples (0x00790AA7). Both are class statics reached through thunks.
+    "WorldScene.RenderDetailDoodads":  ("0x007984A0", "cdecl", [], 0),
+    "WorldScene.RenderLiquidPass":     ("0x00790A80", "cdecl", [], 0),
     # Reads its title alone; the two flags are pushed and cleaned by its one caller
     # (0x00406B28 `push 1; push 1; push eax; call; add esp, 0xc`).
     "ConsoleDevice.Initialize":        ("0x0076AB80", "cdecl", [], 1),
@@ -732,6 +846,17 @@ GROUND_TRUTH = {
     # ECX at 0x0071F0C8 and ends in `ret 0x1C`; CallMoveEventHandlers (0x006EB2ED-0x006EB309)
     # pushes seven around the call that computes the opcode.
     "ConsoleVar.InternalSet":          ("0x007667B0", "thiscall", ["ecx"], 5),
+    # CVar::Initialize reads its file name at [ebp+8] (0x00768343) and ends in a bare `ret`
+    # (0x00768401); DeleteCharacterCVars and DeleteAccountCVars read no stack and end in a bare
+    # `ret` (0x00767393, 0x007673E3).
+    "ConsoleVar.Initialize":           ("0x00768340", "cdecl", [], 1),
+    "ConsoleVar.DeleteCharacterCVars": ("0x00767350", "cdecl", [], 0),
+    "ConsoleVar.DeleteAccountCVars":   ("0x007673A0", "cdecl", [], 0),
+    # FrameXML_CheckSignature reads its .toc at [ebp+8] (0x008165EA), its extra file at [ebp+0xC]
+    # and its digest at [ebp+0x14] (0x008166BE) and ends in bare `ret`s (0x00816647, 0x00816757);
+    # DeleteInterfaceFiles reads no stack and ends in a bare `ret` (0x005F4E2F).
+    "FrameXML.CheckSignature":         ("0x008165E0", "cdecl", [], 4),
+    "AddOns.DeleteInterfaceFiles":     ("0x005F4D90", "cdecl", [], 0),
     "Unit.SendMovementUpdate":         ("0x0071F0C0", "thiscall", ["ecx"], 7),
     # OnUpdateMoney is a mirror handler and reads none of its arguments; CallMirrorFunctions
     # (0x004D5238-0x004D5256) pushes the six dwords of MIRRORHANDLERFUNC, calls through
@@ -789,6 +914,8 @@ GROUND_TRUTH = {
     # System_SFile2::FindFile reads [ebp+8] (0x004247C0) up to [ebp+0x1C] (0x004247A9) and ends
     # in a bare `ret` (0x00424B0A); SFile::FileExistsEx pushes six and `add esp, 0x18` at 0x00424B38.
     "Storage.FindFile":                ("0x00424780", "cdecl", [], 6),
+    # The observed half of System_SFile2::FindFile, the same function: as above.
+    "Storage.FindFileResult":          ("0x00424780", "cdecl", [], 6),
     # The asset pipeline's events. CMapArea::AsyncCallback reads [ebp+8] (0x007D7024), a bare
     # `ret` (0x007D7044); AsyncTextureSuccessCallback the same (0x004B7E84, 0x004B7F0D); both are
     # called by AsyncFileReadPollHandler through ECX at 0x004B9B9E, `add esp, 4`.
@@ -811,6 +938,11 @@ GROUND_TRUTH = {
     "M2.DrawBatch":                    ("0x008203B0", "thiscall", ["ecx"], 0),
     "M2.AnimateMT":                    ("0x0082F0F0", "thiscall", ["ecx"], 5),
     "M2.AnimateMTSimple":              ("0x0082E140", "thiscall", ["ecx"], 5),
+    # The model cache's animate worker: BeginThread `mov eax,[ebp+8]`, `mov edx,[ebp+0xc]` with
+    # `this` in ECX and `ret 8` (0x0081BFC1); WaitThread `add ecx, 0x100c` then a bare `ret`
+    # (0x0081BFDD).
+    "M2.BeginThread":                  ("0x0081BFA0", "thiscall", ["ecx"], 2),
+    "M2.WaitThread":                   ("0x0081BFD0", "thiscall", ["ecx"], 0),
     # The character appearance: AddItem(slot, rec, visual) `ret 0xc` (0x004F26C2), RemoveItem(slot)
     # `ret 4` (0x004EE53C); FreeComponent and RemoveVisuals are class statics reading [ebp+8] and
     # ending in a plain `ret` (0x004F16E7, 0x004EB060).
@@ -824,6 +956,15 @@ GROUND_TRUTH = {
     "BLPFile.Source":                  ("0x006AE900", "thiscall", ["ecx"], 1),
     # CGxDevice::IShaderLoad reads ECX (0x0068497E) and [ebp+8..0x14], `ret 0x14` (0x00684A9F).
     "Gx.IShaderLoad":                  ("0x00684970", "thiscall", ["ecx"], 5),
+    # The devices' Draw (vtable slot 42): ecx, batch and count, `ret 0x8`.
+    "Gx.D3dDraw":                      ("0x006A3620", "thiscall", ["ecx"], 2),
+    "Gx.D3d9ExDraw":                   ("0x006A77C0", "thiscall", ["ecx"], 2),
+    # IShaderCreatePixel/Vertex, shared by the D3D9 and 9Ex devices: ecx and the record, `ret 4`.
+    "Gx.D3dIShaderCreatePixel":        ("0x006AA070", "thiscall", ["ecx"], 1),
+    "Gx.D3dIShaderCreateVertex":       ("0x006AA0D0", "thiscall", ["ecx"], 1),
+    # The 9Ex names resolve to the same bodies on the stock client (x64-only rows there).
+    "Gx.D3d9ExIShaderCreatePixel":     ("0x006AA070", "thiscall", ["ecx"], 1),
+    "Gx.D3d9ExIShaderCreateVertex":    ("0x006AA0D0", "thiscall", ["ecx"], 1),
     # SE2::CreateWaveData reads [ebp+8] (0x0087EE83) to the floats at [ebp+0x38], bare `ret`
     # (0x0087F195, 0x0087F376); Sound_LoadScriptSoundFile pushes sixteen, `add esp, 0x40` at
     # 0x0087F808.
@@ -843,6 +984,22 @@ GROUND_TRUTH = {
     # [ebp+0x10]) and six dwords (the doodad set a word at [ebp+0x1C]) and each ends in a bare
     # `ret` (0x007BEF31, 0x007BECC9, 0x007BF11F).
     "Map.AllocDoodadDef":              ("0x007C01F0", "cdecl", [], 0),
+    # CMap::Unload reads no stack and ends in a bare `ret` (0x007C39F9).
+    "Map.Unload":                      ("0x007C3830", "cdecl", [], 0),
+    # CMap::LoadWdt reads only statics: no argument, a bare `ret`.
+    "Map.LoadWdt":                     ("0x007BF8B0", "cdecl", [], 0),
+    # CMapRenderChunk::CreateLayer(area, mcly, checkDuplicate) reads ecx and ends in `ret 0xc`;
+    # the two single-pass functions are thiscall with no argument (bare `ret`), the six multi-pass
+    # ones cdecl, the render chunk their one stack argument.
+    "MapRenderChunk.CreateLayer":                              ("0x007B9250", "thiscall", ["ecx"], 3),
+    "MapRenderChunk.RenderSinglePassVertexPixelShader":        ("0x007D2D70", "thiscall", ["ecx"], 0),
+    "MapRenderChunk.RenderMultiPassVertexPixelShader":         ("0x007D2520", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassVertexPixelShaderBigAlpha": ("0x007D20A0", "cdecl", [], 1),
+    "MapRenderChunk.RenderSinglePassPixelShader":              ("0x007D28B0", "thiscall", ["ecx"], 0),
+    "MapRenderChunk.RenderMultiPassPixelShader":               ("0x007D1AD0", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassPixelShaderBigAlpha":       ("0x007D13F0", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassAdditive":                  ("0x007D0760", "cdecl", [], 1),
+    "MapRenderChunk.RenderMultiPassAlpha":                     ("0x007D0D70", "cdecl", [], 1),
     "Map.CreateDoodadDef":             ("0x007BECD0", "cdecl", [], 3),
     "Map.CreateDoodadDefAt":           ("0x007BEB40", "cdecl", [], 4),
     "Map.CreateDoodadDefInMapObj":     ("0x007BEF40", "cdecl", [], 6),
@@ -858,10 +1015,163 @@ GROUND_TRUTH = {
     # callback (its address pushed, never called directly) reading one dword, bare `ret`;
     # vFrameScript_SignalEvent is called at 0x005326E8 with three pushed and twelve cleaned.
     "Point.CGCamera_UpdateCallback":   ("0x00607B00", "cdecl", [], 2),
+    # The camera seam on the same function, read by hand as its point is: called once, at
+    # 0x004FA7BC, two dwords pushed and none cleaned there (the caller's frame pops them), a bare
+    # `ret`.
+    "Camera.UpdateCallback":           ("0x00607B00", "cdecl", [], 2),
+    # The control bits, read by hand: SetControlBit reads ECX into ESI and [ebp+8] (0x005FA177,
+    # 0x005FA17B) and ends `ret 8`; UnsetControlBit ends `ret 0xC` (0x005FA46C, 0x005FA6A6).
+    # CGUnit_C::PreAnimate, a virtual, reads ECX and its frame, one `ret 4` (0x0073E40D).
+    "InputControl.SetControlBit":      ("0x005FA170", "thiscall", ["ecx"], 2),
+    "InputControl.UnsetControlBit":    ("0x005FA450", "thiscall", ["ecx"], 3),
+    "Unit.PreAnimate":                 ("0x0073DAB0", "thiscall", ["ecx"], 1),
+    # CGWorldFrame::PerformDefaultAction reads ECX into ESI (0x004F7887) and its button at
+    # [ebp+8] (0x004F78C7), and ends `ret 4` on every path (0x004F78E7, 0x004F7A38).
+    "WorldFrame.PerformDefaultAction": ("0x004F7880", "thiscall", ["ecx"], 1),
+    # The circles' drawers, members called through the vtable or by CGUnit_C::Render with no
+    # stack argument: each moves ECX to ESI first (0x00725991, 0x00725BF7, 0x007275C7,
+    # 0x007062F7) and ends in one bare `ret` (0x00725BD6, 0x00725DE6, 0x00727759, 0x00706429).
+    "Unit.RenderTargetSelection":      ("0x00725980", "thiscall", ["ecx"], 0),
+    "Unit.RenderPetTargetSelection":   ("0x00725BF0", "thiscall", ["ecx"], 0),
+    "Unit.RenderAutoTrackCursor":      ("0x007275C0", "thiscall", ["ecx"], 0),
+    "Corpse.RenderTargetSelection":    ("0x007062F0", "thiscall", ["ecx"], 0),
+    # ProjectTex::Render2d reads seven dwords from [ebp+8] and ends in a bare `ret` (0x007E447B);
+    # CGUnit_C::RenderTargetSelection pushes seven and cleans 0x1c (0x00725A8F).
+    "ProjectTex.Render2d":             ("0x007E4370", "cdecl", [], 7),
     "Point.CM2Cache_CreateShared":     ("0x0081C390", "thiscall", ["ecx"], 2),
     "Point.CGWorldFrame_RenderWorld":  ("0x004FAF90", "cdecl", [], 1),
     "Point.vFrameScript_SignalEvent":  ("0x0081AC90", "cdecl", [], 3),
     "Point.NetClient_ProcessMessage":  ("0x00631FE0", "thiscall", ["ecx"], 3),
+    # FinishLoading is reached by LoadSucceededCallback's tail jump with ECX set (0x0083D35A), moves
+    # ECX at 0x0083CF01 and ends in bare `ret`s (0x0083CF0F, 0x0083D23D, 0x0083D25F, 0x0083D2C1).
+    "Point.CM2Shared_FinishLoading":   ("0x0083CF00", "thiscall", ["ecx"], 0),
+    # M2Init's second parent, which the runtime recompiles but is no point: reads ECX at
+    # 0x0083C6EB and [ebp+8], [ebp+0xc] (0x0083C6E4, 0x0083C6E7), `ret 0xc` at 0x0083CA73 and
+    # 0x0083CA8A; its caller 0x0083CA90 pushes three before each call (0x0083CAB2, 0x0083CADD).
+    "Parent.CM2Shared_FinishLoadingLowPrioritySequence_uint32_t_uint8_t_uint32_t":
+                                       ("0x0083C6E0", "thiscall", ["ecx"], 3),
+    # What the recompiled bodies call (src/deinlined/), each read by hand. CM2Shared::Initialize
+    # reads ECX (0x0083CC88) and ends in bare `ret`s (0x0083CD29, 0x0083CD4F); SMemAlloc reads
+    # four stack slots and ends `ret 0x10` (0x0076E586, 0x0076E597), STORMAPI. The M2Init<T>
+    # array readers read their frame up to [ebp+0x14] (the array; 0x00835AED, 0x00835C7A) and
+    # end in bare `ret`s (0x00835AFE, 0x00835C90), and their callers in
+    # FinishLoading and FinishLoadingLowPrioritySequence push four and clean 0x10 (`add esp,
+    # 0x10`, e.g. 0x0083C75A after the call at 0x0083C755).
+    "Deinlined.CM2Shared_Initialize":  ("0x0083CC80", "thiscall", ["ecx"], 0),
+    "Deinlined.SMemAlloc":             ("0x0076E540", "stdcall", [], 4),
+    "Deinlined.M2Init_00835AE0":       ("0x00835AE0", "cdecl", [], 4),
+    "Deinlined.M2Init_00835B80":       ("0x00835B80", "cdecl", [], 4),
+    "Deinlined.M2Init_00835BD0":       ("0x00835BD0", "cdecl", [], 4),
+    "Deinlined.M2Init_00835C20":       ("0x00835C20", "cdecl", [], 4),
+    "Deinlined.M2Init_00835C70":       ("0x00835C70", "cdecl", [], 4),
+    "Deinlined.M2Init_00835DF0":       ("0x00835DF0", "cdecl", [], 4),
+    "Deinlined.M2Init_00836B60":       ("0x00836B60", "cdecl", [], 4),
+    "Deinlined.M2Init_00836E40":       ("0x00836E40", "cdecl", [], 4),
+    "Deinlined.M2Init_00837EE0":       ("0x00837EE0", "cdecl", [], 4),
+    "Deinlined.M2Init_008382A0":       ("0x008382A0", "cdecl", [], 4),
+    "Deinlined.M2Init_008385A0":       ("0x008385A0", "cdecl", [], 4),
+    "Deinlined.M2Init_00838B10":       ("0x00838B10", "cdecl", [], 4),
+    "Deinlined.M2Init_00839080":       ("0x00839080", "cdecl", [], 4),
+    "Deinlined.M2Init_00839270":       ("0x00839270", "cdecl", [], 4),
+    "Deinlined.M2Init_00839EF0":       ("0x00839EF0", "cdecl", [], 4),
+    "Deinlined.M2Init_0083A460":       ("0x0083A460", "cdecl", [], 4),
+    "Deinlined.M2Init_0083AF90":       ("0x0083AF90", "cdecl", [], 4),
+    # The x86 binding's own calls for wxl.m2's models of the world (calls_x86.def), each read by
+    # hand: `ret 8` at 0x008251C5, `ret 4` at 0x00825F36, `ret 0x1c` at 0x00832ADA, `ret 0xc` at
+    # 0x0082D11A, `ret 4` at 0x00823F59, `ret 8` at 0x00824F19, `ret 4` at 0x004F5E70 and
+    # 0x004F5EF7 (the hidden return pointer), `ret 4` at 0x00827A3C and 0x00824270, `ret 4` at
+    # 0x00827437, `ret 8` at 0x0083140C (hidden pointer and id), `ret 4` at 0x004C3339,
+    # 0x004C3379, 0x004C33B9 and 0x004C1C3D; bare `ret`s at 0x00782342, 0x007804F4, 0x00782731.
+    "M2Call.SetLoadedCallback":        ("0x008251B0", "thiscall", ["ecx"], 2),
+    "M2Call.HasSequence":              ("0x00825EE0", "thiscall", ["ecx"], 1),
+    "M2Call.SetBoneSequence":          ("0x00832AB0", "thiscall", ["ecx"], 7),
+    "M2Call.GetSequenceInfo":          ("0x0082CED0", "thiscall", ["ecx"], 3),
+    "M2Call.SetAnimating":             ("0x00823F10", "thiscall", ["ecx"], 1),
+    # Called by the animate gates as CM2Scene::Animate calls them: see M2.AnimateMT above.
+    "M2Call.AnimateMT":                ("0x0082F0F0", "thiscall", ["ecx"], 5),
+    "M2Call.AnimateMTSimple":          ("0x0082E140", "thiscall", ["ecx"], 5),
+    "M2Call.IsLoaded":                 ("0x00824F00", "thiscall", ["ecx"], 2),
+    "M2Call.GetBoundingBox":           ("0x004F5E20", "thiscall", ["ecx"], 1),
+    "M2Call.GetBoundingSphere":        ("0x004F5E80", "thiscall", ["ecx"], 1),
+    "M2Call.SetEmittersEnabled":       ("0x008279F0", "thiscall", ["ecx"], 1),
+    "M2Call.SetRibbonsEnabled":        ("0x00824230", "thiscall", ["ecx"], 1),
+    "M2Call.HasAttachment":            ("0x008273D0", "thiscall", ["ecx"], 1),
+    "M2Call.GetAttachmentPosition":    ("0x00831330", "thiscall", ["ecx"], 2),
+    "M2Call.RotateAroundX":            ("0x004C3300", "thiscall", ["ecx"], 1),
+    "M2Call.RotateAroundY":            ("0x004C3340", "thiscall", ["ecx"], 1),
+    "M2Call.RotateAroundZ":            ("0x004C3380", "thiscall", ["ecx"], 1),
+    "M2Call.Scale":                    ("0x004C1BF0", "thiscall", ["ecx"], 1),
+    "M2Call.ObjectCreateStatic":       ("0x00782000", "cdecl", [], 5),
+    "M2Call.ObjectUpdate":             ("0x00780240", "cdecl", [], 7),
+    "M2Call.ObjectDestroy":            ("0x007826E0", "cdecl", [], 1),
+    # The object reads' calls (calls_x86.def), read by hand: CanAttack moves ECX to EBX
+    # (0x00729744) and ends `ret 4` (0x00729768); CanInteractNow moves ECX to ESI (0x00729625)
+    # and ends `ret 4` (0x0072968F, 0x00729738); CanHighlight moves ECX to ESI (0x0070F581) and
+    # ends in bare `ret`s (0x0070F61B, 0x0070F627).
+    "ObjectCall.CanAttack":            ("0x00729740", "thiscall", ["ecx"], 1),
+    "ObjectCall.CanInteractNow":       ("0x00729620", "thiscall", ["ecx"], 1),
+    "ObjectCall.CanHighlight":         ("0x0070F580", "thiscall", ["ecx"], 0),
+    # The circle textures' calls (calls_x86.def), read by hand: CreateTexture reads its name and
+    # status at [ebp+8] and [ebp+0xc] (0x004E8D50) and ends in a bare `ret` (0x004E8D68);
+    # GetGlobalStatusObj is `mov eax, imm32; ret` (0x0047C095); HandleClose reads its handle at
+    # [ebp+8] (0x0047BF33) and ends in bare `ret`s.
+    "TextureCall.CreateTexture":       ("0x004E8D30", "cdecl", [], 2),
+    "TextureCall.GetGlobalStatusObj":  ("0x0047C090", "cdecl", [], 0),
+    "TextureCall.HandleClose":         ("0x0047BF30", "cdecl", [], 1),
+    # wxl.terrain's calls (calls_x86.def), read by hand: CreateBounds writes through ECX
+    # (0x007C5244) and ends in a bare `ret` (0x007C543A); AddBatch moves ECX to ESI (0x007B7AFF),
+    # reads [ebp+8] to [ebp+0x14] and ends `ret 0x10` (0x007B7BC9); FreeInst reads [ebp+8]
+    # (0x007B396B) and ends in a bare `ret` (0x007B3986); OnFallLocal reads [ebp+8] (0x006ECCF3),
+    # moves ECX to ESI (0x006ECCFA) and ends `ret 4` (0x006ECD46).
+    "TerrainCall.CreateBounds":        ("0x007C5220", "thiscall", ["ecx"], 0),
+    "TerrainCall.AddBatch":            ("0x007B7AF0", "thiscall", ["ecx"], 4),
+    "TerrainCall.FreeInst":            ("0x007B3960", "cdecl", [], 1),
+    "TerrainCall.OnFallLocal":         ("0x006ECCF0", "thiscall", ["ecx"], 1),
+    # Split tiles' calls (calls_x86.def), read by hand: LoadTextures moves ECX to EDI (0x007D6D28),
+    # reads [ebp+0xc] (0x007D6D34) and [ebp+8] (0x007D6DB1) and ends `ret 8` (0x007D6E0B);
+    # CreateRefs reads [ebp+8] to [ebp+0x14], moves ECX to EDI (0x007C6170) and ends `ret 0x10`
+    # (0x007C647A).
+    "TerrainCall.LoadTextures":        ("0x007D6D20", "thiscall", ["ecx"], 2),
+    "TerrainCall.CreateRefs":          ("0x007C6150", "thiscall", ["ecx"], 4),
+    # The far terrain's calls, read by hand: SMemAlloc reads [ebp+8] (0x0076E545) and [ebp+0x14]
+    # (0x0076E54E) and ends `ret 0x10` (0x0076E586, 0x0076E597); CMap::AllocAreaLow reads no stack
+    # and ends in bare `ret`s (0x007C0ABF).
+    "TerrainCall.SMemAlloc":           ("0x0076E540", "stdcall", [], 4),
+    "TerrainCall.AllocAreaLow":        ("0x007C0A90", "cdecl", [], 0),
+    # wxl.animation's calls (calls_x86.def), read by hand: PlayBaseAnimation moves ECX to EBX
+    # (0x007385CA) and ends `ret 8` (0x0073880C); UpdateBaseAnimation moves ECX to ESI
+    # (0x0073AC34) and ends `ret 8` (0x0073ACF9); GetCurrentTorsoAnimId moves ECX to ESI
+    # (0x00717261) and ends in bare `ret`s (0x007172A4, 0x007172A9); SetKeyBoneSequenceSpeed
+    # moves ECX to ESI (0x00735CCA), reads [ebp+8] to [ebp+0x14] and ends `ret 0x10` (0x00735DC6);
+    # CM2Model::GetBoneSequenceId moves ECX to ESI (0x008267E4) and ends `ret 4` (0x00826853).
+    "AnimCall.PlayBaseAnimation":      ("0x007385C0", "thiscall", ["ecx"], 2),
+    "AnimCall.UpdateBaseAnimation":    ("0x0073AC30", "thiscall", ["ecx"], 2),
+    "AnimCall.GetCurrentTorsoAnimId":  ("0x00717260", "thiscall", ["ecx"], 0),
+    "AnimCall.SetKeyBoneSequenceSpeed": ("0x00735CC0", "thiscall", ["ecx"], 4),
+    "AnimCall.GetBoneSequenceId":      ("0x008267E0", "thiscall", ["ecx"], 1),
+    # wxl.net's calls (calls_x86.def), read by hand: CDataStore::CDataStore(data, size) moves ECX
+    # to EAX (0x004669A6), reads [ebp+8] and [ebp+0xc] (0x004669A8, 0x004669A3) and ends `ret 8`
+    # (0x004669C7); ClientServices::Send2 reads its message at [ebp+8] (0x006B0B5D), hands it to
+    # NetClient::Send with s_currentConnection in ECX, and ends in a bare `ret` (0x006B0B67).
+    "NetCall.StoreOver":               ("0x004669A0", "thiscall", ["ecx"], 2),
+    "NetCall.Send2":                   ("0x006B0B50", "cdecl", [], 1),
+    # wxl.cvar's calls (calls_x86.def), read by hand: Lookup reads its name at [ebp+8]
+    # (0x00767443) and ends in bare `ret`s (0x00767456); Register reads up to its ninth dword
+    # at [ebp+0x28] (0x00768068) and ends in bare `ret`s (0x00768085, 0x007681E0); Set moves ECX
+    # to ESI (0x007668CE) and ends `ret 0x14` (0x00766915, 0x00766933).
+    "CVarCall.Lookup":                 ("0x00767440", "cdecl", [], 1),
+    "CVarCall.Register":               ("0x00767FC0", "cdecl", [], 9),
+    "CVarCall.Set":                    ("0x007668C0", "thiscall", ["ecx"], 5),
+    # The interface signature's calls (calls_x86.def), read by hand: CheckSignature as its seam
+    # row; MD5Init reads its context at [ebp+8] (0x00779343) and ends in a bare `ret`
+    # (0x0077936A); ProcessFileForMakeSign reads up to [ebp+0x10] (0x008162B6) and ends in a bare
+    # `ret` (0x008164C4); MD5Update reads its length at [ebp+0x10] (0x00779A3E), MD5Final its
+    # context at [ebp+0xC] (0x00779AE7), both ending in bare `ret`s (0x00779B96 for MD5Final).
+    "InterfaceCall.CheckSignature":         ("0x008165E0", "cdecl", [], 4),
+    "InterfaceCall.MD5Init":                ("0x00779340", "cdecl", [], 1),
+    "InterfaceCall.ProcessFileForMakeSign": ("0x008162B0", "cdecl", [], 3),
+    "InterfaceCall.MD5Update":              ("0x00779A30", "cdecl", [], 3),
+    "InterfaceCall.MD5Final":               ("0x00779AE0", "cdecl", [], 2),
     # The gameplay rows, read by hand. The packet handlers are reached only through NetClient's
     # handler table, which pushes four and cleans 0x10 at 0x0063202C; each reads its message at
     # [ebp+0x14] and ends in bare `ret`s. UNINVITE, DESTROYED and READY_CHECK_FINISHED read
@@ -903,6 +1213,226 @@ GROUND_TRUTH = {
     "Trade.Packet_SMSG_TRADE_STATUS":  ("0x007044A0", "cdecl", [], 4),
     "Reputation.Packet_SMSG_SET_FACTION_STANDING": ("0x005D20A0", "cdecl", [], 4),
     "Achievement.Packet_SMSG_ACHIEVEMENT_EARNED": ("0x005B3020", "cdecl", [], 4),
+    # The Vulkan adapter's calls into the stock device (GxCall) and the two D3D9 vtables' slots
+    # (Slot.<name>.<api>, include/wxl/gx/slots.def). Members a vtable calls take `this` in ECX
+    # whether they read it or hand it on to what they call (CapsWindowSize 0x006A5A00 calls
+    # DeviceCurWindow with ECX untouched; XformSetView 0x006A9E00 is `push ebp; mov ebp,esp; pop
+    # ebp; jmp 0x00689050`, read through to CGxDevice's, `ret 4`); members that never touch `this`
+    # (CGxDevice::BufData 0x00683130, TexDestroy 0x00687980) are called as stdcall. The factories
+    # are cdecl with nothing on the stack and end in `ret` (0x00689F13, 0x0068C243).
+    "GxCall.DeviceCreate":                   ("0x00682CB0", "thiscall", ["ecx"], 2),
+    "GxCall.DeviceDestroy":                  ("0x00682CF0", "thiscall", ["ecx"], 0),
+    "GxCall.DeviceSetFormat":                ("0x006840F0", "thiscall", ["ecx"], 1),
+    "GxCall.DeviceSetBaseMipLevel":          ("0x00682D00", "thiscall", ["ecx"], 1),
+    "GxCall.DeviceSetGamma":                 ("0x00684170", "thiscall", ["ecx"], 1),
+    "GxCall.DeviceSetGammaRamp":             ("0x00684190", "thiscall", ["ecx"], 1),
+    "GxCall.DeviceOverride":                 ("0x00684FE0", "thiscall", ["ecx"], 2),
+    "GxCall.DeviceSetRenderTarget":          ("0x006842A0", "thiscall", ["ecx"], 3),
+    "GxCall.DeviceSetDefWindow":             ("0x00684360", "thiscall", ["ecx"], 1),
+    "GxCall.ClampRectToWindow":              ("0x00683CE0", "thiscall", ["ecx"], 1),
+    "GxCall.ScenePresent":                   ("0x00682E50", "thiscall", ["ecx"], 0),
+    "GxCall.DeviceScreenShot":               ("0x006841D0", "thiscall", ["ecx"], 0),
+    "GxCall.WaitForFPSCap":                  ("0x006836D0", "thiscall", ["ecx"], 0),
+    "GxCall.XformSetView":                   ("0x00689050", "thiscall", ["ecx"], 1),
+    "GxCall.QueryCreate":                    ("0x006877C0", "thiscall", ["ecx"], 2),
+    "GxCall.ShaderConstantsClear":           ("0x006833A0", "cdecl", [], 0),
+    "GxCall.ShaderConstantsSet":             ("0x00408210", "cdecl", [], 4),
+    "GxCall.XformSet":                       ("0x0057C450", "cdecl", [], 2),
+    "GxCall.RsSetPointer":                   ("0x00408240", "cdecl", [], 2),
+    "GxCall.RsSetInt":                       ("0x00408BF0", "cdecl", [], 2),
+    "TerrainCall.ValidateShaders":           ("0x007BD8A0", "cdecl", [], 0),
+    "GxCall.TexSetWrap":                     ("0x00681450", "cdecl", [], 3),
+    "GxCall.IRsSync":                        ("0x00685B50", "thiscall", ["ecx"], 1),
+    "GxCall.ITexMarkAsUpdated":              ("0x00684900", "stdcall", [], 1),
+    "GxCall.ITexWHDStartEnd":                ("0x006A5EF0", "thiscall", ["ecx"], 5),
+    "GxCall.TexMarkForUpdate":               ("0x006848A0", "thiscall", ["ecx"], 3),
+    "GxCall.TexDestroy":                     ("0x00687980", "stdcall", [], 1),
+    "GxCall.PoolDestroy":                    ("0x00688340", "thiscall", ["ecx"], 1),
+    "GxCall.BufLock":                        ("0x00683150", "thiscall", ["ecx"], 1),
+    "GxCall.BufUnlock":                      ("0x00683180", "thiscall", ["ecx"], 2),
+    "GxCall.BufData":                        ("0x00683130", "stdcall", [], 4),
+    "GxCall.ICursorCreate":                  ("0x00684AD0", "thiscall", ["ecx"], 1),
+    "GxCall.ICursorDestroy":                 ("0x006835E0", "thiscall", ["ecx"], 0),
+    "GxCall.ICursorDraw":                    ("0x00687A90", "thiscall", ["ecx"], 0),
+    "GxCall.CursorSetVisible":               ("0x00683640", "thiscall", ["ecx"], 1),
+    "GxCall.CursorUnlock":                   ("0x00684B50", "thiscall", ["ecx"], 2),
+    "GxCall.QueryDestroy":                   ("0x006879F0", "stdcall", [], 1),
+    "GxCall.ShaderCreate":                   ("0x006897C0", "thiscall", ["ecx"], 5),
+    "GxCall.ShaderDestroy":                  ("0x00687820", "thiscall", ["ecx"], 1),
+    "GxCall.LogFormat":                      ("0x00684D10", "stdcall", [], 1),
+    "GxCall.LogCaps":                        ("0x00684C40", "stdcall", [], 1),
+    "GxCall.AdjustWindowRectToWorkArea":     ("0x00684D70", "cdecl", [], 3),
+    "GxCall.MatrixStackIdentity":            ("0x0057C340", "thiscall", ["ecx"], 0),
+    "GxCall.EmergencyLock":                  ("0x00685E90", "thiscall", ["ecx"], 1),
+    "GxCall.EmergencyUnlock":                ("0x00682C40", "thiscall", ["ecx"], 0),
+    "GxCall.PoolDiscard":                    ("0x00688260", "thiscall", ["ecx"], 0),
+    "GxCall.PixelsSetCount":                 ("0x00616CA0", "thiscall", ["ecx"], 1),
+    "GxCall.Blit":                           ("0x006AE7C0", "cdecl", [], 8),
+    "GxCall.GetBlitFormat":                  ("0x006817B0", "cdecl", [], 1),
+    "GxCall.GxLog":                          ("0x006817E0", "cdecl", [], 2),
+    "GxCall.PostClose":                      ("0x0047D760", "cdecl", [], 0),
+    "GxCall.CommandRegister":                ("0x00769100", "cdecl", [], 4),
+    "GxCall.ConsoleWrite":                   ("0x00765270", "cdecl", [], 2),
+    "GxCall.TexUserFunc":                    ("0x00683610", "cdecl", [], 8),
+    "Slot.Factory.d3d9":                     ("0x00689EF0", "cdecl", [], 0),
+    "Slot.Factory.d3d9ex":                   ("0x0068C220", "cdecl", [], 0),
+    "Slot.ITexMarkAsUpdated.d3d9":           ("0x006A3070", "thiscall", ["ecx"], 1),
+    "Slot.ITexMarkAsUpdated.d3d9ex":         ("0x006A7100", "thiscall", ["ecx"], 1),
+    "Slot.IRsSendToHw.d3d9":                 ("0x006A4C30", "thiscall", ["ecx"], 1),
+    "Slot.IRsSendToHw.d3d9ex":               ("0x006A8BD0", "thiscall", ["ecx"], 1),
+    "Slot.ICursorCreate.d3d9":               ("0x0068E900", "thiscall", ["ecx"], 1),
+    "Slot.ICursorCreate.d3d9ex":             ("0x0068E900", "thiscall", ["ecx"], 1),
+    "Slot.ICursorDestroy.d3d9":              ("0x006A00C0", "thiscall", ["ecx"], 0),
+    "Slot.ICursorDestroy.d3d9ex":            ("0x006A00C0", "thiscall", ["ecx"], 0),
+    "Slot.ICursorDraw.d3d9":                 ("0x0068E810", "thiscall", ["ecx"], 0),
+    "Slot.ICursorDraw.d3d9ex":               ("0x0069FFD0", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnDeviceRestored.d3d9":      ("0x006843B0", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnDeviceRestored.d3d9ex":    ("0x006843B0", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnTextureRecreation.d3d9":   ("0x006843E0", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnTextureRecreation.d3d9ex": ("0x006843E0", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnStereoChanged.d3d9":       ("0x00684410", "thiscall", ["ecx"], 0),
+    "Slot.NotifyOnStereoChanged.d3d9ex":     ("0x00684410", "thiscall", ["ecx"], 0),
+    "Slot.Destructor.d3d9":                  ("0x0068FE80", "thiscall", ["ecx"], 1),
+    "Slot.DeviceCreateOnWindow.d3d9":        ("0x00690830", "thiscall", ["ecx"], 2),
+    "Slot.DeviceCreateOnWindow.d3d9ex":      ("0x006A23A0", "thiscall", ["ecx"], 2),
+    "Slot.DeviceCreate.d3d9":                ("0x00690750", "thiscall", ["ecx"], 2),
+    "Slot.DeviceCreate.d3d9ex":              ("0x006A22C0", "thiscall", ["ecx"], 2),
+    "Slot.DeviceDestroy.d3d9":               ("0x006905F0", "thiscall", ["ecx"], 0),
+    "Slot.DeviceDestroy.d3d9ex":             ("0x006A2160", "thiscall", ["ecx"], 0),
+    "Slot.DeviceEvictResources.d3d9":        ("0x0068E450", "thiscall", ["ecx"], 0),
+    "Slot.DeviceEvictResources.d3d9ex":      ("0x0069FDC0", "thiscall", ["ecx"], 0),
+    "Slot.DeviceSetFormat.d3d9":             ("0x006904D0", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetFormat.d3d9ex":           ("0x006A2040", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetBaseMipLevel.d3d9":       ("0x0068E4A0", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetBaseMipLevel.d3d9ex":     ("0x0069FE60", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetGammaRamp.d3d9":          ("0x0069FE80", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetGammaRamp.d3d9ex":        ("0x0069FE80", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetGamma.d3d9":              ("0x0068E4C0", "thiscall", ["ecx"], 1),
+    "Slot.DeviceSetGamma.d3d9ex":            ("0x0068E4C0", "thiscall", ["ecx"], 1),
+    "Slot.DeviceWindow.d3d9":                ("0x0069FED0", "thiscall", ["ecx"], 0),
+    "Slot.DeviceWindow.d3d9ex":              ("0x0069FED0", "thiscall", ["ecx"], 0),
+    "Slot.DeviceTakeScreenShot.d3d9":        ("0x00682D30", "thiscall", ["ecx"], 0),
+    "Slot.DeviceTakeScreenShot.d3d9ex":      ("0x00682D30", "thiscall", ["ecx"], 0),
+    "Slot.DeviceReadScreenShot.d3d9":        ("0x00684260", "thiscall", ["ecx"], 3),
+    "Slot.DeviceReadScreenShot.d3d9ex":      ("0x00684260", "thiscall", ["ecx"], 3),
+    "Slot.DeviceReadPixels.d3d9":            ("0x0068FED0", "thiscall", ["ecx"], 2),
+    "Slot.DeviceReadPixels.d3d9ex":          ("0x006A16D0", "thiscall", ["ecx"], 2),
+    "Slot.DeviceReadDepths.d3d9":            ("0x006A1950", "thiscall", [], 2),
+    "Slot.DeviceReadDepths.d3d9ex":          ("0x006A1950", "thiscall", [], 2),
+    "Slot.DeviceWM.d3d9":                    ("0x00690230", "thiscall", ["ecx"], 3),
+    "Slot.DeviceWM.d3d9ex":                  ("0x006A1DC0", "thiscall", ["ecx"], 3),
+    "Slot.DeviceSetRenderTarget.d3d9":       ("0x0068F770", "thiscall", ["ecx"], 3),
+    "Slot.DeviceSetRenderTarget.d3d9ex":     ("0x006A13A0", "thiscall", ["ecx"], 3),
+    "Slot.DeviceSaveDepthSurface.d3d9":      ("0x0068E510", "thiscall", ["ecx"], 0),
+    "Slot.DeviceSaveDepthSurface.d3d9ex":    ("0x0069FEE0", "thiscall", ["ecx"], 0),
+    "Slot.DeviceRestoreDepthSurface.d3d9":   ("0x0068E540", "thiscall", ["ecx"], 0),
+    "Slot.DeviceRestoreDepthSurface.d3d9ex": ("0x0069FF10", "thiscall", ["ecx"], 0),
+    "Slot.DeviceResolveDepthBuffer.d3d9":    ("0x0068F900", "thiscall", ["ecx"], 1),
+    "Slot.DeviceResolveDepthBuffer.d3d9ex":  ("0x006A1530", "thiscall", ["ecx"], 1),
+    "Slot.DeviceCopyTex.d3d9":               ("0x0068F950", "thiscall", ["ecx"], 4),
+    "Slot.DeviceCopyTex.d3d9ex":             ("0x006A1580", "thiscall", ["ecx"], 4),
+    "Slot.DeviceOverride.d3d9":              ("0x0069FF40", "thiscall", ["ecx"], 2),
+    "Slot.DeviceOverride.d3d9ex":            ("0x0069FF40", "thiscall", ["ecx"], 2),
+    "Slot.AddDeviceRestoredCallback.d3d9":   ("0x006853B0", "thiscall", ["ecx"], 1),
+    "Slot.AddDeviceRestoredCallback.d3d9ex": ("0x006853B0", "thiscall", ["ecx"], 1),
+    "Slot.RemoveDeviceRestoredCallback.d3d9": ("0x006853D0", "thiscall", ["ecx"], 1),
+    "Slot.RemoveDeviceRestoredCallback.d3d9ex": ("0x006853D0", "thiscall", ["ecx"], 1),
+    "Slot.AddTextureRecreationCallback.d3d9": ("0x00685460", "thiscall", ["ecx"], 1),
+    "Slot.AddTextureRecreationCallback.d3d9ex": ("0x00685460", "thiscall", ["ecx"], 1),
+    "Slot.RemoveTextureRecreationCallback.d3d9": ("0x00685480", "thiscall", ["ecx"], 1),
+    "Slot.RemoveTextureRecreationCallback.d3d9ex": ("0x00685480", "thiscall", ["ecx"], 1),
+    "Slot.AddStereoChangedCallback.d3d9":    ("0x00685510", "thiscall", ["ecx"], 1),
+    "Slot.AddStereoChangedCallback.d3d9ex":  ("0x00685510", "thiscall", ["ecx"], 1),
+    "Slot.RemoveStereoChangedCallback.d3d9": ("0x00685530", "thiscall", ["ecx"], 1),
+    "Slot.RemoveStereoChangedCallback.d3d9ex": ("0x00685530", "thiscall", ["ecx"], 1),
+    "Slot.CapsWindowSize.d3d9":              ("0x006A5A00", "thiscall", [], 1),
+    "Slot.CapsWindowSize.d3d9ex":            ("0x006A5A00", "thiscall", [], 1),
+    "Slot.CapsWindowSizeInScreenCoords.d3d9": ("0x006A9920", "thiscall", ["ecx"], 1),
+    "Slot.CapsWindowSizeInScreenCoords.d3d9ex": ("0x006A9920", "thiscall", ["ecx"], 1),
+    "Slot.LogCrashInfo.d3d9":                ("0x0068E570", "thiscall", ["ecx"], 2),
+    "Slot.LogCrashInfo.d3d9ex":              ("0x0068E570", "thiscall", ["ecx"], 2),
+    "Slot.ScenePresent.d3d9":                ("0x006A3450", "thiscall", ["ecx"], 0),
+    "Slot.ScenePresent.d3d9ex":              ("0x006A7610", "thiscall", ["ecx"], 0),
+    "Slot.SceneClear.d3d9":                  ("0x006A74B0", "thiscall", ["ecx"], 2),
+    "Slot.SceneClear.d3d9ex":                ("0x006A74B0", "thiscall", ["ecx"], 2),
+    "Slot.XformSetProjection.d3d9":          ("0x006A9B40", "thiscall", ["ecx"], 1),
+    "Slot.XformSetProjection.d3d9ex":        ("0x006A9B40", "thiscall", ["ecx"], 1),
+    "Slot.XformSetView.d3d9":                ("0x006A9E00", "thiscall", ["ecx"], 1),
+    "Slot.XformSetView.d3d9ex":              ("0x006A9E00", "thiscall", ["ecx"], 1),
+    "Slot.Draw.d3d9":                        ("0x006A3620", "thiscall", ["ecx"], 2),
+    "Slot.Draw.d3d9ex":                      ("0x006A77C0", "thiscall", ["ecx"], 2),
+    "Slot.PrimBegin.d3d9":                   ("0x006855C0", "thiscall", ["ecx"], 1),
+    "Slot.PrimBegin.d3d9ex":                 ("0x006855C0", "thiscall", ["ecx"], 1),
+    "Slot.PrimDrawElements.d3d9":            ("0x006845B0", "thiscall", ["ecx"], 0),
+    "Slot.PrimDrawElements.d3d9ex":          ("0x006845B0", "thiscall", ["ecx"], 0),
+    "Slot.PrimVertex.d3d9":                  ("0x00685640", "thiscall", ["ecx"], 1),
+    "Slot.PrimVertex.d3d9ex":                ("0x00685640", "thiscall", ["ecx"], 1),
+    "Slot.PrimTexCoord.d3d9":                ("0x00682FA0", "thiscall", ["ecx"], 2),
+    "Slot.PrimTexCoord.d3d9ex":              ("0x00682FA0", "thiscall", ["ecx"], 2),
+    "Slot.PrimNormal.d3d9":                  ("0x00682F70", "thiscall", ["ecx"], 1),
+    "Slot.PrimNormal.d3d9ex":                ("0x00682F70", "thiscall", ["ecx"], 1),
+    "Slot.PrimColor.d3d9":                   ("0x00684590", "thiscall", ["ecx"], 1),
+    "Slot.PrimColor.d3d9ex":                 ("0x00684590", "thiscall", ["ecx"], 1),
+    "Slot.MasterEnableSet.d3d9":             ("0x00685EB0", "thiscall", ["ecx"], 2),
+    "Slot.MasterEnableSet.d3d9ex":           ("0x00685EB0", "thiscall", ["ecx"], 2),
+    "Slot.PoolSizeSet.d3d9":                 ("0x0069FF80", "thiscall", ["ecx"], 2),
+    "Slot.PoolSizeSet.d3d9ex":               ("0x0069FF80", "thiscall", ["ecx"], 2),
+    "Slot.PoolDestroy.d3d9":                 ("0x0068E720", "thiscall", ["ecx"], 1),
+    "Slot.PoolDestroy.d3d9ex":               ("0x0068E720", "thiscall", ["ecx"], 1),
+    "Slot.BufLock.d3d9":                     ("0x0068FCE0", "thiscall", ["ecx"], 1),
+    "Slot.BufLock.d3d9ex":                   ("0x0068FCE0", "thiscall", ["ecx"], 1),
+    "Slot.BufUnlock.d3d9":                   ("0x0068FAE0", "thiscall", ["ecx"], 2),
+    "Slot.BufUnlock.d3d9ex":                 ("0x0068FAE0", "thiscall", ["ecx"], 2),
+    "Slot.BufData.d3d9":                     ("0x0068FD00", "thiscall", ["ecx"], 4),
+    "Slot.BufData.d3d9ex":                   ("0x0068FD00", "thiscall", ["ecx"], 4),
+    "Slot.TexCreate.d3d9":                   ("0x00685C60", "thiscall", ["ecx"], 11),
+    "Slot.TexCreate.d3d9ex":                 ("0x00685C60", "thiscall", ["ecx"], 11),
+    "Slot.TexDestroy.d3d9":                  ("0x006A2BB0", "thiscall", ["ecx"], 1),
+    "Slot.TexDestroy.d3d9ex":                ("0x006A6B20", "thiscall", ["ecx"], 1),
+    "Slot.TexCopy.d3d9":                     ("0x006A30D0", "thiscall", ["ecx"], 6),
+    "Slot.TexCopy.d3d9ex":                   ("0x006A7160", "thiscall", ["ecx"], 6),
+    "Slot.TexStretch.d3d9":                  ("0x006A31E0", "thiscall", ["ecx"], 5),
+    "Slot.TexStretch.d3d9ex":                ("0x006A7270", "thiscall", ["ecx"], 5),
+    "Slot.TexSetCacheSize.d3d9ex":           ("0x006A60B0", "thiscall", ["ecx"], 1),
+    "Slot.QueryCreate.d3d9":                 ("0x0068E9C0", "thiscall", ["ecx"], 2),
+    "Slot.QueryCreate.d3d9ex":               ("0x006A0140", "thiscall", ["ecx"], 2),
+    "Slot.QueryDestroy.d3d9":                ("0x006A0190", "thiscall", ["ecx"], 1),
+    "Slot.QueryDestroy.d3d9ex":              ("0x006A0190", "thiscall", ["ecx"], 1),
+    "Slot.QueryBegin.d3d9":                  ("0x0068EA10", "thiscall", ["ecx"], 1),
+    "Slot.QueryBegin.d3d9ex":                ("0x006A01C0", "thiscall", ["ecx"], 1),
+    "Slot.QueryEnd.d3d9":                    ("0x006A0240", "thiscall", ["ecx"], 1),
+    "Slot.QueryEnd.d3d9ex":                  ("0x006A0240", "thiscall", ["ecx"], 1),
+    "Slot.QueryGetParam.d3d9":               ("0x0068EA90", "thiscall", ["ecx"], 3),
+    "Slot.QueryGetParam.d3d9ex":             ("0x006A0280", "thiscall", ["ecx"], 3),
+    "Slot.QueryGetData.d3d9":                ("0x006A0310", "thiscall", ["ecx"], 2),
+    "Slot.QueryGetData.d3d9ex":              ("0x006A0310", "thiscall", ["ecx"], 2),
+    "Slot.ShaderCreate.d3d9":                ("0x006AA130", "thiscall", ["ecx"], 5),
+    "Slot.ShaderCreate.d3d9ex":              ("0x006AA130", "thiscall", ["ecx"], 5),
+    "Slot.ShaderDestroy.d3d9":               ("0x006AA190", "thiscall", ["ecx"], 1),
+    "Slot.ShaderDestroy.d3d9ex":             ("0x006AA190", "thiscall", ["ecx"], 1),
+    "Slot.ShaderConstantsSet.d3d9":          ("0x006833E0", "thiscall", [], 4),
+    "Slot.ShaderConstantsSet.d3d9ex":        ("0x006833E0", "thiscall", [], 4),
+    "Slot.IShaderReload.d3d9":               ("0x006A5D50", "thiscall", ["ecx"], 3),
+    "Slot.IShaderReload.d3d9ex":             ("0x006A5D50", "thiscall", ["ecx"], 3),
+    "Slot.IShaderCreate.d3d9":               ("0x006A5E10", "thiscall", [], 1),
+    "Slot.IShaderCreate.d3d9ex":             ("0x006A5E10", "thiscall", [], 1),
+    "Slot.CursorSetVisible.d3d9":            ("0x0068E750", "thiscall", ["ecx"], 1),
+    "Slot.CursorSetVisible.d3d9ex":          ("0x0068E750", "thiscall", ["ecx"], 1),
+    "Slot.CursorLock.d3d9":                  ("0x00683650", "thiscall", ["ecx"], 0),
+    "Slot.CursorLock.d3d9ex":                ("0x00683650", "thiscall", ["ecx"], 0),
+    "Slot.CursorUnlock.d3d9":                ("0x0068E7E0", "thiscall", ["ecx"], 2),
+    "Slot.CursorUnlock.d3d9ex":              ("0x0068E7E0", "thiscall", ["ecx"], 2),
+    "Slot.StereoSetConvergence.d3d9":        ("0x0068E980", "thiscall", ["ecx"], 1),
+    "Slot.StereoSetConvergence.d3d9ex":      ("0x0068E980", "thiscall", ["ecx"], 1),
+    "Slot.StereoGetConvergence.d3d9":        ("0x006A0110", "thiscall", ["ecx"], 0),
+    "Slot.StereoGetConvergence.d3d9ex":      ("0x006A0110", "thiscall", ["ecx"], 0),
+    "Slot.StereoSetSeparation.d3d9":         ("0x0068E9A0", "thiscall", ["ecx"], 1),
+    "Slot.StereoSetSeparation.d3d9ex":       ("0x0068E9A0", "thiscall", ["ecx"], 1),
+    "Slot.StereoGetSeparation.d3d9":         ("0x006A0120", "thiscall", ["ecx"], 0),
+    "Slot.StereoGetSeparation.d3d9ex":       ("0x006A0120", "thiscall", ["ecx"], 0),
+    "Slot.StereoEnabled.d3d9":               ("0x006A0130", "thiscall", ["ecx"], 0),
+    "Slot.StereoEnabled.d3d9ex":             ("0x006A0130", "thiscall", ["ecx"], 0),
+
 }
 
 
@@ -945,6 +1475,17 @@ def main():
             ok = result.returncode == want_code and (not want_text or want_text in output)
             report(label, ok, "exit %d%s" % (want_code, ", with %r" % want_text
                                              if want_text else ""), output)
+
+        for index, (label, text, want_code, want_text) in enumerate(BODY_CASES):
+            case = Path(temp) / ("body%02d" % index)
+            build(case)
+            (case / "deinlined").mkdir()
+            (case / "x86.def").write_text(PARENT_X86_DEF, encoding="utf-8")
+            (case / "deinlined" / "Thing_CallsCleanly.gen.cpp").write_text(text, encoding="utf-8")
+            result = run(case, stub + ("--points", str(case / "x86.def"), "--deinlined", str(case / "deinlined")))
+            output = result.stdout + result.stderr
+            report(label, result.returncode == want_code and want_text in output,
+                   "exit %d, with %r" % (want_code, want_text), output)
 
         # The tool must say so and leave, not crash, when the MCP is not there.
         case = Path(temp) / "unreachable"
@@ -989,6 +1530,42 @@ def main():
     for point in sorted(set(rows) - set(GROUND_TRUTH)):
         report("%s is a row the ground truth does not cover" % point, False,
                "a line for it in GROUND_TRUTH", "")
+
+    # The slot table refuses a kept slot whose D3D9 function reaches past CGxDevice's members, and a
+    # row whose pops are not what the vtable's function pops.
+    slots = HERE.parent.parent / "include" / "wxl" / "gx" / "slots.def"
+    with tempfile.TemporaryDirectory() as temp:
+        text = slots.read_text(encoding="utf-8")
+        text = text.replace("WXL_GX_SLOT(17, DeviceWindow, void*, (void* self), 0, front",
+                            "WXL_GX_SLOT(17, DeviceWindow, void*, (void* self), 0, keep")
+        text = text.replace("WXL_GX_SLOT(39, SceneClear, void, (void* self, uint32_t a0, uint32_t a1), 8,",
+                            "WXL_GX_SLOT(39, SceneClear, void, (void* self, uint32_t a0), 4,")
+        bad = Path(temp) / "slots.def"
+        bad.write_text(text, encoding="utf-8")
+        result = subprocess.run([sys.executable, "-I", str(CHECKER), "--binary", args.binary, "--slots", str(bad),
+                                 "--point", "Slot.DeviceWindow", "--point", "Slot.SceneClear"],
+                                capture_output=True, text=True)
+        output = result.stdout + result.stderr
+        report("a kept slot whose D3D9 function reads a D3D9 member is refused",
+               result.returncode == 1 and "DeviceWindow reaches past CGxDevice's members at 0x0069FED0" in output,
+               "exit 1 naming 0x0069FED0", output[:600])
+        report("a slot row popping less than the vtable's function is refused",
+               "0x006A74B0 pops 8 byte(s), the row 4" in output, "the pops named", output[:600])
+
+    # The dropped calls: SMemReAlloc keeps _msize's answer (`mov [ebp+8], eax` at 0x0076E62A),
+    # so a row taking that call out is refused; so is a row at an address that is not the call.
+    with tempfile.TemporaryDirectory() as temp:
+        bad = Path(temp) / "drops_x86.def"
+        bad.write_text('WXL_DROP_CALL_X86(trim_alloc, "SMemReAlloc", 0x0076E61F, 0x004112F8, "_msize")\n'
+                       'WXL_DROP_CALL_X86(trim_alloc, "SMemAlloc", 0x0076E589, 0x004112F8, "_msize")\n', encoding="utf-8")
+        result = subprocess.run([sys.executable, "-I", str(CHECKER), "--binary", args.binary, "--drops", str(bad)],
+                                capture_output=True, text=True)
+        output = result.stdout + result.stderr
+        report("a dropped call whose answer the caller reads is refused",
+               result.returncode == 1 and "at 0x0076E61F: the code after the call reads EAX" in output,
+               "exit 1 naming 0x0076E61F", output[:600])
+        report("a dropped call at an address that is not that call is refused",
+               "at 0x0076E589: not a five-byte call to 0x004112F8" in output, "0x0076E589 named", output[:600])
 
     print("\n%d case(s), %d failure(s); the %d real rows in %.1fs (%.1fs with the start)"
           % (report.total, report.failures, len(rows), answer["seconds"], wall))

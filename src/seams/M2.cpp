@@ -8,7 +8,10 @@
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
+#include "services/HighlightService.hpp"
 #include "services/M2Service.hpp"
+#include "services/RenderService.hpp"
+#include "tuning/Animate.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -17,14 +20,20 @@ namespace wxl::seam::M2::DrawBatch
 {
     void WXL_CALL After(void* self)
     {
-        // Thousands of batches a frame: one flag is read while no mod listens.
-        if (!wxl::seam::Listening(WXL_EV_ModelBatchDrawn)) return;
-        wxl::host::ModHost* host = wxl::core::Host();
-        if (!self || !host || !host->Listening(WXL_EV_ModelBatchDrawn)) return;
+        // Thousands of batches a frame: two flags are read while nothing is highlighted and no mod
+        // listens. A batch of a highlighted object is kept for wxl.highlight, which draws it again
+        // after the world.
+        const bool          highlight = wxl::core::services::highlight::WantsBatch();
+        wxl::host::ModHost* host      = wxl::seam::Listening(WXL_EV_ModelBatchDrawn) ? wxl::core::Host() : nullptr;
+        const bool          listened  = host && host->Listening(WXL_EV_ModelBatchDrawn);
+        if (!self || (!highlight && !listened)) return;
 
         wxl_model_batch_args args{};
         if (!wxl::core::binding::gx_model_draw(self, &args)) return;
-        host->Raise(WXL_EV_ModelBatchDrawn, &args);
+        // On the Vulkan renderer, the draw itself for wxl.render, and where it was drawn.
+        wxl::core::services::render::FillBatch(args);
+        if (highlight) wxl::core::services::highlight::Batch(self, args);
+        if (listened) host->Raise(WXL_EV_ModelBatchDrawn, &args);
     }
 }
 
@@ -45,4 +54,18 @@ namespace wxl::seam::M2::AnimateMTSimple
     {
         wxl::core::services::m2::PoseAttached(self);
     }
+}
+
+namespace wxl::seam::M2::BeginThread
+{
+    bool WXL_CALL Gate(void** self, void** func, void** param)
+    {
+        // Once a frame: the setting read, and nothing more, while it is 0.
+        return wxl::core::tuning::animate::Begin(*self, *func, *param);
+    }
+}
+
+namespace wxl::seam::M2::WaitThread
+{
+    bool WXL_CALL Gate(void** self) { return wxl::core::tuning::animate::Wait(*self); }
 }

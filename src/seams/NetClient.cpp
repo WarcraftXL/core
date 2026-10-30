@@ -7,6 +7,7 @@
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
+#include "services/NetService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -70,7 +71,12 @@ namespace wxl::seam::NetClient::ProcessMessage
         if (!host || !ReadMessage(message, kIncomingOpcode, received)) return false;
 
         host->Raise(WXL_EV_MessageReceived, &received.args);
-        if (!received.suppressed) return false;
+        // A number a mod claimed goes to that mod and no further, before the client's own
+        // dispatch -- which drops every number from 0x51F on, and would hand a claimed number
+        // of its own to its handler.
+        if (!received.suppressed &&
+            !wxl::core::services::net::Receive(received.args.opcode, received.args.data, received.args.size))
+            return false;
 
         // What the client answers for an opcode no handler claimed, and the only caller
         // discards it. Leaving the store where it is costs nothing: it dies with the call.
@@ -104,6 +110,7 @@ namespace wxl::seam::NetClient::HandleConnect
         // Raised after, so that a handler asking the client about itself is told it is
         // connected. The address is not carried: nothing the client hands this function knows
         // it, and the contract says an empty address means the runtime does not expose one.
+        wxl::core::services::net::OnConnected();
         if (wxl::host::ModHost* host = wxl::core::Host())
         {
             wxl_connection_args args{};
@@ -121,5 +128,7 @@ namespace wxl::seam::NetClient::HandleDisconnect
             wxl_connection_args args{};
             host->Raise(WXL_EV_Disconnected, &args);
         }
+        // Every send gate closes with the connection.
+        wxl::core::services::net::OnDisconnected();
     }
 }

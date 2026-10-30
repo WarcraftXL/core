@@ -604,10 +604,10 @@ class Image:
 
 
 def find_image(explicit):
-    """The image path: --image, then $DAWNLIGHT_ROOT, then the ancestors of this script."""
+    """The image path: --image, then $WXL_CLIENT_ROOT, then the ancestors of this script."""
     if explicit:
         return explicit if os.path.isfile(explicit) else None
-    root = os.environ.get('DAWNLIGHT_ROOT')
+    root = os.environ.get('WXL_CLIENT_ROOT')
     if root and os.path.isfile(os.path.join(root, IMAGE_RELATIVE)):
         return os.path.join(root, IMAGE_RELATIVE)
     here = os.path.dirname(os.path.abspath(__file__))
@@ -1026,7 +1026,7 @@ def write_extent_summary(w, image, extents, fn_rows, st_rows):
     w('Image and sections (what the function extents are measured against)')
     w('--------------------------------------------------------------------')
     if image is None:
-        w('  IMAGE NOT FOUND: %s was not located (--image, $DAWNLIGHT_ROOT, or an ancestor of the tool).' % IMAGE_RELATIVE)
+        w('  IMAGE NOT FOUND: %s was not located (--image, $WXL_CLIENT_ROOT, or an ancestor of the tool).' % IMAGE_RELATIVE)
         w('  FALLBACK HEURISTIC IN EFFECT: every function address is treated as one code section, the')
         w('  bound is the distance to the next tagged function address whatever its section, and no')
         w('  length is decoded (every length column is 0). Re-run with the image to get real extents.')
@@ -1270,7 +1270,7 @@ def main():
                     help='where to write summary.txt and unparsed.txt (default: core/reports)')
     ap.add_argument('--image', default=None,
                     help='the original Wow.exe, for sections and function extents (default: '
-                         '$DAWNLIGHT_ROOT/%s, else the first ancestor of this tool that has it)' % IMAGE_RELATIVE.replace('\\', '/'))
+                         '$WXL_CLIENT_ROOT/%s, else the first ancestor of this tool that has it)' % IMAGE_RELATIVE.replace('\\', '/'))
     ap.add_argument('--quiet', action='store_true', help='do not print the summary')
     args = ap.parse_args()
 

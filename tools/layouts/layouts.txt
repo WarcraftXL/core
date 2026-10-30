@@ -173,7 +173,10 @@ type CGxDeviceD3d Engine/Source/Gx/CGxDeviceD3d/CGxDeviceD3d.h CGxDeviceD3d
   m_hwCursorDirty                         engine/GxDevice:kD3dCursorDirty
   m_texture3B58                           engine/GxDevice:kD3dPlaceholderTex
   m_d3dCurrentVertexDecl                  -                                            # wxl.gx invalidate_state
+  m_d3dCurrentIndexBuf                    -                                            # wxl.highlight: a batch's draw
   m_d3dVertexStreamBuf                    -
+  m_d3dVertexStreamOfs                    -
+  m_d3dVertexStreamStride                 -
   sizeof(m_d3dVertexStreamBuf)            -
   m_deviceStates                          -
   sizeof(m_deviceStates)                  -
@@ -182,7 +185,10 @@ type CGxDeviceD3d9Ex Engine/Source/Gx/CGxDeviceD3d9Ex/CGxDeviceD3d9Ex.h CGxDevic
   sizeof                                  engine/GxDevice:kD3d9ExObjectSize            # CGxDevice::NewD3d9Ex allocation
   m_d3dDevice                             -                                            # wxl.gx: the D3D9Ex device
   m_d3dCurrentVertexDecl                  -
+  m_d3dCurrentIndexBuf                    -
   m_d3dVertexStreamBuf                    -
+  m_d3dVertexStreamOfs                    -
+  m_d3dVertexStreamStride                 -
   sizeof(m_d3dVertexStreamBuf)            -
   m_deviceStates                          -
   sizeof(m_deviceStates)                  -
@@ -252,6 +258,12 @@ type CGxVertexAttrib Engine/Source/Gx/CGxDevice/Types.h CGxVertexAttrib
 
 type EmergencyMem Engine/Source/Gx/CGxDevice/EmergencyMem.h EmergencyMem
   sizeof                                  engine/GxDevice:kEmergencyLockStride
+  m_lock                                  -                                            # the x86 Vulkan adapter: memory handed out in the pool's place
+
+type CGxQuery Engine/Source/Gx/Types.h CGxQuery
+  sizeof                                  -
+  m_apiSpecific                           -                                            # the x86 Vulkan adapter: the renderer's query handle
+  m_type                                  -
 
 type CGxAppRenderState Engine/Source/Gx/CGxDevice/CGxDevice.h CGxAppRenderState
   sizeof                                  engine/GxDevice:kRsStride
@@ -444,6 +456,7 @@ type CM2Scene Engine/Source/Model2/M2Scene.h CM2Scene
   m_frameStamp                            game/M2:kOffSceneFrame
   m_animateList                           game/M2:kOffSceneAnimateHead
   m_view                                  game/M2:kOffSceneAnimateCtx
+  m_viewInv                               -
 
 type M2Element Engine/Source/Model2/M2Scene.h M2Element
   sizeof                                  -
@@ -547,6 +560,10 @@ type M2Data Engine/Source/Model2/M2Data.h M2Data
   m_attachments.m_offset                  game/M2:kOffHdrAttachPtr
   m_attachmentIndicesById.m_count         game/M2:kOffHdrBoneIdxLutCount              # hand: bone-index-by-id LUT; fork: attachment indices by id
   m_attachmentIndicesById.m_offset        game/M2:kOffHdrBoneIdxLutPtr
+
+type M2SequenceInfo Engine/Source/Model2/M2Model.h M2SequenceInfo
+  sizeof                                  -
+  m_duration                              -
 
 type M2Sequence Engine/Source/Model2/M2Data.h M2Sequence
   sizeof                                  game/M2:kSeqStride
@@ -775,6 +792,7 @@ type CGUnit_C WoW/Source/Object/ObjectClient/Unit_C.h CGUnit_C
   m_channelEndTime                        -                                            # binding unit_channel_end
   m_mountDisplayId                        -                                            # binding unit_mount_model: what IsMounted reads
   m_clientFlags                           -                                            # binding unit_client_flags
+  m_torsoKeyBone                          -                                            # binding unit_animation_speed: the bone the upper body plays on
 
 # The unit descriptor block follows the 0x18-byte object block: hand value = 0x18 + field.
 type CGUnitData WoW/Source/Object/Unit.h CGUnitData
@@ -927,8 +945,29 @@ type CMapArea WoW/Source/WorldClient/MapArea.h CMapArea
   m_asyncObject                           game/ADT:kOffTileAsyncRead,game/World:kOffTileAsyncRead
   m_fileBuffer                            game/ADT:kOffTileFileBuffer,game/World:kOffTileFileBuffer
   m_fileSize                              game/ADT:kOffTileFileSize,game/World:kOffTileFileId   # World.hpp calls it "file id"
+  m_header                                -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_chunkInfo                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_doodadDef                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_mapObjDef                             -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_doodadDefCount                        -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_mapObjDefCount                        -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_m2FileNames                           -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_wmoFileNames                          -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_modelFilenamesOffsets                 -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_wmoFilenamesOffsets                   -                                            # binding map_area_split_set: a split tile pointed into its files
+  m_textureFlags                          -                                            # binding map_area_split_set: a split tile pointed into its files
   m_mapChunks                             game/ADT:kOffTileChunkSlots
   sizeof(m_mapChunks[0])                  game/ADT:kTileSlotStride
+
+type CMapLowDetail WoW/Source/WorldClient/MapLowDetail.h CMapLowDetail
+  sizeof                                  -
+  m_data                                  -                                            # binding map_low_detail_set: a WDL of later clients read natively
+  m_mapObjNames                           -                                            # binding map_low_detail_set
+  m_mapObjNameOffsets                     -                                            # binding map_low_detail_set
+  m_mapObjDefs                            -                                            # binding map_low_detail_set
+  m_mapObjDefCount                        -                                            # binding map_low_detail_set
+  m_areaOffsets                           -                                            # binding map_low_detail_set
+  m_areas                                 -                                            # binding map_area_low_add
 
 type CMapAreaTexture WoW/Source/WorldClient/Types.h CMapAreaTexture
   sizeof                                  game/ADT:kTexOwnerHandleStride
@@ -977,10 +1016,14 @@ type CMapChunk WoW/Source/WorldClient/MapChunk.h CMapChunk
   m_mcrfPtr                               game/ADT:kOffChunkMcrf
   m_liquid                                game/ADT:kOffChunkMclq
   m_soundEmitters                         game/ADT:kOffChunkMcse
+  m_topLeftCoords.z                       -                                            # binding terrain_chunk_view: what the heights are relative to
+  m_detailDoodadInst                      -                                            # binding terrain_chunk_rebuild: the ground clutter
+  m_renderChunk                           -                                            # binding terrain_chunk_rebuild
 
 type SMChunk WoW/Source/WorldClient/MapChunk.h SMChunk
   sizeof                                  -
   m_nLayers                               game/ADT:kOffMcnkNLayers
+  m_holes                                 -                                            # binding terrain_chunk_view: the hole mask
 
 type CMapRenderChunk WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunk
   sizeof                                  -
@@ -990,6 +1033,14 @@ type CMapRenderChunk WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunk
   m_layers                                game/ADT:kOffChunkLayerRecords
   m_terrainBlendTexture                   game/ADT:kOffChunkNodeAlphaRT
   m_batch                                 game/ADT:kOffChunkDrawBatch
+  m_unkFlags                              -                                            # binding terrain_chunk_rebuild: AddBatch's flags
+  m_mapChunks[1]                          -                                            # binding terrain_chunk_rebuild
+  m_vec1                                  -                                            # binding terrain_chunk_rebuild: AddBatch's position
+  m_chunkBuf                              -                                            # binding terrain_chunk_rebuild: the pooled buffers
+
+type CMapChunkBuf WoW/Source/WorldClient/MapRenderChunk.h CMapChunkBuf
+  sizeof                                  -
+  m_vertexBuf                             -                                            # binding terrain_chunk_rebuild: the vertex buffer refilled
 
 type CMapRenderChunkLayer WoW/Source/WorldClient/MapRenderChunk.h CMapRenderChunkLayer
   sizeof                                  game/ADT:kChunkLayerRecordStride
@@ -1227,12 +1278,20 @@ type CGWorldFrame WoW/Source/Ui/WorldFrame.h CGWorldFrame
   m_defaultActionPointDDC.x               game/World:kWorldFrameCursorDdcX
   m_defaultActionPointDDC.y               game/World:kWorldFrameCursorDdcY
   m_camera                                game/World:kWorldFrameCamera
+  m_defaultActionHitKind                  -                                            # binding input_click_hit: the hit the default action acts on
+  m_defaultActionHit.m_guid               -                                            # binding input_click_hit
+  m_defaultActionHit.m_point              -                                            # binding input_click_hit
+
+type CGNamePlateFrame WoW/Source/Ui/NamePlateFrame.h CGNamePlateFrame
+  sizeof                                  -
+  m_guid                                  -                                            # binding input_click_hit: the name plate's unit
 
 type CSimpleTop Engine/Source/Frame/CSimpleTop.h CSimpleTop
   sizeof                                  -
   m_mousePosition.m_x                     game/World:kInputCursorNdcX
   m_mousePosition.m_y                     game/World:kInputCursorNdcY
   m_allowProtectedActions                 engine/Ui:kUiEnabledFlag                    # hand: "1 = UI shown"; fork: allowProtectedActions
+  m_mouseFocus                            -
 
 type CSimpleCamera WoW/Source/UIUtil/CSimpleCamera.h CSimpleCamera
   sizeof                                  -
@@ -1241,6 +1300,22 @@ type CSimpleCamera WoW/Source/UIUtil/CSimpleCamera.h CSimpleCamera
   m_facing.b0                             engine/Camera:kCameraRight
   m_facing.c0                             engine/Camera:kCameraUp
   m_fov                                   engine/Camera:kCameraFov
+  m_nearZ                                 -
+  m_farZ                                  -
+  m_aspect                                -
+
+type CGCamera WoW/Source/UIUtil/Camera.h CGCamera
+  m_model                                 -
+  m_targetGUID                            -
+  m_relativeTo                            -
+  m_height                                -
+  m_targetFov                             -
+  m_targetPosition                        -
+
+type CGInputControl WoW/Source/UIUtil/InputControl.h CGInputControl
+  m_flags                                 -
+  m_mouseModeFlags                        -
+  m_pendingDefaultAction                  -
 
 skip game/World:kWorldFrameStandInBytes :: the byte size reserved for a stand-in frame (an allocation choice, not a layout)
 
@@ -1286,6 +1361,8 @@ type CVar Engine/Source/ConsoleBase/ConsoleVar.h CVar
   m_key.m_str                             -                                            # binding cvar_name: the hash key of the variable
   m_stringValue.m_str                     -                                            # binding cvar_value
   m_flags                                 -                                            # binding cvar_flags
+  m_defaultValue.m_str                    -                                            # binding cvar_default: the coded default
+  m_latchedValue.m_str                    -                                            # binding cvar_latched: a set waiting for the next launch
 
 type CTerrainClickEvent WoW/Source/Ui/GameUI.h CTerrainClickEvent
   sizeof                                  -
@@ -1360,3 +1437,42 @@ type FactionStanding WoW/Source/Ui/ReputationInfo.h FactionStanding
   m_factionId                             -                                            # binding faction_standing
   m_base                                  -                                            # binding faction_standing
   m_standing                              -                                            # binding faction_standing
+
+# =============================================================================================
+# The client's Lua state, as wxl.script puts it back after a fault inside a chunk (binding/script.def)
+# =============================================================================================
+
+type lua_State Engine/Source/lua-5.1/src/lstate.h lua_State
+  top                                     -                                            # binding script_unwind
+  base                                    -                                            # binding script_unwind
+  l_G                                     -                                            # binding script_unwind
+  ci                                      -                                            # binding script_unwind
+  savedpc                                 -                                            # binding script_unwind
+  stack                                   -                                            # binding script_unwind
+  base_ci                                 -                                            # binding script_unwind
+  size_ci                                 -                                            # binding script_unwind
+  nCcalls                                 -                                            # binding script_unwind
+  allowhook                               -                                            # binding script_unwind
+  errorJmp                                -                                            # binding script_unwind
+  errfunc                                 -                                            # binding script_unwind
+
+type CallInfo Engine/Source/lua-5.1/src/lstate.h CallInfo
+  sizeof                                  -                                            # binding script_unwind
+  base                                    -                                            # binding script_unwind
+  func                                    -                                            # binding script_unwind
+  savedpc                                 -                                            # binding script_unwind
+
+type global_State Engine/Source/lua-5.1/src/lstate.h global_State
+  profile                                 -                                            # binding script_unwind
+
+type TValue Engine/Source/lua-5.1/src/lobject.h TValue
+  sizeof                                  -                                            # binding script_unwind
+  value                                   -                                            # binding script_unwind
+  tt                                      -                                            # binding script_unwind
+
+type LClosure Engine/Source/lua-5.1/src/lobject.h LClosure
+  isC                                     -                                            # binding script_unwind
+  profile                                 -                                            # binding script_unwind
+
+type Profile Engine/Source/lua-5.1/src/lobject.h Profile
+  depth                                   -                                            # binding script_unwind

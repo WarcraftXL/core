@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The InputControl domain: gates on the control bits of the game's input, where its mouse look
+// starts and ends, for wxl.input's block of it.
+
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including inputcontrol.def"
+#endif
+
+// Sets one of the game's control bits: a movement key, a turn key, or a mouse button's look
+// (INPUT_TURN_PLAYER 0x1 for the right button, INPUT_TURN_CAMERA 0x2 for the left). Setting a
+// look bit hides the pointer, centres it and starts the free look. Every Lua action of a key or
+// a button calls it (TurnOrActionStart, CameraOrSelectOrMoveStart, MouselookStart, ...). A
+// member: thiscall (bit, time), `ret 8`; answers whether the bit was not set before.
+//
+// Gated while a mod blocks the mouse look: the look bits are kept from the call (the rest of
+// the bits go on), and the press is noted with its time.
+WXL_SEAM_GATE(InputControl, SetControlBit, "CGInputControl::SetControlBit", int32_t, thiscall, (void* self, uint32_t bit, uint32_t time))
+
+// Clears a control bit. Clearing the last look bit shows the pointer again and, for a release
+// within the click time, does the default action the press noted (PerformDefaultAction). A
+// member: thiscall (bit, time, keep_smoothing), `ret 0xC`.
+//
+// Gated while a mod blocks the mouse look: a look bit the gate kept from the game is released
+// here instead, with the click's default action when it was short enough.
+WXL_SEAM_GATE(InputControl, UnsetControlBit, "CGInputControl::UnsetControlBit", int32_t, thiscall, (void* self, uint32_t bit, uint32_t time, int32_t keep_smoothing))
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

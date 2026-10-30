@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The FrameXML domain: a seam on the client's check of an interface's signature.
+
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including framexml.def"
+#endif
+
+// Judges the signature of an interface: reads <toc>.sig (276 bytes: an MD5 digest, then an RSA
+// signature over it and the .sig's upper-cased name), verifies it with `modulus`, hashes the .toc
+// with every file it lists and `extra` into `digest` (CalculateSignatureMD5) and compares. It
+// answers 0 for no .sig, 1 for a .sig of the wrong size or one the key does not verify (with
+// `digest` left unwritten), 2 for files that differ from the signed digest, 3 for signed. Called by
+// CGlueMgr::Resume for GlueXML.toc (anything but 3 leaves the login screens empty), by
+// CGGameUI::Initialize for FrameXML.toc with Bindings.xml (anything but 3 closes the client,
+// ClientPostClose(10)), and by SetAddOnInfoRequest for each add-on's .toc with its Bindings.xml
+// (2 refuses the add-on as corrupt, 3 makes it secure); each caller then hashes what it loads and
+// holds it to `digest`. A free function: [ebp+8] to [ebp+0x14] read, a bare `ret`, the callers
+// clean: cdecl.
+//
+// Gated, while a mod listens to InterfaceSignature: Gate has the client judge the file (the
+// function called again through the binding, which the gate lets through), raises the event with
+// the verdict, and answers it. A file a handler accepted answers 3; its `digest` is first
+// computed as the client computes it, where the verdict had left it unwritten.
+WXL_SEAM_GATE(FrameXML, CheckSignature, "FrameXML_CheckSignature", int32_t, cdecl,
+              (const char* toc, const char* extra, const uint8_t* modulus, uint8_t* digest))
+WXL_SEAM_RAISES(FrameXML, CheckSignature, InterfaceSignature)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

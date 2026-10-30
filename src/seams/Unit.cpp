@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 WarcraftXL
 //
-// The Unit seams: what the runtime does at a unit's death and aura changes, on both builds.
+// The Unit seams: what the runtime does at a unit's death and aura changes, and around the circles
+// drawn under it, on both builds.
 
 #include "wxl/seams/seams.h"
+
+#include "services/AnimationService.hpp"
+#include "services/PoseService.hpp"
+#include "services/TerrainService.hpp"
+#include "services/SelectionCircleService.hpp"
 
 #include "binding/Binding.hpp"
 #include "common/Log.hpp"
@@ -16,6 +22,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -158,4 +166,59 @@ namespace wxl::seam::Unit::MountDisplayIDUpdateHandler
         args.unit_guid = guid;
         host->Raise(WXL_EV_UnitMountChanged, &args);
     }
+}
+
+namespace wxl::seam::Unit::PreAnimate
+{
+    void WXL_CALL After(void* self, void*)
+    {
+        // The game has set its own twist on the unit's head bone; a mod's turn goes over it.
+        wxl::core::services::pose::PreAnimate(self);
+
+        // The mods' animations on units are followed, and the active player lifted onto ground
+        // raised under them.
+        const bool animating = wxl::core::services::animation::Busy();
+        const bool lifting   = wxl::core::services::terrain::Lifting();
+        if (!animating && !lifting) return;
+        const bool active = self && self == wxl::core::binding::local_player_object();
+        if (lifting && active) wxl::core::services::terrain::Lift(self);
+        if (!animating) return;
+        wxl::core::services::animation::PreAnimate(self, active);
+        static std::vector<wxl_unit_animation_args> ended;
+        wxl::core::services::animation::TakeEnded(ended);
+        if (ended.empty()) return;
+        wxl::host::ModHost* host = wxl::core::Host();
+        if (!host) return;
+        const std::vector<wxl_unit_animation_args> raised = std::move(ended);
+        ended.clear();
+        for (const wxl_unit_animation_args& args : raised) host->Raise(WXL_EV_UnitAnimationEnded, &args);
+    }
+}
+
+namespace wxl::seam::Unit::RenderTargetSelection
+{
+    // The target's circle (wxl.selectioncircle), for a unit of a reaction.
+    void WXL_CALL Before(const void* self) { wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_TARGET, self, true); }
+    void WXL_CALL After(const void*) { wxl::core::services::selectioncircle::End(); }
+}
+
+namespace wxl::seam::Unit::RenderPetTargetSelection
+{
+    // The ring closing on the pet's new target.
+    void WXL_CALL Before(const void* self)
+    {
+        wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_PET_TARGET, self, true);
+    }
+    void WXL_CALL After(const void*) { wxl::core::services::selectioncircle::End(); }
+}
+
+namespace wxl::seam::Unit::RenderAutoTrackCursor
+{
+    // The move marker, drawn by the active mover: under no unit, so of no reaction. Every unit
+    // passes here as it is drawn; only the mover projects anything.
+    void WXL_CALL Before(void* self)
+    {
+        wxl::core::services::selectioncircle::Begin(WXL_SELECTIONCIRCLE_MOVE_MARKER, self, false);
+    }
+    void WXL_CALL After(void*) { wxl::core::services::selectioncircle::End(); }
 }

@@ -6,6 +6,9 @@
 #ifndef WXL_SEAM
 #error "define WXL_SEAM(domain, name, symbol, ret, conv, params) before including worldframe.def"
 #endif
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including worldframe.def"
+#endif
 
 // The world pass. CGWorldFrame::OnFrameRender queues it as a callback in the interface's batches,
 // so it runs while the interface draws, when the batches reach the world frame -- at the bottom,
@@ -13,12 +16,27 @@
 // the world and the text floating in it, and puts the two matrices back. Not reached at all where
 // there is no world: on the login and character screens.
 //
-// Before raises WorldRenderBegin; After raises WorldRenderEnd, the post-process slot, with the
-// world drawn and the interface over it not. A class static queued through its address, so it
+// Before raises WorldRenderBegin; After draws wxl.highlight's highlights, raises RenderPoint with
+// WXL_RENDER_POINT_AFTER_WORLD, then WorldRenderEnd, the post-process slot, with the world drawn
+// and the interface over it not. A class static queued through its address, so it
 // keeps the convention it is declared with: one argument, the world frame, on the stack.
 WXL_SEAM(WorldFrame, RenderWorld, "CGWorldFrame::RenderWorld", void, cdecl, (void* param))
 WXL_SEAM_RAISES(WorldFrame, RenderWorld, WorldRenderBegin)
 WXL_SEAM_RAISES(WorldFrame, RenderWorld, WorldRenderEnd)
+WXL_SEAM_RAISES(WorldFrame, RenderWorld, RenderPoint)
+
+// What a click in the world does: called at the release of a short click (CGInputControl::
+// UnsetControlBit, and wxl.input's gate when it keeps the mouse look out) with the button, it
+// acts on the hit SetupDefaultAction noted at the press (m_defaultActionHitKind,
+// m_defaultActionHit): a name plate's unit first, then a model (HandleSpriteClick: select,
+// talk, loot, use), the ground or a map object (HandleTerrainClick: click-to-move, a spell's
+// place), or nothing (HandleWorldClick); with no active player, or one charmed, nothing. A
+// member: thiscall (button), `ret 4`, no answer.
+//
+// Gated: raises WorldClickRequest with what the click met; a handler that refuses it keeps the
+// game from acting on it.
+WXL_SEAM_GATE(WorldFrame, PerformDefaultAction, "CGWorldFrame::PerformDefaultAction", void, thiscall, (void* self, uint32_t button))
+WXL_SEAM_RAISES(WorldFrame, PerformDefaultAction, WorldClickRequest)
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

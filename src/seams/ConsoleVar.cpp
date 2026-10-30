@@ -7,6 +7,7 @@
 
 #include "binding/Binding.hpp"
 #include "runtime/Core.hpp"
+#include "services/CVarService.hpp"
 
 #include "wxl/events.h"
 #include "wxl/host/mod_host.hpp"
@@ -57,5 +58,35 @@ namespace wxl::seam::ConsoleVar::InternalSet
         args.previous = Str(current);
         args.value    = Str(value);
         host->Raise(WXL_EV_CVarChanged, &args);
+    }
+}
+
+namespace wxl::seam::ConsoleVar::Initialize
+{
+    void WXL_CALL Before(const char*)
+    {
+        // The registrations made before the file is read are made now, so its lines set them.
+        wxl::core::services::cvar::ConfigReading();
+    }
+
+    void WXL_CALL After(const char*)
+    {
+        wxl::core::services::cvar::ConfigRead();
+    }
+}
+
+namespace wxl::seam::ConsoleVar::DeleteCharacterCVars
+{
+    void WXL_CALL After()
+    {
+        wxl::core::services::cvar::CategoryDeleted(0x20);
+    }
+}
+
+namespace wxl::seam::ConsoleVar::DeleteAccountCVars
+{
+    void WXL_CALL After()
+    {
+        wxl::core::services::cvar::CategoryDeleted(0x10);
     }
 }

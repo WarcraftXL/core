@@ -46,9 +46,10 @@ namespace
     constexpr uint32_t kSourceLocation  = 0x20;
     constexpr uint32_t kDestLocation    = 0x40;
 
-    bool ReadPoint(MessageReader& in, wxl_vec3& out)
+    /// A point of the target block: the transport it is measured on (0 for the world), then
+    /// the point, an offset on that transport when there is one.
+    bool ReadPoint(MessageReader& in, uint64_t& transport, wxl_vec3& out)
     {
-        uint64_t transport = 0;
         return in.PackedGuid(transport) && in.F32(out.x) && in.F32(out.y) && in.F32(out.z);
     }
 
@@ -63,12 +64,12 @@ namespace
         if ((args.target_flags & kItemTargetFlags) && !in.PackedGuid(item)) return true;
         if (args.target_flags & kSourceLocation)
         {
-            if (!ReadPoint(in, args.source)) return true;
+            if (!ReadPoint(in, args.source_transport, args.source)) return true;
             args.has_source = WXL_TRUE;
         }
         if (args.target_flags & kDestLocation)
         {
-            if (!ReadPoint(in, args.dest)) return true;
+            if (!ReadPoint(in, args.dest_transport, args.dest)) return true;
             args.has_dest = WXL_TRUE;
         }
         return true;

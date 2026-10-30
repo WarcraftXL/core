@@ -35,6 +35,10 @@ namespace wxl::core::services
         /// Whether any mod holds a model it made: the RemoveVisuals seam's whole cost when none.
         bool HasModels();
 
+        /// Takes every model mods placed out of the world, as the client takes its own spell
+        /// effects out before it destroys the map: the player leaves the world.
+        void LeaveWorld();
+
         /// The model this service made that `model` is, or is an interface copy of; null for none.
         void* SourceOf(void* model);
 

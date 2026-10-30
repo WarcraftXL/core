@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 WarcraftXL
+//
+// The WorldScene domain: the passes of the world renderer, between which mods draw (RenderPoint).
+
+#ifndef WXL_SEAM_AFTER
+#error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including worldscene.def"
+#endif
+
+// Draws the ground clutter of the chunks in view (grass, small stones), then the occluders' and
+// the frustum's debug shapes. CGWorldFrame::OnWorldRender calls it once a frame, right after the
+// opaque models (the M2 scene's first pass) and the opaque draw list, before the liquids and
+// everything blended: After raises RenderPoint with WXL_RENDER_POINT_AFTER_OPAQUE_WORLD. A class
+// static, no argument, reached through a thunk at 0x0077F010 that jumps to it.
+WXL_SEAM_AFTER(WorldScene, RenderDetailDoodads, "CWorldScene::RenderDetailDoodads", void, cdecl, ())
+WXL_SEAM_RAISES(WorldScene, RenderDetailDoodads, RenderPoint)
+
+// Draws the liquids in view (CWorldScene::s_liquidRenderer, after the fog's state) and the ripples
+// on them. CGWorldFrame::OnWorldRender calls it once a frame: after the opaque world and before the
+// M2 scene's blended pass when the camera is above water, between the weather and the barriers
+// when it is under it. After raises RenderPoint with WXL_RENDER_POINT_AFTER_LIQUIDS. A class
+// static, no argument, reached through a thunk at 0x0077F020.
+WXL_SEAM_AFTER(WorldScene, RenderLiquidPass, "CWorldScene::RenderLiquidPass", void, cdecl, ())
+WXL_SEAM_RAISES(WorldScene, RenderLiquidPass, RenderPoint)
+
+// MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
+// guarded by X, and skips it when it is included again with X defined: this table is read
+// several times in one translation unit, under shapes that may leave it empty. A directive
+// after the rows keeps it from looking guarded.
+#ifdef WXL_TABLE_END
+#endif

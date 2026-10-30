@@ -18,6 +18,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,25 @@ namespace
         return mod ? mod->id.c_str() : "(no mod)";
     }
 
+    /// The paths of the runtime that left the state other than they found it, each told once.
+    std::set<std::string> g_told;
+
+    bool FirstTime(const char* path, const char* what)
+    {
+        return g_told.insert(std::string(path) + '\n' + what).second;
+    }
+
+    /// A call into the client's Lua that a hardware fault stopped: the state is back where it
+    /// was, the call is abandoned as a Lua error would abandon it.
+    void ReportFault(const char* what, const wxl::host::Fault& fault)
+    {
+        char where[96];
+        wxl::host::DescribeFault(fault, where, sizeof where);
+        WLOG_ERROR(kTag, "%s: the client faulted inside it: %s; the call is abandoned and the "
+                         "script state is put back as it was before it",
+                   what, where);
+    }
+
     /// The Lua index of a 0-based argument, or 0 when the call has no such argument.
     int32_t ArgIndex(const wxl_script_call* call, uint32_t index)
     {
@@ -97,7 +117,10 @@ namespace
         for (const std::string& event : g_events) names.push_back(event.c_str());
 
         g_reissuing = true;
-        binding::script_create_events(names.data(), static_cast<uint32_t>(names.size()));
+        auto install = [&] { binding::script_create_events(names.data(), static_cast<uint32_t>(names.size())); };
+        wxl::host::Fault fault;
+        if (!wxl::core::services::script::Keep("wxl.script's event table", install, &fault))
+            ReportFault("installing the event table", fault);
         g_reissuing = false;
     }
 
@@ -129,7 +152,11 @@ namespace
         Registration& registration = g_functions[slot - 1];
         if (!registration.live) return;
         registration.live = false;
-        if (g_live) binding::script_clear_global(g_state, registration.name.c_str());
+        if (!g_live) return;
+        auto clear = [&] { binding::script_clear_global(g_state, registration.name.c_str()); };
+        wxl::host::Fault fault;
+        if (!wxl::core::services::script::Keep("wxl.script's withdrawal of a function", clear, &fault))
+            ReportFault(("withdrawing " + registration.name).c_str(), fault);
     }
 
     // --- The native side of a registered function -------------------------------------------
@@ -244,7 +271,15 @@ namespace
                       name);
             return WXL_E_FAILED;
         }
-        if (binding::script_global_is_set(g_state, name))
+        bool             taken = false;
+        auto             look  = [&] { taken = binding::script_global_is_set(g_state, name) != WXL_FALSE; };
+        wxl::host::Fault fault;
+        if (!wxl::core::services::script::Keep("register_function", look, &fault))
+        {
+            ReportFault((std::string("register_function '") + name + "'").c_str(), fault);
+            return WXL_E_FAILED;
+        }
+        if (taken)
         {
             WLOG_WARN(kTag, "register_function '%s': the name is already taken in this context",
                       name);
@@ -256,7 +291,13 @@ namespace
         const uint32_t owner = CurrentMod();
         g_functions.push_back(Registration{name, fn, user, owner, true});
         const uint32_t slot = static_cast<uint32_t>(g_functions.size());
-        binding::script_set_global_closure(g_state, name, &NativeThunk, slot);
+        auto set = [&] { binding::script_set_global_closure(g_state, name, &NativeThunk, slot); };
+        if (!wxl::core::services::script::Keep("register_function", set, &fault))
+        {
+            ReportFault((std::string("register_function '") + name + "'").c_str(), fault);
+            g_functions.back().live = false;
+            return WXL_E_FAILED;
+        }
         WLOG_DEBUG(kTag, "function %s registered by %s", name, ModName(owner));
         return WXL_OK;
     }
@@ -287,10 +328,22 @@ namespace
         const int32_t index = EventIndex(name);
         if (index < 0) return WXL_E_NOT_FOUND;
 
-        for (uint32_t i = 0; i < count; ++i) Push(g_state, args[i]);
-        binding::script_signal_event(static_cast<uint32_t>(index), g_state,
-                                     static_cast<int32_t>(count));
-        binding::script_pop(g_state, static_cast<int32_t>(count));
+        // As the client's own signal does, the event's name goes first: a frame's OnEvent receives
+        // (self, event, ...) and the legacy `event` global is set from it.
+        auto signal = [&]
+        {
+            binding::script_push_string(g_state, name, static_cast<uint32_t>(std::strlen(name)));
+            for (uint32_t i = 0; i < count; ++i) Push(g_state, args[i]);
+            binding::script_signal_event(static_cast<uint32_t>(index), g_state,
+                                         static_cast<int32_t>(count + 1));
+            binding::script_pop(g_state, static_cast<int32_t>(count + 1));
+        };
+        wxl::host::Fault fault;
+        if (!wxl::core::services::script::Keep("fire_event", signal, &fault))
+        {
+            ReportFault((std::string("fire_event ") + name).c_str(), fault);
+            return WXL_E_FAILED;
+        }
         return WXL_OK;
     }
 
@@ -299,7 +352,14 @@ namespace
         if (!chunk.data && chunk.size) return WXL_E_INVALID;
         if (!g_live) return WXL_E_FAILED;
         const std::string source(chunk.data ? chunk.data : "", chunk.size);
-        binding::script_run(source.c_str(), name ? name : "WarcraftXL");
+        const char* const label = name ? name : "WarcraftXL";
+        auto              run   = [&] { binding::script_run(source.c_str(), label); };
+        wxl::host::Fault  fault;
+        if (!wxl::core::services::script::Keep("run", run, &fault))
+        {
+            ReportFault((std::string("run ") + label).c_str(), fault);
+            return WXL_E_FAILED;
+        }
         return WXL_OK;
     }
 
@@ -457,5 +517,48 @@ namespace wxl::core::services
         bool     Live() { return g_live; }
         uint32_t Context() { return g_context; }
         void*    State() { return g_state; }
+
+        bool Keep(const char* path, wxl::host::GuardedFn fn, void* context, wxl::host::Fault* fault)
+        {
+            wxl::host::Fault ignored;
+            if (!fault) fault = &ignored;
+            void* const state = g_live ? g_state : nullptr;
+            if (!state) return wxl::host::CallGuarded(fn, context, fault);
+
+            wxl_script_mark mark{};
+            binding::script_mark(state, &mark);
+            const int32_t top      = binding::script_top(state);
+            const bool    returned = wxl::host::CallGuarded(fn, context, fault);
+            // The context may have closed inside: its state is gone, and nothing is left to keep.
+            if (!g_live || g_state != state) return returned;
+
+            if (binding::script_unwind(state, &mark))
+            {
+                // A fault caught further in (a mod's handler under the host's guard) left them.
+                if (returned && FirstTime(path, "calls"))
+                    WLOG_WARN(kTag, "%s left calls unfinished on the client's script state, a fault inside "
+                                    "them having been caught further in; they are dropped",
+                              path);
+                return returned;
+            }
+            if (!returned) return false;
+
+            const int32_t now = binding::script_top(state);
+            if (now == top) return true;
+            if (FirstTime(path, "top"))
+            {
+                if (now > top)
+                    WLOG_WARN(kTag, "%s left %d value(s) on the client's script stack; they are dropped, "
+                                    "since the client ends the process when the stack is not empty between frames",
+                              path, now - top);
+                else
+                    WLOG_WARN(kTag, "%s took %d value(s) it had not pushed off the client's script stack; "
+                                    "nils stand in for them",
+                              path, top - now);
+            }
+            if (now > top) binding::script_pop(state, now - top);
+            for (int32_t i = now; i < top; ++i) binding::script_push_nil(state);
+            return true;
+        }
     }
 }

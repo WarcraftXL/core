@@ -6,6 +6,9 @@
 #ifndef WXL_SEAM_AFTER
 #error "define WXL_SEAM_AFTER(domain, name, symbol, ret, conv, params) before including m2.def"
 #endif
+#ifndef WXL_SEAM_GATE
+#error "define WXL_SEAM_GATE(domain, name, symbol, ret, conv, params) before including m2.def"
+#endif
 
 // Draws one batch of a model: sets its material, textures and bones, then issues the device's
 // draw. CM2SceneRender::Draw calls it for every element of type 0, the plain batches every
@@ -19,16 +22,31 @@ WXL_SEAM_RAISES(M2, DrawBatch, ModelBatchDrawn)
 
 // Animates one model for the frame: its bones' sequences, then every bone's matrix in view space,
 // then colours, lights, ribbons, particles and its attachments, which it animates in turn. Runs on
-// the scene's animate threads, two at once. After is called once the bones are posed -- before
-// what reads them, the ribbons, particles and attachments -- and at the return taken for a model
-// that has not loaded or was animated this frame already; it raises nothing: it poses the bones of
-// a model wxl.m2 attached to follow its parent's. thiscall.
+// the scene's animate threads, several at once (the client's two, or the runtime's with [engine]
+// animate_threads). After is called once the bones are posed -- before what reads them, the
+// ribbons, particles and attachments -- and at the return taken for a model that has not loaded
+// or was animated this frame already; it raises nothing: it poses the bones of a model wxl.m2
+// attached to follow its parent's. thiscall.
 WXL_SEAM_AFTER(M2, AnimateMT, "CM2Model::AnimateMT", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
 
 // The same for a model with one bone, one sequence and nothing else to animate, which the client
 // flags at load and animates here instead: its one bone matrix is the model's transform. After is
 // called once that bone is set, and at the early return. thiscall.
 WXL_SEAM_AFTER(M2, AnimateMTSimple, "CM2Model::AnimateMTSimple", void, thiscall, (void* self, const void* view, const void* diffuse, const void* emissive, float alpha, float alpha2))
+
+// Hands the model cache's animate worker its work and wakes it: CM2Scene::Animate calls it with
+// CM2Scene::AnimateThread and the scene, animates every other model of the scene's animate list
+// itself, then waits for the worker (WaitThread). With [engine] animate_threads, Gate animates
+// every model of the list on the runtime's threads, the main thread among them, each once and
+// with the floating point state of the thread the client would have used, hides the list from the
+// client's own loop and takes the call; the worker is not woken. Not taken (the client's own two
+// threads) when the setting is 0, for another function, or when the pool cannot start. thiscall.
+WXL_SEAM_GATE(M2, BeginThread, "CM2Cache::BeginThread", void, thiscall, (void* self, void* func, void* param))
+
+// Waits for the animate worker. Gate takes the call when BeginThread's gate took the scene's
+// animation, which has finished: it puts the scene's animate list back, for the client's
+// AnimateST and lighting passes that follow. thiscall.
+WXL_SEAM_GATE(M2, WaitThread, "CM2Cache::WaitThread", void, thiscall, (void* self))
 
 // MSVC takes a file that expands to nothing outside its opening #ifndef X ... #endif for one
 // guarded by X, and skips it when it is included again with X defined: this table is read

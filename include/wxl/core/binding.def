@@ -89,8 +89,17 @@
 #include "wxl/core/binding/asset.def"
 #include "wxl/core/binding/gameplay.def"
 #include "wxl/core/binding/action.def"
+#include "wxl/core/binding/camera.def"
+#include "wxl/core/binding/input.def"
+#include "wxl/core/binding/pose.def"
+#include "wxl/core/binding/circle.def"
+#include "wxl/core/binding/interface.def"
 
 #include "wxl/core/binding/m2.def"
+
+#include "wxl/core/binding/terrain.def"
+
+#include "wxl/core/binding/animation.def"
 
 #ifdef WXL_BINDING_FIELD_DEFAULTED
     #undef WXL_BINDING_FIELD

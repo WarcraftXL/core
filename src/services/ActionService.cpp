@@ -14,6 +14,7 @@
 #include "wxl/host/mod_host.hpp"
 
 #include <atomic>
+#include <cmath>
 
 namespace
 {
@@ -150,6 +151,17 @@ namespace
         return Done(binding::action_move_to(player, point));
     }
 
+    wxl_result WXL_CALL Face(double facing)
+    {
+        WXL_ACTION_ENTER("Face");
+        if (!std::isfinite(facing)) return WXL_E_INVALID;
+        // A facing as the client keeps it, in [0, 2 pi).
+        constexpr double kTurn = 6.283185307179586;
+        double           wrapped = std::fmod(facing, kTurn);
+        if (wrapped < 0.0) wrapped += kTurn;
+        return Done(binding::action_face(player, static_cast<float>(wrapped)));
+    }
+
     #undef WXL_ACTION_ENTER
 }
 
@@ -169,6 +181,7 @@ namespace wxl::core::services
             table.follow       = &Follow;
             table.assist       = &Assist;
             table.move_to      = &MoveTo;
+            table.face         = &Face;
             return table;
         }();
         return api;
