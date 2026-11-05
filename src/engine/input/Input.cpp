@@ -1,27 +1,11 @@
-// Window-input detour: subclass the client window and publish OnInput, swallowing consumed messages.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "engine/hook/Registry.hpp"
-#include "engine/events/Event.hpp"
 #include "engine/input/Input.hpp"
 
 #include "common/Log.hpp"
+#include "engine/events/Event.hpp"
+#include "engine/hook/Registry.hpp"
 #include "wxl/game/Pick.hpp"
-
-#include <windows.h>
 
 namespace
 {
@@ -31,80 +15,59 @@ namespace
     HWND    g_hwnd        = nullptr;
     WNDPROC g_origWndProc = nullptr;
 
-    /**
-     * @brief Selects the top-level visible window owned by this process.
-     * @param h    candidate window handle from the enumeration.
-     * @param out  receives the matched HWND.
-     * @return FALSE to stop enumeration on a match, TRUE to continue.
-     */
-    BOOL CALLBACK PickWindow(HWND h, LPARAM out)
+    /// The process's visible top-level window.
+    BOOL CALLBACK PickWindow(HWND window, LPARAM out)
     {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(h, &pid);
-        if (pid == GetCurrentProcessId() && GetWindow(h, GW_OWNER) == nullptr && IsWindowVisible(h))
-        {
-            *reinterpret_cast<HWND*>(out) = h;
-            return FALSE;
-        }
-        return TRUE;
+        DWORD process = 0;
+        GetWindowThreadProcessId(window, &process);
+        if (process != GetCurrentProcessId() || GetWindow(window, GW_OWNER) || !IsWindowVisible(window)) return TRUE;
+        *reinterpret_cast<HWND*>(out) = window;
+        return FALSE;
     }
 
-    /**
-     * @brief Finds the client window by enumeration, with a window-class lookup fallback.
-     * @return the window handle, or null if none is found.
-     */
     HWND FindGameWindow()
     {
-        HWND h = nullptr;
-        EnumWindows(&PickWindow, reinterpret_cast<LPARAM>(&h));
-        if (!h) h = FindWindowA("GxWindowClass", nullptr);
-        return h;
+        HWND window = nullptr;
+        EnumWindows(&PickWindow, reinterpret_cast<LPARAM>(&window));
+        return window ? window : FindWindowA("GxWindowClass", nullptr);
     }
 
-    /**
-     * @brief Republishes every window message as OnInput, swallowing it when a subscriber sets handled.
-     * @param h  window handle.
-     * @param m  message id.
-     * @param w  message WPARAM.
-     * @param l  message LPARAM.
-     * @return 0 when the message is consumed, otherwise the original window procedure result.
-     */
-    LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+    /// A click no handler took: the world point or object under the cursor.
+    void RaiseWorldClick(UINT message)
     {
-        bool handled = false;
-        ev::InputArgs a{ m, static_cast<uintptr_t>(w), static_cast<uintptr_t>(l), &handled };
-        ev::Emit<ev::Event::OnInput>(a);
-        if (handled) return 0;
-
-        // An unconsumed world click: resolve the cursor to a world point/object and publish OnWorldClick.
-        if (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN)
-        {
-            world::WorldHit hit;
-            if (world::PickCursor(hit))
-            {
-                ev::WorldClickArgs wc{ m, hit.type, hit.pos.x, hit.pos.y, hit.pos.z, hit.objLo, hit.objHi };
-                ev::Emit<ev::Event::OnWorldClick>(wc);
-            }
-        }
-        return CallWindowProcA(g_origWndProc, h, m, w, l);
+        world::WorldHit hit;
+        if (!world::PickCursor(hit)) return;
+        const ev::WorldClickArgs args{ message, hit.type, hit.pos.x, hit.pos.y, hit.pos.z, hit.objLo, hit.objHi };
+        ev::Emit<ev::Event::OnWorldClick>(args);
     }
 
-    /**
-     * @brief Subclasses the client window and routes its messages through WndProc.
-     *
-     * A missing window is not fatal: OnInput simply stays inactive, so the installer still reports
-     * success to the registry.
-     */
+    /// Every message as OnInput; one a handler marked handled goes no further.
+    LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        bool                 handled = false;
+        const ev::InputArgs  args{ message, static_cast<uintptr_t>(wParam), static_cast<uintptr_t>(lParam), &handled };
+        ev::Emit<ev::Event::OnInput>(args);
+        if (handled) return 0;
+        if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN) RaiseWorldClick(message);
+        return CallWindowProcA(g_origWndProc, window, message, wParam, lParam);
+    }
+
+    /// Without a window OnInput stays silent; that is not a failed install.
     bool InstallInput()
     {
-        if (g_origWndProc) return true; // already installed
+        if (g_origWndProc) return true;
         g_hwnd = FindGameWindow();
-        if (!g_hwnd) { WLOG_WARN("input: game window not found, OnInput inactive"); return true; }
-
-        g_origWndProc = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WndProc)));
-        if (!g_origWndProc) { WLOG_WARN("input: SetWindowLongPtr failed (%lu)", GetLastError()); return true; }
-
+        if (!g_hwnd)
+        {
+            WLOG_WARN("input: game window not found, OnInput inactive");
+            return true;
+        }
+        g_origWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(g_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WndProc)));
+        if (!g_origWndProc)
+        {
+            WLOG_WARN("input: SetWindowLongPtr failed (%lu)", GetLastError());
+            return true;
+        }
         WLOG_INFO("input: window subclassed (hwnd=%p), OnInput live", g_hwnd);
         return true;
     }
@@ -115,18 +78,14 @@ namespace wxl::input
     void FollowWindow(HWND hwnd)
     {
         if (!hwnd || hwnd == g_hwnd || !g_origWndProc) return;
-
-        const WNDPROC prev = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WndProc)));
-        if (!prev)
+        const auto previous = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&WndProc)));
+        if (!previous)
         {
-            WLOG_WARN("input: SetWindowLongPtr on the new window %p failed (%lu), OnInput stays on %p",
-                      hwnd, GetLastError(), g_hwnd);
+            WLOG_WARN("input: SetWindowLongPtr on the new window %p failed (%lu), OnInput stays on %p", hwnd,
+                      GetLastError(), g_hwnd);
             return;
         }
-        // The new window is the same class as the old one, so its procedure is the one chained to
-        // before; it is taken from the window anyway rather than assumed.
-        if (prev != &WndProc) g_origWndProc = prev;
+        if (previous != &WndProc) g_origWndProc = previous;
         WLOG_INFO("input: window subclass follows the device window %p -> %p", g_hwnd, hwnd);
         g_hwnd = hwnd;
     }

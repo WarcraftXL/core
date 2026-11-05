@@ -1,24 +1,13 @@
-// Named hooking over MinHook: install by name + address, enable in one batch.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "engine/hook/Hook.hpp"
 #include "common/Log.hpp"
+#include "runtime/Owners.hpp"
 
 #include <MinHook.h>
+#include <windows.h>
 
+#include <cstring>
 #include <deque>
 #include <iterator>
 #include <vector>
@@ -27,27 +16,62 @@ namespace wxl::hook
 {
     namespace
     {
-        /// One party on an address. original is the caller's own trampoline variable; the chain owns
-        /// it and rewrites it whenever the chain's shape changes.
+        /// One party on an address. `original` is the party's own variable; the chain rewrites it
+        /// whenever its shape changes.
         struct Link
         {
             const char* name;
             void*       detour;
             void**      original;
             int         priority;
+            uint32_t    owner;
+            bool        resident;
         };
 
-        /// Every party on one address, head first. MinHook only ever sees the head.
+        /// What MinHook jumps to: `jmp [target]`, so the head of a live chain changes with one aligned store.
+        struct Thunk
+        {
+            uint8_t        code[8];
+            void* volatile target;
+            uint32_t       pad;
+        };
+        static_assert(sizeof(Thunk) == 16, "Thunk");
+
+        constexpr size_t  kPageSize      = 4096;
+        constexpr size_t  kThunksPerPage = kPageSize / sizeof(Thunk);
+        constexpr uint8_t kJmpIndirect[] = { 0xFF, 0x25 }; ///< jmp dword ptr [abs32]
+        constexpr uint8_t kInt3          = 0xCC;
+
+        Thunk* NewThunk()
+        {
+            static Thunk* page = nullptr;
+            static size_t used = 0;
+            if (!page || used == kThunksPerPage)
+            {
+                page = static_cast<Thunk*>(VirtualAlloc(nullptr, kPageSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                used = 0;
+                if (!page) return nullptr;
+            }
+            Thunk*         t    = &page[used++];
+            const uint32_t slot = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&t->target));
+            std::memcpy(&t->code[0], kJmpIndirect, sizeof kJmpIndirect);
+            std::memcpy(&t->code[2], &slot, sizeof slot);
+            t->code[6] = kInt3;
+            t->code[7] = kInt3;
+            return t;
+        }
+
+        /// Every party on one address, head first. MinHook only ever sees the thunk.
         struct Chain
         {
             void*             target;
             std::vector<Link> links;
             void*             trampoline; ///< valid once patched
+            Thunk*            thunk;      ///< made at patch time
             bool              patched;
         };
 
-        /// deque rather than vector: FindChain hands out a Chain*, and registering a further address
-        /// must not move the existing ones.
+        /// A deque: a Chain* stays valid while chains are added.
         std::deque<Chain>& Chains()
         {
             static std::deque<Chain> chains;
@@ -64,37 +88,37 @@ namespace wxl::hook
         Chain& ChainFor(void* target)
         {
             if (Chain* existing = FindChain(target)) return *existing;
-            Chains().push_back(Chain{target, {}, nullptr, false});
+            Chains().push_back(Chain{target, {}, nullptr, nullptr, false});
             return Chains().back();
         }
 
-        /// Points every party at its successor and the last one at the engine function.
-        ///
-        /// Each store is a single aligned pointer write, so a call in flight through a live chain
-        /// reads either the old successor or the new one.
+        /// Points every party at its successor, the last at the function, the head at the first. One
+        /// aligned store each, successors first: a call in flight reads the old link or the new one.
         void Relink(Chain& chain)
         {
             const size_t count = chain.links.size();
-            if (count == 0) return;
-
             for (size_t i = 0; i + 1 < count; ++i)
                 *chain.links[i].original = chain.links[i + 1].detour;
 
-            // Before Patch there is no trampoline to close the tail on.
-            if (chain.patched)
-                *chain.links[count - 1].original = chain.trampoline;
+            if (!chain.patched) return;
+            if (count) *chain.links[count - 1].original = chain.trampoline;
+            chain.thunk->target = count ? chain.links.front().detour : chain.trampoline;
         }
 
-        /// Hands the head to MinHook and closes the tail on the returned trampoline.
+        /// Hands the thunk to MinHook and closes the chain on the returned trampoline.
         bool Patch(Chain& chain)
         {
             if (chain.patched) return true;
 
-            const MH_STATUS status = MH_CreateHook(chain.target, chain.links.front().detour,
-                                                   &chain.trampoline);
+            chain.thunk = NewThunk();
+            if (!chain.thunk)
+            {
+                WLOG_ERROR("hook: no memory for the head of @0x%p", chain.target);
+                return false;
+            }
+            const MH_STATUS status = MH_CreateHook(chain.target, chain.thunk, &chain.trampoline);
             if (status != MH_OK)
             {
-                // Every party is named: the address no longer belongs to a single install site.
                 for (const Link& link : chain.links)
                     WLOG_ERROR("hook: create '%s' @0x%p failed (%s)", link.name, chain.target,
                                MH_StatusToString(status));
@@ -107,10 +131,6 @@ namespace wxl::hook
         }
     }
 
-    /**
-     * @brief Initialises the hooking engine once at startup.
-     * @return true if initialisation succeeded.
-     */
     bool Init()
     {
         MH_STATUS status = MH_Initialize();
@@ -122,32 +142,22 @@ namespace wxl::hook
         return true;
     }
 
-    /**
-     * @brief Registers one detour in its target's chain.
-     * @param name      label used for logging.
-     * @param target    engine function address to detour.
-     * @param detour    replacement function.
-     * @param original  receives the next link in the chain, ending at the engine function.
-     * @param priority  chain position; see kDefaultPriority.
-     * @return true if the detour was registered.
-     */
-    bool Install(const char* name, void* target, void* detour, void** original, int priority)
+    bool Install(const char* name, void* target, void* detour, void** original, int priority, bool resident)
     {
+        // A resident detour outlives its owner: the module holding it may never be unloaded.
+        HMODULE module = nullptr;
+        if (resident && !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                            static_cast<LPCSTR>(detour), &module))
+        {
+            WLOG_ERROR("hook: '%s' @0x%p: no module holds its detour, so it cannot be resident", name, target);
+            return false;
+        }
         Chain& chain = ChainFor(target);
 
         auto at = chain.links.end();
         while (at != chain.links.begin() && std::prev(at)->priority > priority) --at;
 
-        // Taking the head of a live chain means repointing MinHook at another detour while calls may
-        // be running through the old one.
-        if (chain.patched && at == chain.links.begin())
-        {
-            WLOG_ERROR("hook: '%s' @0x%p claims the head of a live chain held by '%s'",
-                       name, target, chain.links.front().name);
-            return false;
-        }
-
-        chain.links.insert(at, Link{name, detour, original, priority});
+        chain.links.insert(at, Link{name, detour, original, priority, runtime::owners::Current(), resident});
         Relink(chain);
 
         WLOG_DEBUG("hook: installed '%s' @0x%p (%zu on this address)", name, target,
@@ -155,30 +165,30 @@ namespace wxl::hook
         return true;
     }
 
-    bool Enable(void* target)
+    uint32_t DropOwner(uint32_t owner)
     {
-        Chain* chain = FindChain(target);
-        if (!chain)
+        uint32_t dropped = 0;
+        for (Chain& chain : Chains())
         {
-            WLOG_ERROR("hook: enable @0x%p: nothing installed there", target);
-            return false;
+            const size_t before = chain.links.size();
+            // A dropped link keeps its own original: a call in flight through it goes on.
+            for (auto it = chain.links.begin(); it != chain.links.end();)
+                it = it->owner == owner && !it->resident ? chain.links.erase(it) : std::next(it);
+            if (chain.links.size() == before) continue;
+            dropped += uint32_t(before - chain.links.size());
+            Relink(chain);
         }
-        if (!Patch(*chain)) return false;
-
-        const MH_STATUS status = MH_EnableHook(target);
-        if (status != MH_OK && status != MH_ERROR_ENABLED)
-        {
-            WLOG_ERROR("hook: enable @0x%p failed (%s)", target, MH_StatusToString(status));
-            return false;
-        }
-        WLOG_DEBUG("hook: enabled early @0x%p", target);
-        return true;
+        return dropped;
     }
 
-    /**
-     * @brief Patches every chain registered since the last call and enables the batch.
-     * @return true if every pending chain was patched and the batch enabled.
-     */
+    uint32_t Resident(uint32_t owner)
+    {
+        uint32_t kept = 0;
+        for (const Chain& chain : Chains())
+            for (const Link& link : chain.links) kept += link.owner == owner && link.resident;
+        return kept;
+    }
+
     bool EnableAll()
     {
         bool patched = true;

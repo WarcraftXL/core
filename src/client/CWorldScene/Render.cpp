@@ -1,322 +1,85 @@
-// Native D3D9 render feature: device-vtable + engine detours that publish the render events.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The world render seams: OnWorldRender, OnWorldSceneEnd, OnWorldRenderEnd and OnLiquidRender.
 
-#include "common/Mem.hpp"
+#include "client/CGxDevice/FrameHooks.hpp"
 #include "common/Log.hpp"
-#include "engine/hook/Hook.hpp"
-#include "runtime/HookPoints.hpp"
-#include "engine/hook/Registry.hpp"
 #include "engine/events/Event.hpp"
-#include "engine/input/Input.hpp"
+#include "engine/hook/Registry.hpp"
+#include "runtime/HookPoints.hpp"
 #include "wxl/game/Gx.hpp"
-#include "wxl/offsets/engine/Gx.hpp"
+#include "wxl/offsets/CGWorldFrame.hpp"
+#include "wxl/offsets/Liquid.hpp"
 
 #include <windows.h>
 #include <d3d9.h>
 
-// Uses device-vtable pointer swaps (EndScene, Present, Reset) plus function-entry hooks on the
-// liquid/world-boundary paths; no mid-function inline patch, so the native render pass stays intact.
-// Each detour only publishes a render event -- the client owns its native D3D9 rendering.
-//
-// DrawIndexedPrimitive is NOT swapped here: that vtable slot, and the one-shot draw interceptor built
-// on it, belong to wxl-m2 (its per-batch OnM2BatchDraw/OnRibbonDraw need the same slot; a second core
-// swap on top would just fight it for the same vtable entry). wxl-m2 re-applies its own swap on the
-// same per-device-recreate cadence this file uses for its three, and publishes "wxl.m2draw" (its
-// contract lives in wxl-modern-m2's own repo, render/M2DrawApi.h) for any other extension
-// (wxl-wmo's four-layer material) that needs to bracket one native draw.
 namespace
 {
-    namespace off = wxl::offsets::engine::gx;
+    namespace off = wxl::offsets;
     namespace ev  = wxl::events;
     namespace gx  = wxl::game::gx;
 
-    using EndSceneFn = long (__stdcall*)(void*);
-    using PresentFn  = long (__stdcall*)(void*, const void*, const void*, void*, const void*);
-    using ResetFn    = long (__stdcall*)(void*, D3DPRESENT_PARAMETERS*);
-
-    EndSceneFn g_origEndScene = nullptr;
-    PresentFn  g_origPresent  = nullptr;
-    ResetFn    g_origReset    = nullptr;
-    off::WorldRenderFinalizeFn g_origWorldFinalize = nullptr;
-    off::WorldOnRenderFn       g_origWorldScene    = nullptr;
-    off::LiquidRenderPassFn    g_origLiquidRender  = nullptr;
-    off::GxScenePresentFn      g_origScenePresent  = nullptr;
-    void*      g_hookedDevice  = nullptr;   // device whose vtable currently carries the render hooks
-    bool       g_sawD3d9       = false;     // an IDirect3DDevice9 existed: the vtable hooks own the frame events
-    bool       g_saidNeutral   = false;
-
-    void EnsureDeviceHooks(IDirect3DDevice9* dev);   // defined after SwapVtbl
-
-    /**
-     * @brief Detours EndScene, emitting OnEndScene before the native call.
-     * @param dev  D3D9 device.
-     * @return the EndScene result.
-     */
-    long __stdcall hkEndScene(void* dev)
+    /// One pass of the liquid renderer's material bank (its `this`), indexed by pass.
+    struct LiquidPassEntry
     {
-        ev::EndSceneArgs a{ dev };
-        ev::Emit<ev::Event::OnEndScene>(a);
-        return g_origEndScene(dev);
+        uint32_t unknown00;
+        uint32_t count;
+        uint32_t instances;
+        uint32_t unknown0c;
+    };
+    static_assert(sizeof(LiquidPassEntry) == 0x10);
+
+    off::CGWorldFrame::RenderWorldFn   g_origRenderWorld   = nullptr;
+    off::CGWorldFrame::OnWorldRenderFn g_origWorldScene    = nullptr;
+    off::Liquid::CRenderer::FlushFn    g_origLiquidRender  = nullptr;
+
+    /// Once per pass (0 main, 1 secondary), textures bound and waves applied.
+    void __fastcall LiquidRenderDetour(void* bank, void* edx, void* transform, int pass)
+    {
+        const LiquidPassEntry& entry = static_cast<LiquidPassEntry*>(bank)[pass];
+        const ev::LiquidRenderArgs args{ bank, transform, pass, entry.count };
+        ev::Emit<ev::Event::OnLiquidRender>(args);
+        g_origLiquidRender(bank, edx, transform, pass);
     }
 
-    /**
-     * @brief Detours Present, emitting OnFrame just before the buffers swap.
-     * @param dev    D3D9 device.
-     * @param src    source rect.
-     * @param dst    destination rect.
-     * @param wnd    target window override.
-     * @param dirty  dirty region.
-     * @return the Present result.
-     */
-    long __stdcall hkPresent(void* dev, const void* src, const void* dst, void* wnd, const void* dirty)
+    /// OnWorldSceneEnd comes while the world's matrices are still on the device, with the depth surface
+    /// the world drew into: taken before the pass, whose post-processing may bind another.
+    void __fastcall WorldSceneDetour(void* worldFrame, void* edx)
     {
-        ev::FrameArgs a{ dev };
-        ev::Emit<ev::Event::OnFrame>(a);
-        return g_origPresent(dev, src, dst, wnd, dirty);
-    }
-
-    /**
-     * @brief Detours GxScenePresent: the backend-neutral frame seam, live only without D3D9.
-     *
-     * With an IDirect3DDevice9 -- the stock backend, or any backend that makes one -- this only calls
-     * through: OnEndScene and OnFrame keep coming from the EndScene / Present swaps above, at their
-     * call sites and timing, and nothing fires twice. A device seen once marks the session as D3D9
-     * for good, so a D3D format change (which nulls the device between IDestroyD3d and the new
-     * CreateDevice) cannot make this path fire either.
-     *
-     * With none (a device backend that never creates one; its frame is its own slot 38), the frame
-     * is complete here and still open on the back buffer, so this emits OnEndScene, then OnFrame,
-     * with a null device -- the order and the "before the swap" place D3D's give them -- and then
-     * presents. OnDeviceLost / OnDeviceReset are not emitted on this path: their contract is the
-     * D3DPOOL_DEFAULT release around IDirect3DDevice9::Reset, and a device without D3D9 loses
-     * nothing on a resize or a format change. The input subclass follows the device window, which
-     * such a backend's format change recreates.
-     */
-    void __cdecl hkScenePresent()
-    {
-        if (!g_sawD3d9)
-        {
-            void* gfx = gx::RawGraphicsDevice();
-            if (gx::RawDevice()) g_sawD3d9 = true;
-            else if (gfx && wxl::game::At<uint32_t>(gfx, off::kContextField))
-            {
-                if (!g_saidNeutral)
-                {
-                    g_saidNeutral = true;
-                    WLOG_INFO("render: no IDirect3DDevice9 in this process; OnEndScene and OnFrame fire "
-                              "from GxScenePresent with a null device (OnDeviceLost/OnDeviceReset do "
-                              "not apply: nothing is lost on a resize)");
-                }
-                wxl::input::FollowWindow(wxl::game::At<HWND>(gfx, off::kWindowField));
-                {
-                    ev::EndSceneArgs a{ nullptr };
-                    ev::Emit<ev::Event::OnEndScene>(a);
-                }
-                {
-                    ev::FrameArgs a{ nullptr };
-                    ev::Emit<ev::Event::OnFrame>(a);
-                }
-            }
-        }
-        g_origScenePresent();
-    }
-
-    /**
-     * @brief Detours the per-frame liquid render pass, emitting OnLiquidRender before the native draw.
-     *
-     * Fires once per pass (passType 0 main, 1 secondary). The liquid textures are already bound and the
-     * wave animation already applied at this point.
-     * @param bank       liquid material-settings bank (this-in-ECX), indexed by passType.
-     * @param edx        unused register slot for the thiscall convention.
-     * @param transform  shared liquid transform forwarded to every instance draw.
-     * @param passType   liquid pass index (0 main, 1 secondary).
-     */
-    void __fastcall hkLiquidRender(void* bank, void* edx, void* transform, int passType)
-    {
-        const off::LiquidPassEntry& entry = static_cast<off::LiquidPassEntry*>(bank)[passType];
-
-        ev::LiquidRenderArgs a{ bank, transform, passType, entry.count };
-        ev::Emit<ev::Event::OnLiquidRender>(a);
-
-        g_origLiquidRender(bank, edx, transform, passType);
-    }
-
-    /**
-     * @brief Detours the world scene pass, emitting OnWorldRender as it opens and OnWorldSceneEnd
-     *        once it has drawn.
-     *
-     * Its caller runs this, then the world text batch, then puts back the projection and view it saved
-     * before the pass. Emitting on the way out of the pass therefore lands in the one window where the
-     * world is complete and the matrices that drew it are still the ones on the device -- which is what
-     * a subscriber placing geometry by world coordinate needs, and what the later world -> UI boundary
-     * no longer offers.
-     * @param worldFrame  world frame being rendered.
-     * @param edx         unused; the register the native convention passes nothing meaningful in.
-     */
-    void __fastcall hkWorldScene(void* worldFrame, void* edx)
-    {
-        // Taken before the pass, not after: the post-process passes run inside it and can leave a
-        // surface of their own bound. A subscriber that depth-tests against whatever it finds bound
-        // afterwards is testing against a surface the world never wrote to, which rejects all of its
-        // geometry and reports nothing.
         IDirect3DSurface9* sceneDepth = nullptr;
-        if (IDirect3DDevice9* d = static_cast<IDirect3DDevice9*>(gx::RawDevice()))
-            d->GetDepthStencilSurface(&sceneDepth);
+        if (auto* device = static_cast<IDirect3DDevice9*>(gx::RawDevice())) device->GetDepthStencilSurface(&sceneDepth);
 
-        {
-            ev::WorldRenderArgs a{ gx::RawDevice() };
-            ev::Emit<ev::Event::OnWorldRender>(a);
-        }
-
+        const ev::WorldRenderArgs opened{ gx::RawDevice() };
+        ev::Emit<ev::Event::OnWorldRender>(opened);
         g_origWorldScene(worldFrame, edx);
-
         if (ev::Any(ev::Event::OnWorldSceneEnd))
         {
-            ev::WorldSceneEndArgs a{ gx::RawDevice(), sceneDepth };
-            ev::Emit<ev::Event::OnWorldSceneEnd>(a);
+            const ev::WorldSceneEndArgs ended{ gx::RawDevice(), sceneDepth };
+            ev::Emit<ev::Event::OnWorldSceneEnd>(ended);
         }
-
         if (sceneDepth) sceneDepth->Release();
     }
 
-    /**
-     * @brief Detours world-frame finalize: the world -> UI boundary. Re-applies the device vtable hooks on
-     *        the live device (they are lost on a device recreate, and this function-entry hook survives it),
-     *        runs the native finalize, then emits OnWorldRenderEnd for post-world subscribers.
-     * @param worldFrame  world frame being finalized.
-     */
-    void __cdecl hkWorldFinalize(void* worldFrame)
+    /// The world -> UI boundary. A function hook survives a device recreate, so the device hooks are
+    /// put back from here.
+    void __cdecl RenderWorldDetour(void* worldFrame)
     {
-        if (IDirect3DDevice9* d = static_cast<IDirect3DDevice9*>(gx::RawDevice()))
-            EnsureDeviceHooks(d);
-
-        g_origWorldFinalize(worldFrame);
-
-        ev::WorldRenderEndArgs a{ gx::RawDevice() };
-        ev::Emit<ev::Event::OnWorldRenderEnd>(a);
+        if (auto* device = static_cast<IDirect3DDevice9*>(gx::RawDevice())) wxl::client::frame::EnsureDeviceHooks(device);
+        g_origRenderWorld(worldFrame);
+        const ev::WorldRenderEndArgs args{ gx::RawDevice() };
+        ev::Emit<ev::Event::OnWorldRenderEnd>(args);
     }
 
-    /**
-     * @brief Replaces one vtable entry with a hook, returning the original through origOut.
-     * @param vtbl     vtable base.
-     * @param idx      entry index to swap.
-     * @param hook     replacement function pointer.
-     * @param origOut  receives the original entry.
-     */
-    template <class Fn>
-    void SwapVtbl(void** vtbl, unsigned idx, Fn* hook, Fn** origOut)
+    bool InstallRender()
     {
-        wxl::mem::SwapPointer(&vtbl[idx], reinterpret_cast<void*>(hook),
-                              reinterpret_cast<void**>(origOut));
-    }
-
-    /**
-     * @brief Detours IDirect3DDevice9::Reset (a resolution / window resize). D3D9 requires every
-     *        D3DPOOL_DEFAULT resource released before a Reset or it fails (D3DERR_INVALIDCALL) and the device
-     *        is lost -- the resize "crash". Fires OnDeviceLost so subscribers retire their GPU work and free
-     *        DEFAULT-pool resources, releases the engine's own tracked render targets, runs the native Reset,
-     *        then fires OnDeviceReset on success so subscribers recreate.
-     * @param dev     the D3D9 device being reset.
-     * @param params  the present parameters the device resets with (new size / window mode).
-     * @return the native Reset result.
-     */
-    long __stdcall hkReset(void* dev, D3DPRESENT_PARAMETERS* params)
-    {
-        static unsigned resetLog = 0;
-        const bool logThis = resetLog < 16;
-        if (logThis)
-        {
-            ++resetLog;
-            WLOG_INFO("render: Reset begin %ux%u windowed=%u",
-                      params ? params->BackBufferWidth : 0,
-                      params ? params->BackBufferHeight : 0,
-                      params ? static_cast<unsigned>(params->Windowed) : 0);
-        }
-
-        ev::DeviceResetArgs a{ dev, params };
-        // Subscribers using engine-owned color/depth surfaces must retire their GPU work and release their
-        // DEFAULT-pool resources before the native Reset, or the Reset fails and the device is lost.
-        ev::Emit<ev::Event::OnDeviceLost>(a);
-        gx::ReleaseResetResources();  // free any tracked engine render targets (DEFAULT pool)
-
-        const long r = g_origReset(dev, params);
-        if (SUCCEEDED(r))
-        {
-            ev::Emit<ev::Event::OnDeviceReset>(a);
-            if (logThis) WLOG_INFO("render: Reset ok");
-        }
-        else
-        {
-            static unsigned logged = 0;
-            if (logged < 8)
-            {
-                ++logged;
-                WLOG_WARN("render: Reset failed hr=0x%08lX", static_cast<unsigned long>(r));
-            }
-        }
-        return r;
-    }
-
-    /**
-     * @brief Installs the render vtable hooks on the live device. Each device instance may carry its own
-     *        vtable, so on a device recreate the swaps are gone; this re-applies them on the current device.
-     *        The surviving world-render function-entry hook calls this each frame, so OnEndScene / OnFrame /
-     *        OnM2BatchDraw keep firing after a graphics restart. Guarded against a shared vtable: if it already
-     *        carries our hooks, re-swapping would capture our own hook as the "original" and recurse, so only
-     *        the device pointer is updated.
-     * @param dev  the live D3D9 device.
-     */
-    void EnsureDeviceHooks(IDirect3DDevice9* dev)
-    {
-        if (!dev || g_hookedDevice == dev) return;
-        void** vtbl = *reinterpret_cast<void***>(dev);
-        if (vtbl[off::vt::kPresent] != reinterpret_cast<void*>(&hkPresent))
-        {
-            SwapVtbl(vtbl, off::vt::kEndScene,             &hkEndScene, &g_origEndScene);
-            SwapVtbl(vtbl, off::vt::kPresent,              &hkPresent, &g_origPresent);
-            SwapVtbl(vtbl, off::vt::kReset,                &hkReset, &g_origReset);
-            WLOG_INFO("render: device hooks installed (dev=%p)", (void*)dev);
-        }
-        g_hookedDevice = dev;
-    }
-
-    /**
-     * @brief Installs the render detours: device vtable swaps plus the world-boundary / liquid
-     *        function-entry hooks. Detours are enabled by the caller's batch EnableAll() afterwards.
-     * @return true; a missing device only defers the vtable swaps to the first world finalize.
-     */
-    bool Install()
-    {
-        if (void* dev = gx::RawDevice())
-            EnsureDeviceHooks(static_cast<IDirect3DDevice9*>(dev));
-        else
-            WLOG_WARN("render: device not up, vtable hooks deferred to first world finalize");
-
-        wxl::runtime::hookpoints::Attach("Gx.WorldRenderFinalize",
-                           &hkWorldFinalize, &g_origWorldFinalize);
-        wxl::runtime::hookpoints::Attach("Gx.WorldOnRender",
-                           &hkWorldScene, &g_origWorldScene);
-        wxl::runtime::hookpoints::Attach("Gx.LiquidRenderPass",
-                           &hkLiquidRender, &g_origLiquidRender);
-        wxl::runtime::hookpoints::Attach("Gx.ScenePresent",
-                           &hkScenePresent, &g_origScenePresent);
-
-        WLOG_INFO("render: hooks installed (EndScene, Present, Reset, WorldFinalize, WorldScenePass, LiquidRenderPass, ScenePresent)");
+        wxl::client::frame::Install();
+        wxl::runtime::hookpoints::Attach("CGWorldFrame::RenderWorld", &RenderWorldDetour, &g_origRenderWorld);
+        wxl::runtime::hookpoints::Attach("CGWorldFrame::OnWorldRender", &WorldSceneDetour, &g_origWorldScene);
+        wxl::runtime::hookpoints::Attach("Liquid::CRenderer::Flush", &LiquidRenderDetour, &g_origLiquidRender);
+        WLOG_INFO("render: hooks installed (EndScene, Present, Reset, WorldFinalize, WorldScenePass, LiquidRenderPass, "
+                  "ScenePresent)");
         return true;
     }
 }
 
-WXL_REGISTER_FEATURE("render", true, Install)
+WXL_REGISTER_FEATURE("render", true, InstallRender)

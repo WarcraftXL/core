@@ -1,89 +1,43 @@
-// Leveled logging engine shared by every WarcraftXL binary (DLL, proxy, patcher).
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The leveled log of each binary (the DLL and the patcher each have their own).
 
 #pragma once
 
-#include <cstdarg>
 #include <cstdint>
 
-/**
- * @brief Severity-leveled logging with a compile-time floor and a runtime threshold.
- *
- * Each binary owns its own instance of this engine (static per module), so the DLL, the d3d9
- * proxy, and the patcher naturally write to separate sinks. A call below the runtime
- * threshold costs one relaxed atomic load - no formatting, no lock, no timestamp.
- *
- * Runtime threshold: WXL_LOG_LEVEL env var (trace|debug|info|warn|error|off, or 0-5); defaults
- * to Info. Compile-time floor: WXL_LOG_COMPILE_MIN (numeric Level value); Release strips Trace,
- * Debug builds keep everything. Flushing is by severity (Warn and above), plus every 64 buffered
- * lines, plus WXL_LOG_FLUSH=1 to flush every line.
- */
+/// Runtime threshold: WXL_LOG_LEVEL (trace|debug|info|warn|error|off, or 0-5), Info by default; a
+/// line below it costs one atomic load. Every line is flushed as it is written, so a crash loses none;
+/// WXL_LOG_FLUSH=0 flushes Warn and above at once and the rest every 64 lines.
 namespace wxl::log
 {
     enum class Level : uint8_t
     {
-        Trace = 0, // per-item spam useful only when chasing one specific bug
-        Debug = 1, // per-event diagnostics (per-model, per-open); off by default
-        Info  = 2, // startup summaries, one-shot confirmations, periodic profiles
-        Warn  = 3, // unexpected but survivable; flushed immediately
-        Error = 4, // broken functionality; flushed immediately
-        Off   = 5, // threshold-only value: disables all output
+        Trace = 0, ///< per item, for one bug hunt
+        Debug = 1, ///< per event (per model, per open)
+        Info  = 2, ///< startup summaries, one-shot confirmations
+        Warn  = 3, ///< unexpected but survivable
+        Error = 4, ///< something does not work
+        Off   = 5, ///< a threshold only: nothing is written
     };
 
-    /**
-     * @brief Opens the file sink. Idempotent; creates the parent directory if missing.
-     * @param path  filesystem path of the log file (truncated: one file per session).
-     */
+    /// Opens the file sink (truncated: one file per session), once.
     void Open(const char* path);
 
-    /**
-     * @brief Enables the console sink (for CLI tools): Warn+ to stderr, below to stdout.
-     * @param prefix  optional tag prepended to every console line (e.g. "[WarcraftXL] "), may be null.
-     */
+    /// Writes to the console too (command-line tools): Warn and above to stderr, the rest to stdout.
     void EnableConsole(const char* prefix);
 
-    /** @brief Sets the runtime threshold. Overrides the WXL_LOG_LEVEL default. */
-    void SetMinLevel(Level level);
-
-    /** @brief Returns the current runtime threshold. */
-    Level MinLevel();
-
-    /**
-     * @brief Cheap gate: true when `level` would be written.
-     *
-     * Call sites use this (via the WLOG_* macros) to skip argument formatting entirely for
-     * filtered lines.
-     */
+    /// Whether a line at `level` would be written; the WLOG_* macros format nothing otherwise.
     bool Enabled(Level level);
 
-    /** @brief Formats and writes one line at `level`. Thread-safe. */
+    /// One line; thread-safe.
     void Write(Level level, const char* fmt, ...);
 
-    /** @brief va_list variant of Write. */
-    void WriteV(Level level, const char* fmt, va_list args);
-
-    /** @brief Flushes buffered output without closing the file. */
-    void Flush();
-
-    /** @brief Flushes and closes the file sink. */
-    void Close();
+    /// Writes `last` as an Info line, flushes and closes the file sink (process exit). Skipped when a
+    /// thread ended while holding the log, so it never blocks the exit.
+    void Close(const char* last);
 }
 
-// Compile-time floor: levels below it compile to nothing (arguments never evaluated).
-// Release strips Trace; Debug builds keep everything. Override with -DWXL_LOG_COMPILE_MIN=N.
+// Levels below the compile-time floor compile to nothing: Release strips Trace.
 #ifndef WXL_LOG_COMPILE_MIN
 #  ifdef NDEBUG
 #    define WXL_LOG_COMPILE_MIN 1
@@ -110,3 +64,15 @@ namespace wxl::log
 #define WLOG_INFO(...)  WXL_LOG_AT(::wxl::log::Level::Info,  __VA_ARGS__)
 #define WLOG_WARN(...)  WXL_LOG_AT(::wxl::log::Level::Warn,  __VA_ARGS__)
 #define WLOG_ERROR(...) WXL_LOG_AT(::wxl::log::Level::Error, __VA_ARGS__)
+
+/// An info line the first time this call site runs.
+#define WLOG_INFO_ONCE(...)                                                                        \
+    do                                                                                             \
+    {                                                                                              \
+        static bool wxl_logged = false;                                                            \
+        if (!wxl_logged)                                                                           \
+        {                                                                                          \
+            wxl_logged = true;                                                                     \
+            WLOG_INFO(__VA_ARGS__);                                                                \
+        }                                                                                          \
+    } while (0)

@@ -1,165 +1,154 @@
-// Settings sets reachable from Lua by name: the WXL_Settings_* script functions (wxl/LuaApi.h).
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-//
-// None of these functions raises: a bad set, key or value answers nil or false, so an options panel
-// written against them fails softly whatever it is handed.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// None of these functions raises: a bad set, key or value answers nil or false.
 
 #include "engine/script/LuaSettings.hpp"
 
-#include "engine/script/LuaRegistry.hpp"
-
 #include "common/Log.hpp"
+#include "engine/script/LuaRegistry.hpp"
 #include "wxl/game/Script.hpp"
+#include "wxl/offsets/free/lua.hpp"
 
 #include <cstdio>
 #include <cstring>
 
 namespace
 {
-    namespace gs = wxl::game::script;
+    namespace gs  = wxl::game::script;
+    namespace off = wxl::offsets;
+
+    constexpr int    kTypeBoolean = 1;
+    constexpr int    kTypeNumber  = 3;
+    constexpr int    kTypeString  = 4;
+    constexpr size_t kMaxKey      = 64;
+    constexpr size_t kMaxText     = 128;
 
     constexpr int kMaxSets = 32;
     const WXL_SettingsSet* g_sets[kMaxSets] = {};
     int g_setCount = 0;
 
     /// The set the first argument names, or null.
-    const WXL_SettingsSet* SetArg(void* L)
+    const WXL_SettingsSet* SetArg(void* state)
     {
-        if (gs::ArgCount(L) < 1 || gs::Type(L, 1) != 4) return nullptr;
-        const char* name = gs::ToString(L, 1);
+        if (gs::ArgCount(state) < 1 || gs::Type(state, 1) != kTypeString) return nullptr;
+        const char* name = gs::ToString(state, 1);
         if (!name) return nullptr;
         for (int i = 0; i < g_setCount; ++i)
             if (std::strcmp(g_sets[i]->name, name) == 0) return g_sets[i];
         return nullptr;
     }
 
-    void PushValue(void* L, const WXL_SettingValue& v)
+    void PushValue(void* state, const WXL_SettingValue& v)
     {
         switch (v.type)
         {
-            case WXL_SETTING_BOOLEAN: gs::PushBoolean(L, v.boolean != 0); break;
-            case WXL_SETTING_NUMBER:  gs::PushNumber(L, v.number); break;
-            case WXL_SETTING_STRING:  gs::PushString(L, v.string ? v.string : ""); break;
-            default:                  gs::PushNil(L); break;
+            case WXL_SETTING_BOOLEAN: gs::PushBoolean(state, v.boolean != 0); break;
+            case WXL_SETTING_NUMBER:  gs::PushNumber(state, v.number); break;
+            case WXL_SETTING_STRING:  gs::PushString(state, v.string ? v.string : ""); break;
+            default:                  gs::PushNil(state); break;
         }
     }
 
-    namespace lua = wxl::offsets::engine::lua;
-
-    void NewTable(void* L, int arrayCount, int recordCount)
+    void NewTable(void* state, int arrayCount, int recordCount)
     {
-        wxl::game::Native<lua::LuaCreateTableFn>(lua::kLuaCreateTable)(L, arrayCount, recordCount);
+        wxl::game::Native<off::lua_createtableFn>(off::lua_createtable)(state, arrayCount, recordCount);
     }
 
     bool Available(const WXL_SettingsSet* s) { return !s->IsAvailable || s->IsAvailable(s->user) != 0; }
 
-    int __cdecl LuaList(void* L)
+    int __cdecl LuaList(void* state)
     {
-        NewTable(L, g_setCount, 0);
+        NewTable(state, g_setCount, 0);
         for (int i = 0; i < g_setCount; ++i)
         {
-            gs::PushNumber(L, i + 1);
-            gs::PushString(L, g_sets[i]->name);
-            gs::RawSet(L, -3);
+            gs::PushNumber(state, i + 1);
+            gs::PushString(state, g_sets[i]->name);
+            gs::RawSet(state, -3);
         }
         return 1;
     }
 
-    int __cdecl LuaIsAvailable(void* L)
+    int __cdecl LuaIsAvailable(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
-        gs::PushBoolean(L, s && Available(s));
+        const WXL_SettingsSet* s = SetArg(state);
+        gs::PushBoolean(state, s && Available(s));
         return 1;
     }
 
-    int __cdecl LuaGet(void* L)
+    int __cdecl LuaGet(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
-        const char* key = s && gs::ArgCount(L) >= 2 && gs::Type(L, 2) == 4 ? gs::ToString(L, 2) : nullptr;
+        const WXL_SettingsSet* s = SetArg(state);
+        const char* key = s && gs::ArgCount(state) >= 2 && gs::Type(state, 2) == kTypeString ? gs::ToString(state, 2) : nullptr;
         WXL_SettingValue v = {};
-        if (key && s->Get(s->user, key, &v)) PushValue(L, v);
-        else gs::PushNil(L);
+        if (key && s->Get(s->user, key, &v)) PushValue(state, v);
+        else gs::PushNil(state);
         return 1;
     }
 
-    int __cdecl LuaSet(void* L)
+    int __cdecl LuaSet(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
+        const WXL_SettingsSet* s = SetArg(state);
         bool ok = false;
-        if (s && s->Set && gs::ArgCount(L) >= 3 && gs::Type(L, 2) == 4)
+        if (s && s->Set && gs::ArgCount(state) >= 3 && gs::Type(state, 2) == kTypeString)
         {
-            char key[64] = {};
-            std::snprintf(key, sizeof key, "%s", gs::ToString(L, 2));
+            char key[kMaxKey] = {};
+            std::snprintf(key, sizeof key, "%s", gs::ToString(state, 2));
             WXL_SettingValue v = {};
-            char text[128] = {};
-            switch (gs::Type(L, 3))
+            char text[kMaxText] = {};
+            switch (gs::Type(state, 3))
             {
-                case 1: v.type = WXL_SETTING_BOOLEAN; v.boolean = gs::ToBoolean(L, 3) ? 1 : 0; break;
-                case 3: v.type = WXL_SETTING_NUMBER;  v.number = gs::ToNumber(L, 3); break;
-                case 4:
+                case kTypeBoolean: v.type = WXL_SETTING_BOOLEAN; v.boolean = gs::ToBoolean(state, 3) ? 1 : 0; break;
+                case kTypeNumber: v.type = WXL_SETTING_NUMBER;  v.number = gs::ToNumber(state, 3); break;
+                case kTypeString:
                     v.type = WXL_SETTING_STRING;
-                    std::snprintf(text, sizeof text, "%s", gs::ToString(L, 3));
+                    std::snprintf(text, sizeof text, "%s", gs::ToString(state, 3));
                     v.string = text;
                     break;
                 default: v.type = WXL_SETTING_NIL; break;
             }
             ok = v.type != WXL_SETTING_NIL && s->Set(s->user, key, &v) != 0;
         }
-        gs::PushBoolean(L, ok);
+        gs::PushBoolean(state, ok);
         return 1;
     }
 
-    int __cdecl LuaGetAll(void* L)
+    int __cdecl LuaGetAll(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
+        const WXL_SettingsSet* s = SetArg(state);
         if (!s)
         {
-            gs::PushNil(L);
+            gs::PushNil(state);
             return 1;
         }
-        NewTable(L, 0, static_cast<int>(s->keyCount));
+        NewTable(state, 0, static_cast<int>(s->keyCount));
         for (uint32_t i = 0; i < s->keyCount; ++i)
         {
             WXL_SettingValue v = {};
             if (!s->keys[i] || !s->Get(s->user, s->keys[i], &v)) continue;
-            gs::PushString(L, s->keys[i]);
-            PushValue(L, v);
-            gs::RawSet(L, -3);
+            gs::PushString(state, s->keys[i]);
+            PushValue(state, v);
+            gs::RawSet(state, -3);
         }
         return 1;
     }
 
-    int __cdecl LuaApplyPreset(void* L)
+    int __cdecl LuaApplyPreset(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
+        const WXL_SettingsSet* s = SetArg(state);
         bool ok = false;
-        if (s && s->ApplyPreset && gs::ArgCount(L) >= 2 && gs::Type(L, 2) == 4)
+        if (s && s->ApplyPreset && gs::ArgCount(state) >= 2 && gs::Type(state, 2) == kTypeString)
         {
-            char name[64] = {};
-            std::snprintf(name, sizeof name, "%s", gs::ToString(L, 2));
+            char name[kMaxKey] = {};
+            std::snprintf(name, sizeof name, "%s", gs::ToString(state, 2));
             ok = s->ApplyPreset(s->user, name) != 0;
         }
-        gs::PushBoolean(L, ok);
+        gs::PushBoolean(state, ok);
         return 1;
     }
 
-    int __cdecl LuaSave(void* L)
+    int __cdecl LuaSave(void* state)
     {
-        const WXL_SettingsSet* s = SetArg(L);
-        gs::PushBoolean(L, s && s->Save && s->Save(s->user) != 0);
+        const WXL_SettingsSet* s = SetArg(state);
+        gs::PushBoolean(state, s && s->Save && s->Save(s->user) != 0);
         return 1;
     }
 }

@@ -1,110 +1,38 @@
-// Named hooking over MinHook: install by name + address, enable in one batch.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Detour chains over MinHook: several parties on one function, each calling the next.
 
 #pragma once
 
 #include <cstdint>
 
-/// Named hooking over MinHook: a feature installs a hook by name and address; the trampoline is
-/// returned through the original out-pointer.
-///
-/// Multiple parties may detour one address. MinHook holds a single detour slot per target, so they
-/// are chained instead: each party's original points at the next party's detour, and the last one's
-/// at the trampoline. Not calling original suppresses the parties behind and the engine function.
-///
-/// MinHook is given the head only, and only at Enable time, so a chain's order is fixed before the
-/// address is patched.
+/// The detours on one address, chained (each one's original is the next detour) behind a `jmp [head]` thunk,
+/// so a link is added or taken out with one store; each link records its owner for DropOwner.
 namespace wxl::hook
 {
-    /// Chain position: lower runs first, closest to the caller. Equal values keep install order.
+    /// Chain position: lower runs first, closer to the caller. Equal values keep install order.
     constexpr int kDefaultPriority = 0;
 
-    /**
-     * @brief Initialises the hooking engine once at startup.
-     * @return true if initialisation succeeded.
-     */
     bool Init();
 
-    /**
-     * @brief Registers one detour in its target's chain.
-     *
-     * The address is patched at Enable time, so a bad one is reported there rather than here.
-     * @param name      label used for logging.
-     * @param target    engine function address to detour.
-     * @param detour    replacement function.
-     * @param original  receives the next link in the chain, ending at the engine function.
-     * @param priority  chain position; see kDefaultPriority.
-     * @return true if the detour was registered.
-     */
-    bool Install(const char* name, void* target, void* detour, void** original,
-                 int priority = kDefaultPriority);
+    /// Registers a detour in its target's chain; `*original` is kept pointing at the next link. The
+    /// address is patched at EnableAll, so a bad one is reported there. A resident link stays when its owner is
+    /// dropped, and the module holding its detour is pinned in the process.
+    bool Install(const char* name, void* target, void* detour, void** original, int priority = kDefaultPriority,
+                 bool resident = false);
 
-    /**
-     * @brief Registers one detour, taking the target as an integer address.
-     * @param name      label used for logging.
-     * @param target    engine function address to detour.
-     * @param detour    replacement function.
-     * @param original  receives the next link in the chain, ending at the engine function.
-     * @param priority  chain position; see kDefaultPriority.
-     * @return true if the detour was registered.
-     */
     inline bool Install(const char* name, uintptr_t target, void* detour, void** original,
-                        int priority = kDefaultPriority)
+                        int priority = kDefaultPriority, bool resident = false)
     {
-        return Install(name, reinterpret_cast<void*>(target), detour, original, priority);
+        return Install(name, reinterpret_cast<void*>(target), detour, original, priority, resident);
     }
 
-    /**
-     * @brief Typed detour install: the detour and the trampoline out-pointer must share ONE
-     *        function type, so wiring a hook to the wrong original no longer compiles.
-     *
-     * Replaces the call-site boilerplate
-     *   Install(name, addr, reinterpret_cast<void*>(&hk), reinterpret_cast<void**>(&orig))
-     * with
-     *   Install(name, addr, &hk, &orig)
-     * @param name      label used for logging.
-     * @param target    engine function address to detour.
-     * @param detour    replacement function (deducing the shared function type).
-     * @param original  receives the next link in the chain; must point to a pointer of the same type.
-     * @param priority  chain position; see kDefaultPriority.
-     * @return true if the detour was registered.
-     */
-    template <class Fn>
-    bool Install(const char* name, uintptr_t target, Fn* detour, Fn** original,
-                 int priority = kDefaultPriority)
-    {
-        return Install(name, reinterpret_cast<void*>(target),
-                       reinterpret_cast<void*>(detour), reinterpret_cast<void**>(original),
-                       priority);
-    }
-
-    /** @brief Patches and enables one target's chain immediately. */
-    bool Enable(void* target);
-
-    inline bool Enable(uintptr_t target)
-    {
-        return Enable(reinterpret_cast<void*>(target));
-    }
-
-    /**
-     * @brief Patches every chain registered since the last call and enables the batch.
-     *
-     * Called once per install phase, so a chain reaches MinHook only once its parties for that phase
-     * have registered.
-     * @return true if every pending chain was patched and the batch enabled.
-     */
+    /// Patches every chain registered since the last call and enables them all.
     bool EnableAll();
+
+    /// Takes an extension's links out of their chains, its resident ones excepted; the others and the
+    /// function are called as if they had never been there. Answers how many.
+    uint32_t DropOwner(uint32_t owner);
+
+    /// How many resident links an extension holds.
+    uint32_t Resident(uint32_t owner);
 }

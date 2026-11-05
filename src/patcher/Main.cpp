@@ -1,20 +1,6 @@
-// wxl-patcher: add the WarcraftXL import to the client PE and run every registered PatchScript.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// wxl-patcher [Wow.exe]: adds the WarcraftXL.dll import and the large-address flag, with a .orig backup.
 
-#include "patcher/PatchScript.hpp"
 #include "patcher/PeImage.hpp"
 
 #include "common/Log.hpp"
@@ -28,15 +14,11 @@
 
 namespace
 {
-    constexpr char kDllName[]  = "WarcraftXL.dll";
-    constexpr char kFuncName[] = "WarcraftXL";
+    constexpr char kDllName[]    = "WarcraftXL.dll";
+    constexpr char kFuncName[]   = "WarcraftXL";
     constexpr char kTagSection[] = ".wxl";
 
-    /**
-     * @brief Reads an entire file into a byte buffer.
-     * @param path  file path to read.
-     * @return File contents, or an empty buffer on failure.
-     */
+    /// The whole file; empty on failure.
     std::vector<uint8_t> ReadAll(const char* path)
     {
         std::vector<uint8_t> data;
@@ -51,14 +33,7 @@ namespace
         return data;
     }
 
-    /**
-     * @brief Writes a byte buffer to a file atomically: the bytes go to a sibling temp file,
-     *        flushed to disk, then swapped into place. The target is either fully replaced or
-     *        untouched - a crash or short write can never leave it truncated.
-     * @param path  file path to write.
-     * @param data  bytes to write.
-     * @return True on success, false on any I/O failure (the temp file is removed).
-     */
+    /// Written to a temporary file, flushed, then moved over: the target is replaced whole or not at all.
     bool WriteAll(const char* path, const std::vector<uint8_t>& data)
     {
         const std::string tmp = std::string(path) + ".wxltmp";
@@ -75,17 +50,10 @@ namespace
     }
 }
 
-/**
- * @brief Patches the target PE: sets large-address-aware, runs every registered PatchScript, and adds the
- *        WarcraftXL import, writing a backup of the original.
- * @param argc  argument count.
- * @param argv  argument values; argv[1] is the target path, defaulting to "Wow.exe".
- * @return 0 on success, 1 on failure.
- */
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    wxl::log::EnableConsole("[WarcraftXL] "); // progress to stdout, failures to stderr
+    wxl::log::EnableConsole("[WarcraftXL] ");
     const char* target = argc > 1 ? argv[1] : "Wow.exe";
     WLOG_INFO("patcher start, target='%s'", target);
 
@@ -93,9 +61,9 @@ int main(int argc, char** argv)
     if (file.empty()) { WLOG_ERROR("cannot read '%s'", target); return 1; }
 
     wxl::patcher::PeImage pe(file);
-    if (!pe.valid()) { WLOG_ERROR("'%s' is not a 32-bit PE", target); return 1; }
+    if (!pe.Valid()) { WLOG_ERROR("'%s' is not a 32-bit PE", target); return 1; }
 
-    // Always ensure 4 GB address space, even when an older patcher already injected the .wxl section.
+    // The flag is set even on a file an older patcher already gave the import.
     pe.SetLargeAddressAware();
     if (pe.HasSection(kTagSection))
     {
@@ -104,19 +72,10 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // Apply every registered PatchScript (byte edits), then the import (structural).
-    for (wxl::patcher::PatchScript* const s : wxl::patcher::registry::Scripts())
-    {
-        if (!s->Apply(pe))
-        { WLOG_ERROR("patch-script '%s' FAILED", s->name()); return 1; }
-        WLOG_INFO("applied patch-script '%s'", s->name());
-    }
-
     if (!pe.AddImport(kDllName, kFuncName, kTagSection))
     { WLOG_ERROR("import injection failed"); return 1; }
 
-    // The backup is the only recovery path if the patched image misbehaves: refuse to touch the
-    // target until it is confirmed on disk.
+    // The backup is the only way back: nothing is written before it is on disk.
     std::string backup = std::string(target) + ".orig";
     if (GetFileAttributesA(backup.c_str()) == INVALID_FILE_ATTRIBUTES
         && !CopyFileA(target, backup.c_str(), TRUE))
@@ -128,7 +87,7 @@ int main(int argc, char** argv)
 
     if (!WriteAll(target, file)) { WLOG_ERROR("cannot write '%s'", target); return 1; }
 
-    WLOG_INFO("patched '%s' (+import %s!%s, %zu patch-scripts, backup '%s')",
-              target, kDllName, kFuncName, wxl::patcher::registry::Scripts().size(), backup.c_str());
+    WLOG_INFO("patched '%s' (+import %s!%s, large-address aware, backup '%s')",
+              target, kDllName, kFuncName, backup.c_str());
     return 0;
 }

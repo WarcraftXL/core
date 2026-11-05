@@ -1,22 +1,5 @@
-// Named profiles over every registered settings set: WTF\WarcraftXL\profiles\<name>.cfg.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-//
-// The file: '#' comments, a [set] line per set, then key=value lines -- true / false for a boolean,
-// a number, or text. Every set registered is written, whoever registered it, so a profile carries
-// the foliage, its look, the post-process stack and whatever comes next without this file knowing.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// A profile file: '#' comments, a [set] line per settings set, then key=value lines (true/false, a number, text).
 
 #include "engine/script/Profiles.hpp"
 
@@ -24,6 +7,8 @@
 
 #include "common/Config.hpp"
 #include "common/Log.hpp"
+#include "runtime/extensions/Services.hpp"
+#include "wxl/abi/Profiles.h"
 
 #include <windows.h>
 
@@ -35,7 +20,10 @@
 
 namespace
 {
-    constexpr const char* kDir = "WTF\\WarcraftXL\\profiles";
+    constexpr const char* kDir           = "WTF\\WarcraftXL\\profiles";
+    constexpr size_t      kMaxNameLength = 48;
+    constexpr size_t      kMaxLine       = 512;
+    constexpr size_t      kExtensionLength = 4; ///< ".cfg"
 
     std::string g_current;
 
@@ -93,7 +81,7 @@ namespace wxl::script::profiles
     {
         if (!name || !*name || name[0] == '.') return false;
         const size_t n = std::strlen(name);
-        if (n > 48) return false;
+        if (n > kMaxNameLength) return false;
         for (size_t i = 0; i < n; ++i)
         {
             const unsigned char c = static_cast<unsigned char>(name[i]);
@@ -141,7 +129,7 @@ namespace wxl::script::profiles
         if (fopen_s(&f, PathOf(name).c_str(), "rb") != 0 || !f) return false;
         const WXL_SettingsSet* set = nullptr;
         uint32_t applied = 0, skipped = 0;
-        char line[512];
+        char line[kMaxLine];
         while (std::fgets(line, sizeof line, f))
         {
             std::string s(line);
@@ -192,7 +180,7 @@ namespace wxl::script::profiles
         {
             if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             std::string n(data.cFileName);
-            if (n.size() > 4) n.resize(n.size() - 4);
+            if (n.size() > kExtensionLength) n.resize(n.size() - kExtensionLength);
             if (ValidName(n.c_str())) out.push_back(n);
         } while (FindNextFileA(h, &data));
         FindClose(h);
@@ -207,8 +195,50 @@ namespace wxl::script::profiles
         static bool done = false;
         if (done) return;
         done = true;
-        char name[64] = {};
+        char name[kMaxNameLength + 1] = {};
         if (!wxl::config::Raw("WXL_PROFILE", name, sizeof name)) return;
         if (!Load(name)) WLOG_WARN("profiles: WXL_PROFILE=%s could not be loaded", name);
+    }
+
+    namespace
+    {
+        bool Exists(const char* name)
+        {
+            return ValidName(name) && GetFileAttributesA(PathOf(name).c_str()) != INVALID_FILE_ATTRIBUTES;
+        }
+
+        int __cdecl ApiValidName(const char* name) { return ValidName(name) ? WXL_OK : WXL_E_INVALID_ARGUMENT; }
+        int __cdecl ApiSave(const char* name) { return Save(name) ? WXL_OK : WXL_E_INVALID_ARGUMENT; }
+
+        int __cdecl ApiLoad(const char* name)
+        {
+            if (!ValidName(name)) return WXL_E_INVALID_ARGUMENT;
+            if (!Exists(name)) return WXL_E_NOT_FOUND;
+            return Load(name) ? WXL_OK : WXL_E_NOT_FOUND;
+        }
+
+        int __cdecl ApiDelete(const char* name)
+        {
+            if (!ValidName(name)) return WXL_E_INVALID_ARGUMENT;
+            return Delete(name) ? WXL_OK : WXL_E_NOT_FOUND;
+        }
+
+        int __cdecl ApiList(WXL_ProfileVisitFn fn, void* user)
+        {
+            if (!fn) return WXL_E_INVALID_ARGUMENT;
+            for (const std::string& name : List()) fn(user, name.c_str());
+            return WXL_OK;
+        }
+
+        const char* __cdecl ApiCurrent() { return Current(); }
+
+        const WXL_ProfilesApi g_api = { sizeof(WXL_ProfilesApi), WXL_PROFILES_API_VERSION, &ApiValidName, &ApiSave,
+                                        &ApiLoad, &ApiDelete, &ApiList, &ApiCurrent };
+    }
+
+    void Publish()
+    {
+        wxl::runtime::extensions::PublishInterface(WXL_PROFILES_API_NAME, WXL_PROFILES_API_VERSION,
+                                                   const_cast<WXL_ProfilesApi*>(&g_api));
     }
 }

@@ -1,51 +1,29 @@
-// Doodad-placement spawn detour: publish OnDoodadSpawn with the placement the native call built.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The doodad seam: OnDoodadSpawn with each doodad the client places from a map tile.
 
-#include "engine/hook/Hook.hpp"
-#include "runtime/HookPoints.hpp"
-#include "engine/hook/Registry.hpp"
 #include "engine/events/Event.hpp"
-
-#include "wxl/offsets/game/Doodad.hpp"
+#include "engine/hook/Registry.hpp"
+#include "runtime/HookPoints.hpp"
+#include "wxl/offsets/CMap.hpp"
 
 namespace
 {
-    namespace ev = wxl::events;
-    namespace dd = wxl::offsets::game::doodad;
+    namespace ev  = wxl::events;
+    namespace off = wxl::offsets;
 
-    dd::SpawnFromMDDFFn g_origDoodadSpawn = nullptr;
+    off::CMap::CreateDoodadDef_7BECD0Fn g_origDoodadSpawn = nullptr;
 
-    /**
-     * @brief Detours doodad spawn, emitting OnDoodadSpawn with the placement the native call built.
-     * @param modelName   doodad model name.
-     * @param mddf        placement record.
-     * @param tileOrigin  tile origin for the placement.
-     * @return the spawned doodad.
-     */
-    void* __cdecl hkDoodadSpawn(const char* modelName, void* mddf, void* tileOrigin)
+    void* __cdecl DoodadSpawnDetour(const char* modelName, void* placement, const void* tileOrigin)
     {
-        void* doodad = g_origDoodadSpawn(modelName, mddf, tileOrigin);
-        ev::DoodadSpawnArgs a{ doodad };
-        ev::Emit<ev::Event::OnDoodadSpawn>(a);
+        void* doodad = g_origDoodadSpawn(modelName, placement, tileOrigin);
+        const ev::DoodadSpawnArgs args{ doodad };
+        ev::Emit<ev::Event::OnDoodadSpawn>(args);
         return doodad;
     }
 
     bool InstallDoodadSpawn()
     {
-        wxl::runtime::hookpoints::Attach("Doodad.SpawnFromMddf", &hkDoodadSpawn, &g_origDoodadSpawn);
+        wxl::runtime::hookpoints::Attach("CMap::CreateDoodadDef_7BECD0", &DoodadSpawnDetour, &g_origDoodadSpawn);
         return true;
     }
 }

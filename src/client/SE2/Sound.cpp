@@ -1,81 +1,32 @@
-// Sound detours: publish the play-sound event and log unresolved SoundKit ids for diagnosis.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
-#include "engine/hook/Hook.hpp"
-#include "runtime/HookPoints.hpp"
-#include "engine/hook/Registry.hpp"
-#include "engine/events/Event.hpp"
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The sound seam: OnSoundPlay before the client's PlaySound script function runs.
 
 #include "common/Log.hpp"
-#include "wxl/offsets/engine/Sound.hpp"
-
-#include <cstdint>
-#include <unordered_set>
+#include "engine/events/Event.hpp"
+#include "engine/hook/Registry.hpp"
+#include "runtime/HookPoints.hpp"
+#include "wxl/offsets/free/Script.hpp"
 
 namespace
 {
     namespace ev  = wxl::events;
-    namespace snd = wxl::offsets::engine::sound;
+    namespace off = wxl::offsets;
 
-    snd::PlaySoundFn    g_origPlaySound    = nullptr;
-    snd::PlaySoundKitFn g_origPlaySoundKit = nullptr;
+    off::Script_PlaySoundFn g_origPlaySound = nullptr;
 
-    /**
-     * @brief Detours the play-sound API, emitting OnSoundPlay before the sound starts.
-     *
-     * Fires on every UI/world sound. Logs the first fire only.
-     * @param scriptState  script state the call ran on (the sound id/name is on its stack).
-     * @return the native function result.
-     */
-    int __cdecl hkPlaySound(void* scriptState)
+    /// The sound's id or name is on the script state's stack.
+    int __cdecl PlaySoundDetour(void* scriptState)
     {
-        ev::SoundPlayArgs a{ scriptState };
-        ev::Emit<ev::Event::OnSoundPlay>(a);
+        const ev::SoundPlayArgs args{ scriptState };
+        ev::Emit<ev::Event::OnSoundPlay>(args);
 
-        static bool logged = false;
-        if (!logged) { logged = true; WLOG_INFO("sound: play hook active"); }
+        WLOG_INFO_ONCE("sound: play hook active");
         return g_origPlaySound(scriptState);
-    }
-
-    /**
-     * @brief Diagnostic-only: logs every SoundKitID play attempt and its result code.
-     *
-     * Disambiguates a data resolution gap (returns 5/6, no file I/O ever attempted) from a
-     * cache-served hit (returns success with no corresponding Storage_FileOpen) for the in-world
-     * interface/spell/creature sound investigation.
-     */
-    int __cdecl hkPlaySoundKit(int soundKitId, int p2, int p3, int* p4, int p5,
-                               uint32_t* p6, uint32_t p7, int p8)
-    {
-        int r = g_origPlaySoundKit(soundKitId, p2, p3, p4, p5, p6, p7, p8);
-        // Each failing kit id is logged once; the raw stream repeats the same missing ids dozens of
-        // times per minute and the per-line file write is itself a frame cost.
-        if (r != 0)
-        {
-            static std::unordered_set<int> loggedKits;
-            if (loggedKits.insert(soundKitId).second)
-                WLOG_INFO("audio-diag: PlaySoundKit id=%d -> %d", soundKitId, r);
-        }
-        return r;
     }
 
     bool InstallSound()
     {
-        wxl::runtime::hookpoints::Attach("Sound.PlaySound", &hkPlaySound, &g_origPlaySound);
-        wxl::runtime::hookpoints::Attach("Sound.PlaySoundKit", &hkPlaySoundKit, &g_origPlaySoundKit);
+        wxl::runtime::hookpoints::Attach("Script_PlaySound", &PlaySoundDetour, &g_origPlaySound);
         return true;
     }
 }

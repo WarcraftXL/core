@@ -1,42 +1,24 @@
-// The registry of extension script functions, and the two seams that put them into every context.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-//
-// FrameXML_CreateFrames ("Lua.InterfaceLoad") is the last call before the client loads an interface
-// onto a fresh context -- the glue screen's and the game's, and again on every /reload -- so the
-// registered functions go in just before it runs, and every OnLoad sees them. The callback check
-// ("Lua.ValidateFunctionPointer") refuses any function outside Wow.exe with a fatal error; the detour
-// lets the registered pointers through and hands every other one to the original, so the check keeps
-// doing its job for the calls it was written for.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// FrameXML_CreateFrames runs before every interface load (glue, game, each /reload): the functions go in first.
 
 #include "engine/script/LuaRegistry.hpp"
-#include "engine/script/Profiles.hpp"
-
-#include "runtime/HookPoints.hpp"
 
 #include "common/Log.hpp"
+#include "engine/script/Profiles.hpp"
+#include "runtime/HookPoints.hpp"
 #include "wxl/game/Script.hpp"
+#include "wxl/offsets/free/F.hpp"
+#include "wxl/offsets/free/O.hpp"
 
 #include <cstring>
 
 namespace
 {
     namespace gs = wxl::game::script;
-    namespace lua  = wxl::offsets::engine::lua;
+    namespace off = wxl::offsets;
 
     constexpr int kMaxFunctions = 256;
+    constexpr int kMaxChunks    = 16;
 
     struct Entry
     {
@@ -46,8 +28,17 @@ namespace
     Entry g_entries[kMaxFunctions];
     int   g_count = 0;
 
-    lua::ValidateFunctionPointerFn g_origValidate = nullptr;
-    lua::FrameXMLCreateFramesFn    g_origLoad     = nullptr;
+    /// Script run after each interface load, once its frames exist.
+    struct Chunk
+    {
+        const char* name;
+        const char* source;
+    };
+    Chunk g_chunks[kMaxChunks];
+    int   g_chunkCount = 0;
+
+    off::OsValidateFunctionPointerFn g_origValidate = nullptr;
+    off::FrameXML_CreateFramesFn    g_origLoad     = nullptr;
     bool                           g_hooked       = false;
 
     bool Registered(uintptr_t fn)
@@ -57,31 +48,29 @@ namespace
         return false;
     }
 
-    /// The callback check: ours pass, everything else is the original's to judge.
-    void __cdecl hkValidate(uintptr_t function)
+    /// The client refuses, fatally, any callback outside Wow.exe: ours pass, every other one is the
+    /// original's to judge.
+    void __cdecl ValidateDetour(const void* function)
     {
-        if (Registered(function)) return;
+        if (Registered(reinterpret_cast<uintptr_t>(function))) return;
         g_origValidate(function);
     }
 
-    /// The interface load: the functions go into the context first.
-    int __cdecl hkLoad(const char* tocPath, const char* addOnName, void* md5Context, void* status)
+    /// WXL_PROFILE loads here: every extension has registered its settings by the first interface load.
+    int __cdecl InterfaceLoadDetour(const char* tocPath, const char* addOnName, void* md5Context, void* status)
     {
-        // Every extension has registered its settings by the first interface load: WXL_PROFILE now.
         wxl::script::profiles::LoadStartupOnce();
         if (g_count && gs::Context())
         {
             for (int i = 0; i < g_count; ++i)
                 gs::Register(g_entries[i].name, reinterpret_cast<gs::Function>(g_entries[i].fn));
-            static bool said = false;
-            if (!said)
-            {
-                said = true;
-                WLOG_INFO("lua: %d extension function(s) registered ahead of the interface load (%s)", g_count,
-                          tocPath ? tocPath : "?");
-            }
+            WLOG_INFO_ONCE("lua: %d extension function(s) registered ahead of the interface load (%s)", g_count,
+                           tocPath ? tocPath : "?");
         }
-        return g_origLoad(tocPath, addOnName, md5Context, status);
+        const int loaded = g_origLoad(tocPath, addOnName, md5Context, status);
+        if (gs::Context())
+            for (int i = 0; i < g_chunkCount; ++i) gs::Execute(g_chunks[i].source, g_chunks[i].name);
+        return loaded;
     }
 }
 
@@ -89,8 +78,8 @@ namespace wxl::script
 {
     bool InstallSeams()
     {
-        const bool validate = wxl::runtime::hookpoints::Attach("Lua.ValidateFunctionPointer", &hkValidate, &g_origValidate);
-        const bool load     = wxl::runtime::hookpoints::Attach("Lua.InterfaceLoad", &hkLoad, &g_origLoad);
+        const bool validate = wxl::runtime::hookpoints::Attach("OsValidateFunctionPointer", &ValidateDetour, &g_origValidate);
+        const bool load     = wxl::runtime::hookpoints::Attach("FrameXML_CreateFrames", &InterfaceLoadDetour, &g_origLoad);
         g_hooked = validate && load;
         if (!g_hooked)
             WLOG_WARN("lua: the script seams could not be hooked (validate %s, interface load %s)",
@@ -111,9 +100,17 @@ namespace wxl::script
             std::strcpy(e->name, name);
         }
         e->fn = fn;
-        // A context already up (a late registration) gets it now; every later load gets it again.
+        // A live context gets it now; every later load gets it again.
         if (gs::Context()) gs::Register(e->name, reinterpret_cast<gs::Function>(fn));
         WLOG_INFO("lua: %s registered", e->name);
+        return true;
+    }
+
+    bool AddChunk(const char* name, const char* source)
+    {
+        if (!g_hooked || !name || !source || g_chunkCount == kMaxChunks) return false;
+        g_chunks[g_chunkCount++] = Chunk{ name, source };
+        if (gs::Context()) gs::Execute(source, name);
         return true;
     }
 }

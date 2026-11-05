@@ -1,7 +1,5 @@
 Vendored third-party dependencies, built with the project (deps/CMakeLists.txt).
 
   minhook/   inline detour engine (BSD-2-Clause). Static library linked into WarcraftXL.dll.
-  imgui/     Dear ImGui v1.91.9b (MIT): the core plus the DX9 and Win32 backends, compiled into
-             WarcraftXL.dll for the overlay. The demo window is not vendored.
 
-Nothing else is external: the client, the patcher and the proxy link the system libraries only.
+Nothing else is external: the runtime and the patcher link the system libraries only.

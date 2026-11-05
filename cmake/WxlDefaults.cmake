@@ -1,18 +1,14 @@
-# Project-wide build settings: the language standard, the static runtime, the definitions every
-# target compiles with, and the client folder the artifacts deploy into.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Project-wide settings: C++20, the static runtime, the common definitions, the deploy folder.
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # feeds the IDE the real C++20 flags
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Static CRT: the DLLs load inside the player's Wow.exe, which has no reason to carry the toolset's
-# brand-new VC++ redistributable. A dynamic CRT turns a missing/stale redist into a loader failure at
-# process start (0xc0000142) with no log at all.
+# Static CRT: the DLL lives in the player's Wow.exe, which carries no VC++ redistributable.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-# The mingw equivalent (cross-build from Linux, cmake/toolchain/): the C++ runtime, unwinder and
-# pthread shim go in statically, so a binary depends on nothing but the system DLLs.
-# -fms-extensions turns on the MSVC keywords the client code relies on (__try/__except,
-# __declspec(uuid), __stdcall on function pointers).
+# mingw-w64: the MSVC keywords the code uses (__try, __declspec, conventions on pointers), and the C++
+# runtime linked in statically.
 if(MINGW)
     add_compile_options(-fms-extensions)
     add_link_options(-static)
@@ -20,11 +16,9 @@ endif()
 
 set(WXL_DEFS WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 
-# Every binary lands at the build root (build/<Config>/ under Visual Studio), whatever folder
-# declares it: build.ps1 and the release workflow pick them up there.
+# Every binary at the build root (build/<Config>/ under Visual Studio).
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
-# Client directory to deploy the built artifacts into. Passed by build.ps1 (-DCLIENT_PATH=...) and cached.
-set(CLIENT_PATH "" CACHE PATH "Client folder the built artifacts are copied into after each build")
+set(CLIENT_PATH "" CACHE PATH "Client folder the built binaries are copied into after each build")

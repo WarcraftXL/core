@@ -1,38 +1,25 @@
-# WarcraftXL.cfg — WarcraftXL user configuration.
+# WarcraftXL.cfg: the core's own settings. Extensions keep theirs in Extensions\<name>\<name>.ini.
 #
-# Location: next to Wow.exe (client root). WarcraftXL.dll, d3d9.dll, wxl-patcher.exe, and every
-# extension read it.
+# Location: next to Wow.exe (or one folder up).
 #
 # Format: KEY=value, one per line. '#' or ';' starts a comment. Spaces are tolerated.
-# Priority: environment variable > this file > sentinel file (.disable) > default.
+# Priority: environment variable > this file > default.
 # Booleans: 0/n/f = no, anything else = yes.
 #
-# Every key below is shown COMMENTED with its default value:
-# uncomment a line to take control of that knob.
+# Every key below is shown commented with its default value: uncomment a line to change it.
 
 # ----------------------------------------------------------------------------- Logging
-# Verbosity (trace|debug|info|warn|error|off). `debug` re-enables the per-event
-# diagnostics (model loads, served opens, ...) without recompiling.
+# Verbosity (trace|debug|info|warn|error|off). `debug` adds the per-event diagnostics.
 #WXL_LOG_LEVEL=info
-# Flush the buffer after every line (crash diagnostics; costly).
-#WXL_LOG_FLUSH=0
+# Flush after every line, so a crash loses none (0: Warn and above at once, the rest every 64 lines).
+#WXL_LOG_FLUSH=1
 # Mirror every line to OutputDebugString (default: on when a debugger is attached).
 #WXL_LOG_DEBUGSTRING=0
 
-# ----------------------------------------------------------------------------- M2 memory (client)
-# Dedicated allocator for large model buffers (VirtualAlloc arena).
-#WXL_M2_ARENA=1
-#WXL_M2_ARENA_MB=128
+# ----------------------------------------------------------------------------- Storage
+# A log line for every file a provider served or a transform reshaped.
+#WXL_STORAGE_LOGS=0
 
-# ----------------------------------------------------------------------------- Storage (client)
-# Log every client-provider claim / client-transform reshape (storage debug mode).
-# WXL_ASSET_LOGS is read as a synonym.
-#WXL_VERBOSE_ASSET_LOGS=0
-# Log the storage layer's own decisions as well.
-#WXL_CLIENT_STORAGE_LOGS=0
-
-# ----------------------------------------------------------------------------- Profilers
-# Client: asset phases + frame-hitch histogram (h25/h50/h100).
-#WXL_CLIENT_ASSET_PROFILE=1
-#WXL_CLIENT_ASSET_PROFILE_INTERVAL_SEC=30
-#WXL_CLIENT_ASSET_SLOW_MS=25
+# ----------------------------------------------------------------------------- Profiles
+# The settings profile loaded at start (WTF\WarcraftXL\profiles\<name>.cfg).
+#WXL_PROFILE=

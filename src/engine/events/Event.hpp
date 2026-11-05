@@ -1,68 +1,51 @@
-// Event bus: the readable hook surface modules subscribe to. The core owns the detours.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The event bus: connections in priority order, maybe about one object, extension handlers under their guard.
 
 #pragma once
 
-#include "wxl/Common.h"
+#include "wxl/abi/Common.h"
 #include "wxl/Events.hpp"
+#include "wxl/abi/Plugin.h"
 
-// An extension includes wxl/Events.hpp; this header is the core's bus over it.
-#if defined(WXL_EXTENSION)
-WXL_PRAGMA(message("engine/events/Event.hpp is internal to the core: include wxl/Events.hpp"))
-#endif
+#include <cstdint>
 
-/// Event bus: the core installs the detours and republishes them as named events. A subscriber is a
-/// plain function pointer plus an opaque user, so Emit() walks a flat vector with no std::function
-/// or vtable on the path.
 namespace wxl::events
 {
-    /**
-     * Subscribes a handler to an event for the process lifetime.
-     *
-     * @param Event e
-     * @param Handler handler
-     * @param void* user : handed back to the handler on every call
-     */
-    void Subscribe(Event e, Handler handler, void* user);
+    /// Connects a handler, owned by the code running now (runtime::owners::Current()). A subject limits
+    /// it to the events raised about that object. `release` runs once it has ended and no walk is on.
+    /// One made during a walk is called from the next one.
+    int Connect(Event e, WXL_Handle subject, int32_t priority, Handler handler, void* user, WXL_ReleaseFn release,
+                WXL_Connection* out);
 
-    /**
-     * Publishes an event to its subscribers in subscription order, untyped: the ABI shim's path.
-     *
-     * @param Event e
-     * @param void* args : the event's args struct
-     */
+    /// Ends a connection; WXL_E_EXPIRED when it already had.
+    int Disconnect(WXL_Connection connection);
+
+    /// WXL_OK while live, WXL_E_EXPIRED once ended.
+    int Connected(WXL_Connection connection);
+
+    /// Connects a core handler for the process lifetime.
+    inline void Subscribe(Event e, Handler handler, void* user)
+    {
+        WXL_Connection id{};
+        Connect(e, WXL_Handle{}, WXL_PRIORITY_DEFAULT, handler, user, nullptr, &id);
+    }
+
+    /// Raises an event to the connections without a subject.
     void EmitRaw(Event e, const void* args);
 
-    /**
-     * Publishes an event with its own args struct; another struct does not compile.
-     *
-     * @param Args<E> args
-     */
+    /// Raises an event about `subject`: its connections and those without a subject.
+    void EmitFor(Event e, WXL_Handle subject, const void* args);
+
     template <Event E>
     inline void Emit(const Args<E>& args) { EmitRaw(E, &args); }
 
-    WXL_DEPRECATED("use Emit<Event::X>(args), which checks the args type")
-    inline void Emit(Event e, const void* args) { EmitRaw(e, args); }
-
-    /**
-     * Reports whether an event has a subscriber. Subscription happens at load, before the render
-     * detours run, so a hot path may read this unsynchronized.
-     *
-     * @param Event e
-     * @return bool any
-     */
+    /// Whether anything is connected to the event. A hot path may read it unsynchronized.
     bool Any(Event e);
+
+    /// Ends every connection of an extension (runtime::owners::Id); answers how many. Its releases
+    /// are not called: its code is no longer run.
+    uint32_t DropOwner(uint32_t owner);
+
+    /// Ends every connection about an object that expired; answers how many.
+    uint32_t DropSubject(WXL_Handle subject);
 }

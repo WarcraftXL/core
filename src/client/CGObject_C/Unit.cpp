@@ -1,101 +1,55 @@
-// Unit/object detours: publish object update/destroy and target-change events from the message handlers.
-// Copyright (C) 2026 WarcraftXL
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
-#include "engine/hook/Hook.hpp"
-#include "runtime/HookPoints.hpp"
-#include "engine/hook/Registry.hpp"
-#include "engine/events/Event.hpp"
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The object seams: OnObjectUpdate after an update message, OnObjectDestroy before a despawn, OnTargetChanged.
 
 #include "common/Log.hpp"
-#include "wxl/offsets/game/Unit.hpp"
+#include "engine/events/Event.hpp"
+#include "engine/hook/Registry.hpp"
+#include "runtime/HookPoints.hpp"
+#include "wxl/offsets/free/Packet.hpp"
+#include "wxl/offsets/free/Script.hpp"
 
 namespace
 {
-    namespace ev   = wxl::events;
-    namespace unit = wxl::offsets::game::unit;
+    namespace ev  = wxl::events;
+    namespace off = wxl::offsets;
 
-    unit::ObjectMsgHandlerFn g_origObjUpdate  = nullptr;
-    unit::ObjectMsgHandlerFn g_origObjDestroy = nullptr;
-    unit::TargetSetFn        g_origTargetSet  = nullptr;
+    off::Packet_SMSG_DESTROY_OBJECTFn g_origObjectUpdate  = nullptr;
+    off::Packet_SMSG_DESTROY_OBJECTFn g_origObjectDestroy = nullptr;
+    off::Script_TargetUnitFn          g_origTargetUnit    = nullptr;
 
-    /**
-     * @brief Detours the server object update-block handler, emitting OnObjectUpdate after the parse.
-     *
-     * One fire per update message (a batch of created/updated objects). Logs the first fire only.
-     * @param ctx     handler context.
-     * @param opcode  message opcode.
-     * @param msg     message id.
-     * @param packet  inbound message reader.
-     * @return the native handler result.
-     */
-    int __cdecl hkObjUpdate(void* ctx, int opcode, int msg, void* packet)
+    /// One event per update message (a batch of created or updated objects), after it is parsed.
+    int __cdecl ObjectUpdateDetour(void* context, int opcode, int message, void* packet)
     {
-        const int r = g_origObjUpdate(ctx, opcode, msg, packet);
-
-        ev::ObjectUpdateArgs a{ packet, opcode };
-        ev::Emit<ev::Event::OnObjectUpdate>(a);
-
-        static bool logged = false;
-        if (!logged) { logged = true; WLOG_INFO("object: update stream active"); }
-        return r;
+        const int result = g_origObjectUpdate(context, opcode, message, packet);
+        const ev::ObjectUpdateArgs args{ packet, opcode };
+        ev::Emit<ev::Event::OnObjectUpdate>(args);
+        WLOG_INFO_ONCE("object: update stream active");
+        return result;
     }
 
-    /**
-     * @brief Detours the object destroy handler, emitting OnObjectDestroy before the despawn.
-     *
-     * One fire per despawn, while the object is still resident. Logs the first fire only.
-     * @param ctx     handler context.
-     * @param opcode  message opcode.
-     * @param msg     message id.
-     * @param packet  inbound message reader (object GUID + on-death flag).
-     * @return the native handler result.
-     */
-    int __cdecl hkObjDestroy(void* ctx, int opcode, int msg, void* packet)
+    /// Raised while the object is still resident; the packet holds its GUID.
+    int __cdecl ObjectDestroyDetour(void* context, int opcode, int message, void* packet)
     {
-        ev::ObjectDestroyArgs a{ packet, opcode };
-        ev::Emit<ev::Event::OnObjectDestroy>(a);
-
-        static bool logged = false;
-        if (!logged) { logged = true; WLOG_INFO("object: destroy hook active"); }
-        return g_origObjDestroy(ctx, opcode, msg, packet);
+        const ev::ObjectDestroyArgs args{ packet, opcode };
+        ev::Emit<ev::Event::OnObjectDestroy>(args);
+        WLOG_INFO_ONCE("object: destroy hook active");
+        return g_origObjectDestroy(context, opcode, message, packet);
     }
 
-    /**
-     * @brief Detours the target-set API, emitting OnTargetChanged after the new target is applied.
-     * @param scriptState  script state the call ran on.
-     * @return the native function result.
-     */
-    int __cdecl hkTargetSet(void* scriptState)
+    int __cdecl TargetUnitDetour(void* scriptState)
     {
-        const int r = g_origTargetSet(scriptState);
-
-        ev::TargetChangedArgs a{ scriptState };
-        ev::Emit<ev::Event::OnTargetChanged>(a);
-
-        // Log the first fire only: target changes are a per-combat-action event.
-        static bool logged = false;
-        if (!logged) { logged = true; WLOG_INFO("target: hook live (first change)"); }
-        return r;
+        const int result = g_origTargetUnit(scriptState);
+        const ev::TargetChangedArgs args{ scriptState };
+        ev::Emit<ev::Event::OnTargetChanged>(args);
+        WLOG_INFO_ONCE("target: hook live (first change)");
+        return result;
     }
 
     bool InstallUnit()
     {
-        wxl::runtime::hookpoints::Attach("Unit.ObjectUpdate", &hkObjUpdate, &g_origObjUpdate);
-        wxl::runtime::hookpoints::Attach("Unit.ObjectDestroy", &hkObjDestroy, &g_origObjDestroy);
-        wxl::runtime::hookpoints::Attach("Unit.TargetSet", &hkTargetSet, &g_origTargetSet);
+        wxl::runtime::hookpoints::Attach("Packet_SMSG_UPDATE_OBJECT", &ObjectUpdateDetour, &g_origObjectUpdate);
+        wxl::runtime::hookpoints::Attach("Packet_SMSG_DESTROY_OBJECT", &ObjectDestroyDetour, &g_origObjectDestroy);
+        wxl::runtime::hookpoints::Attach("Script_TargetUnit", &TargetUnitDetour, &g_origTargetUnit);
         return true;
     }
 }

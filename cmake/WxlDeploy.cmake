@@ -1,5 +1,5 @@
-# wxl_deploy(<target> <path>): after each build, copies the target's file to ${CLIENT_PATH}/<path>,
-# creating the folder. Without CLIENT_PATH nothing is deployed.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# wxl_deploy(<target> <path>): after each build, copies the target to ${CLIENT_PATH}/<path> when set.
 
 function(wxl_deploy target path)
     if(NOT CLIENT_PATH)
