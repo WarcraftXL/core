@@ -14,6 +14,7 @@
 #include "runtime/extensions/Loader.hpp"
 #include "runtime/extensions/Manifest.hpp"
 #include "runtime/extensions/Services.hpp"
+#include "runtime/net/Messages.hpp"
 #include "runtime/objects/Objects.hpp"
 #include "runtime/settings/SettingsService.hpp"
 #include "wxl/game/Boot.hpp"
@@ -142,6 +143,7 @@ namespace wxl::runtime::extensions
         owners::OnDisable("services", &WithdrawServices);
         storage::Publish();
         objects::Publish();
+        net::Publish();
         settings::Publish();
         script::profiles::Publish();
 

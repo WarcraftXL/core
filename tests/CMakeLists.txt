@@ -67,6 +67,13 @@ target_link_libraries(wxl-objects-test PRIVATE WarcraftXL::sdk)
 target_compile_definitions(wxl-objects-test PRIVATE ${WXL_DEFS})
 add_test(NAME objects COMMAND wxl-objects-test)
 
+# --- the net service's opcodes, owners and message framing --------------------------------------
+add_executable(wxl-net-test NetTest.cpp "${PROJECT_SOURCE_DIR}/src/runtime/net/Messages.cpp")
+target_include_directories(wxl-net-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(wxl-net-test PRIVATE WarcraftXL::sdk)
+target_compile_definitions(wxl-net-test PRIVATE ${WXL_DEFS})
+add_test(NAME net COMMAND wxl-net-test)
+
 # --- the event bus ------------------------------------------------------------------------------
 add_executable(wxl-bus-test
     BusTest.cpp
